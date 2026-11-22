@@ -1,0 +1,420 @@
+package com.luminagallery.drive.ui.navigation
+
+import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.SharedTransitionLayout
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.NavDestination.Companion.hasRoute
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
+import androidx.navigation.toRoute
+import com.luminagallery.drive.LocalAppContainer
+import com.luminagallery.drive.data.local.LocalMediaRepository
+import com.luminagallery.drive.domain.model.MediaType
+import com.luminagallery.drive.domain.model.SpecialGalleryFilter
+import com.luminagallery.drive.ui.components.OneUiMotion
+import com.luminagallery.drive.ui.screens.cleanout.CleanOutScreen
+import com.luminagallery.drive.ui.screens.cleanout.CleanOutViewModel
+import com.luminagallery.drive.ui.screens.collection.CollectionScreen
+import com.luminagallery.drive.ui.screens.collection.CollectionViewModel
+import com.luminagallery.drive.ui.screens.folder.FolderScreen
+import com.luminagallery.drive.ui.screens.folder.FolderViewModel
+import com.luminagallery.drive.ui.screens.home.HomeScreen
+import com.luminagallery.drive.ui.screens.home.HomeViewModel
+import com.luminagallery.drive.ui.screens.search.SearchScreen
+import com.luminagallery.drive.ui.screens.search.SearchViewModel
+import com.luminagallery.drive.ui.screens.settings.SettingsScreen
+import com.luminagallery.drive.ui.screens.settings.SettingsViewModel
+import com.luminagallery.drive.ui.screens.special.LocationsScreen
+import com.luminagallery.drive.ui.screens.special.SpecialCollectionScreen
+import com.luminagallery.drive.ui.screens.viewer.ViewerLaunchContext
+import com.luminagallery.drive.ui.screens.viewer.ViewerScreen
+import com.luminagallery.drive.ui.screens.viewer.ViewerViewModel
+import kotlinx.serialization.Serializable
+
+@Serializable
+data object HomeRoute
+
+@Serializable
+data class FolderRoute(
+    val folderId: String,
+    val folderName: String
+)
+
+@Serializable
+data class CollectionRoute(
+    val collectionId: String,
+    val collectionName: String
+)
+
+@Serializable
+data class SpecialCollectionRoute(
+    val filterName: String
+)
+
+@Serializable
+data object LocationsRoute
+
+@Serializable
+data object CleanOutRoute
+
+@Serializable
+data class ViewerRoute(
+    val folderId: String,
+    val initialItemId: String,
+    val isFlattened: Boolean = false,
+    val isSearchMode: Boolean = false,
+    val searchQuery: String = "",
+    val mediaTypeName: String? = null,
+    val fromEpochMs: Long? = null,
+    val toEpochMs: Long? = null,
+    val specialFilterName: String? = null
+)
+
+@Serializable
+data object SearchRoute
+
+@Serializable
+data object SettingsRoute
+
+private const val KEY_LAST_VIEWED_ITEM_ID = "last_viewed_item_id"
+private val OneUiNavEasing = OneUiMotion.DecelerateEasing
+
+@OptIn(ExperimentalSharedTransitionApi::class)
+@Composable
+fun LuminaNavGraph() {
+    val navController = rememberNavController()
+    val container = LocalAppContainer.current
+    val appContext = LocalContext.current.applicationContext
+
+    SharedTransitionLayout {
+        NavHost(
+            navController = navController,
+            startDestination = HomeRoute,
+            enterTransition = {
+                slideInHorizontally(tween(360, easing = OneUiNavEasing)) { it / 5 } +
+                    scaleIn(tween(360, easing = OneUiNavEasing), initialScale = 0.94f) +
+                    fadeIn(tween(240, easing = OneUiNavEasing))
+            },
+            exitTransition = {
+                // Keep parent rock-solid (no scale jump!) when opening Photo Viewer for seamless 120Hz sharedElement morph!
+                if (targetState.destination.hasRoute<ViewerRoute>()) {
+                    fadeOut(tween(220))
+                } else {
+                    scaleOut(tween(340, easing = OneUiNavEasing), targetScale = 0.93f) +
+                        fadeOut(tween(220))
+                }
+            },
+            popEnterTransition = {
+                if (initialState.destination.hasRoute<ViewerRoute>()) {
+                    fadeIn(tween(200))
+                } else {
+                    scaleIn(tween(340, easing = OneUiNavEasing), initialScale = 0.93f) +
+                        fadeIn(tween(240, easing = OneUiNavEasing))
+                }
+            },
+            popExitTransition = {
+                slideOutHorizontally(tween(310, easing = OneUiNavEasing)) { it / 5 } +
+                    scaleOut(tween(310, easing = OneUiNavEasing), targetScale = 0.94f) +
+                    fadeOut(tween(200))
+            }
+        ) {
+            composable<HomeRoute> { backStackEntry ->
+                val homeViewModel: HomeViewModel = viewModel(
+                    factory = HomeViewModel.Factory(container)
+                )
+                val lastViewedItemId by backStackEntry.savedStateHandle
+                    .getStateFlow<String?>(KEY_LAST_VIEWED_ITEM_ID, null)
+                    .collectAsStateWithLifecycle()
+
+                HomeScreen(
+                    viewModel = homeViewModel,
+                    lastViewedItemId = lastViewedItemId,
+                    onConsumedLastViewedItemId = {
+                        backStackEntry.savedStateHandle[KEY_LAST_VIEWED_ITEM_ID] = null
+                    },
+                    sharedTransitionScope = this@SharedTransitionLayout,
+                    animatedVisibilityScope = this,
+                    onOpenFolder = { folderId, folderName ->
+                        navController.navigate(FolderRoute(folderId, folderName))
+                    },
+                    onOpenCollection = { collectionId, collectionName ->
+                        navController.navigate(CollectionRoute(collectionId, collectionName))
+                    },
+                    onOpenPictureViewer = { itemId ->
+                        navController.navigate(
+                            ViewerRoute(
+                                folderId = LocalMediaRepository.LOCAL_BUCKET_ALL,
+                                initialItemId = itemId
+                            )
+                        )
+                    },
+                    onOpenSearch = {
+                        navController.navigate(SearchRoute)
+                    },
+                    onOpenSettings = {
+                        navController.navigate(SettingsRoute)
+                    },
+                    onOpenSpecialFilter = { filter ->
+                        navController.navigate(SpecialCollectionRoute(filter.name))
+                    },
+                    onOpenLocations = {
+                        navController.navigate(LocationsRoute)
+                    },
+                    onOpenCleanOut = {
+                        navController.navigate(CleanOutRoute)
+                    }
+                )
+            }
+
+            composable<SpecialCollectionRoute> { backStackEntry ->
+                val route = backStackEntry.toRoute<SpecialCollectionRoute>()
+                val filter = runCatching { SpecialGalleryFilter.valueOf(route.filterName) }
+                    .getOrDefault(SpecialGalleryFilter.VIDEOS)
+
+                SpecialCollectionScreen(
+                    filter = filter,
+                    sharedTransitionScope = this@SharedTransitionLayout,
+                    animatedVisibilityScope = this,
+                    onNavigateBack = { navController.popBackStack() },
+                    onOpenViewer = { activeFilter, itemId ->
+                        navController.navigate(
+                            ViewerRoute(
+                                folderId = "",
+                                initialItemId = itemId,
+                                specialFilterName = activeFilter.name
+                            )
+                        )
+                    }
+                )
+            }
+
+            composable<LocationsRoute> {
+                LocationsScreen(
+                    sharedTransitionScope = this@SharedTransitionLayout,
+                    animatedVisibilityScope = this,
+                    onNavigateBack = { navController.popBackStack() },
+                    onOpenPhoto = { item ->
+                        navController.navigate(
+                            ViewerRoute(
+                                folderId = LocalMediaRepository.LOCAL_BUCKET_ALL,
+                                initialItemId = item.id
+                            )
+                        )
+                    }
+                )
+            }
+
+            composable<CleanOutRoute> {
+                val cleanOutViewModel: CleanOutViewModel = viewModel(
+                    factory = CleanOutViewModel.Factory(container)
+                )
+                CleanOutScreen(
+                    viewModel = cleanOutViewModel,
+                    onNavigateBack = { navController.popBackStack() }
+                )
+            }
+
+            // Samsung Gallery Depth-Zoom Expand when opening a Collection or Album!
+            composable<CollectionRoute>(
+                enterTransition = {
+                    scaleIn(tween(380, easing = OneUiNavEasing), initialScale = 0.86f) +
+                        fadeIn(tween(240, easing = OneUiNavEasing))
+                },
+                popExitTransition = {
+                    scaleOut(tween(320, easing = OneUiNavEasing), targetScale = 0.87f) +
+                        fadeOut(tween(200))
+                }
+            ) { backStackEntry ->
+                val route = backStackEntry.toRoute<CollectionRoute>()
+                val collectionViewModel: CollectionViewModel = viewModel(
+                    key = "collection_${route.collectionId}",
+                    factory = CollectionViewModel.Factory(
+                        collectionId = route.collectionId,
+                        collectionName = route.collectionName,
+                        container = container
+                    )
+                )
+                CollectionScreen(
+                    viewModel = collectionViewModel,
+                    onNavigateBack = { navController.popBackStack() },
+                    onNavigateHome = {
+                        navController.popBackStack(route = HomeRoute, inclusive = false)
+                    },
+                    onOpenAlbum = { folderId, folderName ->
+                        navController.navigate(FolderRoute(folderId, folderName))
+                    },
+                    onOpenSubCollection = { subId, subName ->
+                        navController.navigate(CollectionRoute(subId, subName))
+                    },
+                    onOpenBreadcrumbCollection = { ancestorId, ancestorName ->
+                        val popped = navController.popBackStack(
+                            route = CollectionRoute(ancestorId, ancestorName),
+                            inclusive = false
+                        )
+                        if (!popped) {
+                            navController.navigate(CollectionRoute(ancestorId, ancestorName))
+                        }
+                    }
+                )
+            }
+
+            // Samsung Gallery Depth-Zoom Expand when entering an Album / Folder!
+            composable<FolderRoute>(
+                enterTransition = {
+                    scaleIn(tween(380, easing = OneUiNavEasing), initialScale = 0.86f) +
+                        fadeIn(tween(240, easing = OneUiNavEasing))
+                },
+                popExitTransition = {
+                    scaleOut(tween(320, easing = OneUiNavEasing), targetScale = 0.87f) +
+                        fadeOut(tween(200))
+                }
+            ) { backStackEntry ->
+                val route = backStackEntry.toRoute<FolderRoute>()
+                val folderViewModel: FolderViewModel = viewModel(
+                    key = "folder_${route.folderId}",
+                    factory = FolderViewModel.Factory(
+                        folderId = route.folderId,
+                        folderName = route.folderName,
+                        container = container
+                    )
+                )
+
+                val lastViewedItemId by backStackEntry.savedStateHandle
+                    .getStateFlow<String?>(KEY_LAST_VIEWED_ITEM_ID, null)
+                    .collectAsStateWithLifecycle()
+
+                FolderScreen(
+                    viewModel = folderViewModel,
+                    lastViewedItemId = lastViewedItemId,
+                    onConsumedLastViewedItemId = {
+                        backStackEntry.savedStateHandle[KEY_LAST_VIEWED_ITEM_ID] = null
+                    },
+                    sharedTransitionScope = this@SharedTransitionLayout,
+                    animatedVisibilityScope = this,
+                    onNavigateBack = { navController.popBackStack() },
+                    onNavigateHome = {
+                        navController.popBackStack(route = HomeRoute, inclusive = false)
+                    },
+                    onOpenSubfolder = { subId, subName ->
+                        navController.navigate(FolderRoute(subId, subName))
+                    },
+                    onOpenBreadcrumb = { ancestorId, ancestorName ->
+                        val popped = navController.popBackStack(
+                            route = FolderRoute(ancestorId, ancestorName),
+                            inclusive = false
+                        )
+                        if (!popped) {
+                            navController.navigate(FolderRoute(ancestorId, ancestorName))
+                        }
+                    },
+                    onOpenViewer = { folderId, itemId, isFlattened ->
+                        navController.navigate(
+                            ViewerRoute(
+                                folderId = folderId,
+                                initialItemId = itemId,
+                                isFlattened = isFlattened
+                            )
+                        )
+                    },
+                    onOpenSearch = {
+                        navController.navigate(SearchRoute)
+                    }
+                )
+            }
+
+            composable<SearchRoute> {
+                val searchViewModel: SearchViewModel = viewModel(
+                    factory = SearchViewModel.Factory(container)
+                )
+                SearchScreen(
+                    viewModel = searchViewModel,
+                    sharedTransitionScope = this@SharedTransitionLayout,
+                    animatedVisibilityScope = this,
+                    onNavigateBack = { navController.popBackStack() },
+                    onOpenViewer = { itemId, query, mediaType, fromMs, toMs ->
+                        navController.navigate(
+                            ViewerRoute(
+                                folderId = "",
+                                initialItemId = itemId,
+                                isSearchMode = true,
+                                searchQuery = query,
+                                mediaTypeName = mediaType?.name,
+                                fromEpochMs = fromMs,
+                                toEpochMs = toMs
+                            )
+                        )
+                    }
+                )
+            }
+
+            // Pure fast fade for ViewerRoute so Modifier.sharedElement photo morphs stay buttery 120Hz
+            composable<ViewerRoute>(
+                enterTransition = { fadeIn(animationSpec = tween(240, easing = OneUiNavEasing)) },
+                exitTransition = { fadeOut(animationSpec = tween(180)) },
+                popEnterTransition = { fadeIn(animationSpec = tween(200)) },
+                popExitTransition = { fadeOut(animationSpec = tween(200)) }
+            ) { backStackEntry ->
+                val route = backStackEntry.toRoute<ViewerRoute>()
+                val mediaType = route.mediaTypeName?.let {
+                    runCatching { MediaType.valueOf(it) }.getOrNull()
+                }
+                val specialFilter = route.specialFilterName?.let {
+                    runCatching { SpecialGalleryFilter.valueOf(it) }.getOrNull()
+                }
+                val viewerViewModel: ViewerViewModel = viewModel(
+                    key = "viewer_${route.folderId}_${route.initialItemId}_${route.isFlattened}_${route.isSearchMode}_${route.specialFilterName}",
+                    factory = ViewerViewModel.Factory(
+                        launchContext = ViewerLaunchContext(
+                            folderId = route.folderId,
+                            initialItemId = route.initialItemId,
+                            isFlattened = route.isFlattened,
+                            isSearchMode = route.isSearchMode,
+                            searchQuery = route.searchQuery,
+                            mediaTypeFilter = mediaType,
+                            fromEpochMs = route.fromEpochMs,
+                            toEpochMs = route.toEpochMs,
+                            specialFilter = specialFilter
+                        ),
+                        container = container
+                    )
+                )
+                ViewerScreen(
+                    viewModel = viewerViewModel,
+                    sharedTransitionScope = this@SharedTransitionLayout,
+                    animatedVisibilityScope = this,
+                    onActiveItemChanged = { activeId ->
+                        navController.previousBackStackEntry
+                            ?.savedStateHandle
+                            ?.set(KEY_LAST_VIEWED_ITEM_ID, activeId)
+                    },
+                    onDismiss = { navController.popBackStack() }
+                )
+            }
+
+            composable<SettingsRoute> {
+                val settingsViewModel: SettingsViewModel = viewModel(
+                    factory = SettingsViewModel.Factory(
+                        appContext = appContext,
+                        container = container
+                    )
+                )
+                SettingsScreen(
+                    viewModel = settingsViewModel,
+                    onNavigateBack = { navController.popBackStack() }
+                )
+            }
+        }
+    }
+}

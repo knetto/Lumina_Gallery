@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Monochrome / Material You themed icon: separated 6-petal Lumina blossom + center star -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M54,45.2 C55.8,44.43 60.8,37.9 60.8,33.3 C60.8,29.07 59.3,26 54,26 C48.7,26 47.2,29.07 47.2,33.3 C47.2,37.9 52.2,44.43 54,45.2 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M61.62,49.6 C63.19,50.77 71.34,51.84 75.33,49.54 C78.99,47.42 80.9,44.59 78.25,40 C75.6,35.41 72.19,35.65 68.53,37.76 C64.54,40.06 61.39,47.66 61.62,49.6 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M61.62,58.4 C61.39,60.34 64.54,67.94 68.53,70.24 C72.19,72.35 75.6,72.59 78.25,68 C80.9,63.41 78.99,60.58 75.33,58.46 C71.34,56.16 63.19,57.23 61.62,58.4 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M54,62.8 C52.2,63.57 47.2,70.1 47.2,74.7 C47.2,78.93 48.7,82 54,82 C59.3,82 60.8,78.93 60.8,74.7 C60.8,70.1 55.8,63.57 54,62.8 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M46.38,58.4 C44.81,57.23 36.66,56.16 32.67,58.46 C29.01,60.58 27.1,63.41 29.75,68 C32.4,72.59 35.81,72.35 39.47,70.24 C43.46,67.94 46.61,60.34 46.38,58.4 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M46.38,49.6 C46.61,47.66 43.46,40.06 39.47,37.76 C35.81,35.65 32.4,35.41 29.75,40 C27.1,44.59 29.01,47.42 32.67,49.54 C36.66,51.84 44.81,50.77 46.38,49.6 Z" />
+
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M54,46.8 C54.9,51.4 56.6,53.1 61.2,54 C56.6,54.9 54.9,56.6 54,61.2 C53.1,56.6 51.4,54.9 46.8,54 C51.4,53.1 53.1,51.4 54,46.8 Z" />
+</vector>
