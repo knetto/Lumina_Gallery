@@ -29,6 +29,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.Favorite
+import androidx.compose.material.icons.rounded.OfflinePin
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -85,6 +86,7 @@ fun MediaGridItem(
     onLongClick: (() -> Unit)? = null,
     isFavorite: Boolean = false,
     showCloudBadge: Boolean = false,
+    isOfflinePinned: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -260,8 +262,8 @@ fun MediaGridItem(
             )
         }
 
-        // Top-right subtle badges: Favorite red heart + optional Google Drive cloud indicator
-        if (isFavorite || (showCloudBadge && !item.isLocal)) {
+        // Top-right subtle badges: Favorite red heart + offline pin / optional Google Drive cloud indicator
+        if (isFavorite || isOfflinePinned || (showCloudBadge && !item.isLocal)) {
             Row(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
@@ -269,7 +271,14 @@ fun MediaGridItem(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(3.dp)
             ) {
-                if (showCloudBadge && !item.isLocal) {
+                if (isOfflinePinned && !item.isLocal) {
+                    Icon(
+                        imageVector = Icons.Rounded.OfflinePin,
+                        contentDescription = "Available offline",
+                        tint = Color(0xFF69F0AE),
+                        modifier = Modifier.size(13.dp)
+                    )
+                } else if (showCloudBadge && !item.isLocal) {
                     Icon(
                         imageVector = Icons.Rounded.Cloud,
                         contentDescription = "Google Drive",

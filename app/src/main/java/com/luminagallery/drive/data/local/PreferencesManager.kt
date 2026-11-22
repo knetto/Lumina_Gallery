@@ -178,6 +178,40 @@ class PreferencesManager(private val context: Context) {
         }
     }
 
+    val recentSearchesFlow: Flow<List<String>> = context.galleryDataStore.data.map { prefs ->
+        val raw = prefs[KEY_RECENT_SEARCHES].orEmpty()
+        if (raw.isBlank()) emptyList() else raw.split("\n").map { it.trim() }.filter { it.isNotEmpty() }
+    }
+
+    suspend fun addRecentSearch(query: String) {
+        val clean = query.trim().replace("\n", " ")
+        if (clean.length < 2) return
+        context.galleryDataStore.edit { prefs ->
+            val current = prefs[KEY_RECENT_SEARCHES].orEmpty()
+                .split("\n")
+                .map { it.trim() }
+                .filter { it.isNotEmpty() && !it.equals(clean, ignoreCase = true) }
+            val updated = (listOf(clean) + current).take(8)
+            prefs[KEY_RECENT_SEARCHES] = updated.joinToString("\n")
+        }
+    }
+
+    suspend fun removeRecentSearch(query: String) {
+        context.galleryDataStore.edit { prefs ->
+            val updated = prefs[KEY_RECENT_SEARCHES].orEmpty()
+                .split("\n")
+                .map { it.trim() }
+                .filter { it.isNotEmpty() && !it.equals(query, ignoreCase = true) }
+            prefs[KEY_RECENT_SEARCHES] = updated.joinToString("\n")
+        }
+    }
+
+    suspend fun clearRecentSearches() {
+        context.galleryDataStore.edit { prefs ->
+            prefs.remove(KEY_RECENT_SEARCHES)
+        }
+    }
+
     companion object {
         const val DEFAULT_CACHE_MB = 500
         const val DEFAULT_GRID_COLUMNS = 4
@@ -201,5 +235,6 @@ class PreferencesManager(private val context: Context) {
         private val KEY_SWIPE_DOWN_DISMISS = booleanPreferencesKey("swipe_down_to_dismiss")
         private val KEY_PREFETCH_ADJACENT = booleanPreferencesKey("prefetch_adjacent_media")
         private val KEY_WIFI_ONLY_HIGH_RES = booleanPreferencesKey("wifi_only_high_res")
+        private val KEY_RECENT_SEARCHES = stringPreferencesKey("recent_searches")
     }
 }

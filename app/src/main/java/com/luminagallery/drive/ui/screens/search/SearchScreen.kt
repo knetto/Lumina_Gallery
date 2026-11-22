@@ -3,6 +3,7 @@ package com.luminagallery.drive.ui.screens.search
 import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionScope
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,22 +16,30 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.History
+import androidx.compose.material.icons.rounded.Label
+import androidx.compose.material.icons.rounded.LocationOn
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.DateRangePicker
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.InputChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -51,6 +60,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.luminagallery.drive.LocalAppContainer
@@ -75,7 +86,8 @@ fun SearchScreen(
         mediaType: MediaType?,
         fromEpochMs: Long?,
         toEpochMs: Long?
-    ) -> Unit
+    ) -> Unit,
+    onOpenCompare: (List<String>) -> Unit = {}
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val container = LocalAppContainer.current
@@ -129,8 +141,10 @@ fun SearchScreen(
                         TextField(
                             value = uiState.query,
                             onValueChange = viewModel::onQueryChanged,
-                            placeholder = { Text("Search phone & Google Drive…") },
+                            placeholder = { Text("Search city, tag, date, camera, or name…") },
                             singleLine = true,
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                            keyboardActions = KeyboardActions(onSearch = { viewModel.commitSearchHistory() }),
                             colors = TextFieldDefaults.colors(
                                 focusedContainerColor = Color.Transparent,
                                 unfocusedContainerColor = Color.Transparent,
@@ -256,6 +270,97 @@ fun SearchScreen(
                         verticalArrangement = Arrangement.spacedBy(2.dp),
                         modifier = Modifier.fillMaxSize()
                     ) {
+                        // Recent searches & smart city/tag discovery chips when query is blank
+                        if (uiState.query.isBlank() &&
+                            (uiState.recentSearches.isNotEmpty() || uiState.suggestedCities.isNotEmpty() || uiState.suggestedTags.isNotEmpty())
+                        ) {
+                            item(key = "smart_discovery", span = { GridItemSpan(maxLineSpan) }) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    if (uiState.recentSearches.isNotEmpty()) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = "Recent searches",
+                                                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                            Text(
+                                                text = "Clear",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                color = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier
+                                                    .clickable(onClick = viewModel::clearRecentSearches)
+                                                    .padding(4.dp)
+                                            )
+                                        }
+                                        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            items(uiState.recentSearches, key = { "rec_$it" }) { recent ->
+                                                InputChip(
+                                                    selected = false,
+                                                    onClick = { viewModel.onQueryChanged(recent) },
+                                                    label = { Text(recent) },
+                                                    leadingIcon = {
+                                                        Icon(Icons.Rounded.History, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                    },
+                                                    trailingIcon = {
+                                                        Icon(
+                                                            Icons.Rounded.Close,
+                                                            contentDescription = "Remove",
+                                                            modifier = Modifier
+                                                                .size(15.dp)
+                                                                .clickable { viewModel.removeRecentSearch(recent) }
+                                                        )
+                                                    }
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    if (uiState.suggestedCities.isNotEmpty() || uiState.suggestedTags.isNotEmpty()) {
+                                        Text(
+                                            text = "Places & tags",
+                                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            items(uiState.suggestedCities, key = { "city_$it" }) { city ->
+                                                AssistChip(
+                                                    onClick = {
+                                                        viewModel.onQueryChanged(city)
+                                                        viewModel.commitSearchHistory(city)
+                                                    },
+                                                    label = { Text(city) },
+                                                    leadingIcon = {
+                                                        Icon(Icons.Rounded.LocationOn, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                    }
+                                                )
+                                            }
+                                            items(uiState.suggestedTags, key = { "tag_$it" }) { tag ->
+                                                AssistChip(
+                                                    onClick = {
+                                                        viewModel.onQueryChanged(tag)
+                                                        viewModel.commitSearchHistory(tag)
+                                                    },
+                                                    label = { Text("#$tag") },
+                                                    leadingIcon = {
+                                                        Icon(Icons.Rounded.Label, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                    }
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         items(
                             items = uiState.results,
                             key = { it.id },
@@ -274,6 +379,7 @@ fun SearchScreen(
                                     if (uiState.isSelectionMode) {
                                         viewModel.toggleSelection(item.id)
                                     } else {
+                                        viewModel.commitSearchHistory()
                                         onOpenViewer(
                                             item.id,
                                             uiState.query,
@@ -299,11 +405,20 @@ fun SearchScreen(
                 }
             }
 
+            val comparableIds = remember(uiState.selectedIds, uiState.results) {
+                uiState.results.filter { it.id in uiState.selectedIds && !it.isVideo }.map { it.id }
+            }
             MultiSelectActionBar(
                 visible = uiState.isSelectionMode,
                 selectedCount = uiState.selectedIds.size,
                 isExporting = uiState.isExporting,
                 exportProgressText = uiState.exportProgressText,
+                onCompare = if (comparableIds.size in 2..4) {
+                    {
+                        viewModel.clearSelection()
+                        onOpenCompare(comparableIds)
+                    }
+                } else null,
                 onShare = viewModel::shareSelected,
                 onSaveToDevice = viewModel::saveSelectedToDevice,
                 onInfo = viewModel::openSelectedInfo,

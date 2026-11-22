@@ -89,6 +89,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -122,6 +123,7 @@ import com.luminagallery.drive.ui.components.FolderCoverArtwork
 import com.luminagallery.drive.ui.components.FormatUtils
 import com.luminagallery.drive.ui.components.MediaGridItem
 import com.luminagallery.drive.ui.components.MediaGridShimmer
+import com.luminagallery.drive.ui.components.MoveCopyToAlbumSheet
 import com.luminagallery.drive.ui.components.MultiSelectActionBar
 import com.luminagallery.drive.LocalAppContainer
 import com.luminagallery.drive.LocalGalleryImageLoader
@@ -132,6 +134,7 @@ import com.luminagallery.drive.ui.components.oneUiClickable
 import com.luminagallery.drive.ui.components.prefetchAlbumThumbnails
 import com.luminagallery.drive.ui.screens.stories.StorySlideshowDialog
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 private val SidebarEasing = OneUiMotion.DecelerateEasing
 
@@ -148,21 +151,29 @@ fun FolderScreen(
     onOpenSubfolder: (folderId: String, folderName: String) -> Unit,
     onOpenBreadcrumb: (folderId: String, folderName: String) -> Unit,
     onOpenViewer: (folderId: String, itemId: String, isFlattened: Boolean) -> Unit,
-    onOpenSearch: () -> Unit
+    onOpenSearch: () -> Unit,
+    onOpenCompare: (List<String>) -> Unit = {}
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val appContainer = LocalAppContainer.current
     val imageLoader = LocalGalleryImageLoader.current
     val haptic = LocalHapticFeedback.current
+    val scope = rememberCoroutineScope()
     val gridState = rememberLazyGridState()
     val snackbarHostState = remember { SnackbarHostState() }
+
+    val offlineIds by appContainer.offlineMediaManager.offlineItemIdsFlow
+        .collectAsStateWithLifecycle(initialValue = emptySet())
+    val customCovers by appContainer.galleryExtrasRepository.customAlbumCoversFlow
+        .collectAsStateWithLifecycle(initialValue = emptyMap())
 
     var showOverflowMenu by remember { mutableStateOf(false) }
     var showFilterDialog by remember { mutableStateOf(false) }
     var showGroupByDialog by remember { mutableStateOf(false) }
     var showSortDialog by remember { mutableStateOf(false) }
     var showSlideshow by remember { mutableStateOf(false) }
+    var showMoveCopySheet by remember { mutableStateOf(false) }
 
     BackHandler(enabled = uiState.isSelectionMode) {
         viewModel.clearSelection()
@@ -378,6 +389,49 @@ fun FolderScreen(
                                                     if (isFlattened) FolderViewMode.HIERARCHY
                                                     else FolderViewMode.FLATTENED
                                                 )
+                                            }
+                                        )
+                                        if (uiState.mediaItems.isNotEmpty()) {
+                                            val allOffline = uiState.mediaItems.all { it.id in offlineIds }
+                                            DropdownMenuItem(
+                                                text = {
+                                                    Text(if (allOffline) "Remove offline copies" else "Keep album offline")
+                                                },
+                                                onClick = {
+                                                    showOverflowMenu = false
+                                                    val targetFolderId = uiState.folderId
+                                                    val targetItems = uiState.mediaItems
+                                                    scope.launch {
+                                                        if (allOffline) {
+                                                            appContainer.offlineMediaManager.unpinFolderOffline(targetFolderId)
+                                                            viewModel.showMessage("Removed offline copies for ${uiState.folderName}")
+                                                        } else {
+                                                            viewModel.showMessage("Downloading ${targetItems.size} items for offline viewing…")
+                                                            val res = appContainer.offlineMediaManager.pinFolderOffline(
+                                                                folderId = targetFolderId,
+                                                                items = targetItems
+                                                            )
+                                                            res.onSuccess { count ->
+                                                                viewModel.showMessage("Pinned $count item${if (count == 1) "" else "s"} offline")
+                                                            }.onFailure { err ->
+                                                                viewModel.showMessage(err.localizedMessage ?: "Offline download failed")
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            )
+                                        }
+                                    }
+                                    if (uiState.folderId in customCovers) {
+                                        DropdownMenuItem(
+                                            text = { Text("Reset album cover") },
+                                            onClick = {
+                                                showOverflowMenu = false
+                                                val targetFolderId = uiState.folderId
+                                                scope.launch {
+                                                    appContainer.galleryExtrasRepository.clearCustomAlbumCover(targetFolderId)
+                                                    viewModel.showMessage("Album cover reset to default")
+                                                }
                                             }
                                         )
                                     }
@@ -731,6 +785,7 @@ fun FolderScreen(
                                                             isSelectionMode = uiState.isSelectionMode,
                                                             isSelected = isSelected,
                                                             isFavorite = entry.item.id in uiState.favoriteItemIds,
+                                                            isOfflinePinned = entry.item.id in offlineIds,
                                                             showCloudBadge = uiState.showCloudBadges,
                                                             sharedTransitionScope = sharedTransitionScope,
                                                             animatedVisibilityScope = animatedVisibilityScope,
@@ -769,6 +824,13 @@ fun FolderScreen(
                 }
             }
 
+            val selectedMediaItems = remember(uiState.mediaItems, uiState.selectedIds) {
+                uiState.mediaItems.filter { it.id in uiState.selectedIds }
+            }
+            val comparableIds = remember(selectedMediaItems) {
+                selectedMediaItems.filter { !it.isVideo }.map { it.id }
+            }
+
             MultiSelectActionBar(
                 visible = uiState.isSelectionMode,
                 selectedCount = uiState.selectedIds.size,
@@ -777,9 +839,35 @@ fun FolderScreen(
                 onShare = viewModel::shareSelected,
                 onSaveToDevice = if (uiState.isLocalAlbum) null else viewModel::saveSelectedToDevice,
                 onDeleteLocal = if (uiState.isLocalAlbum) viewModel::requestTrashSelectedLocal else null,
+                onCompare = if (comparableIds.size in 2..4) {
+                    {
+                        viewModel.clearSelection()
+                        onOpenCompare(comparableIds)
+                    }
+                } else null,
+                onMoveCopyLocal = if (uiState.isLocalAlbum && selectedMediaItems.isNotEmpty()) {
+                    { showMoveCopySheet = true }
+                } else null,
                 onInfo = viewModel::openSelectedInfo,
                 onClearSelection = viewModel::clearSelection,
                 modifier = Modifier.align(Alignment.BottomCenter)
+            )
+        }
+    }
+
+    if (showMoveCopySheet && uiState.isLocalAlbum) {
+        val selectedForMove = remember(uiState.mediaItems, uiState.selectedIds) {
+            uiState.mediaItems.filter { it.id in uiState.selectedIds }
+        }
+        if (selectedForMove.isNotEmpty()) {
+            MoveCopyToAlbumSheet(
+                items = selectedForMove,
+                onDismiss = { showMoveCopySheet = false },
+                onCompleted = { msg ->
+                    showMoveCopySheet = false
+                    viewModel.clearSelection()
+                    viewModel.showMessage(msg)
+                }
             )
         }
     }

@@ -3,10 +3,12 @@ package com.luminagallery.drive.data.repository
 import androidx.compose.runtime.Immutable
 import com.luminagallery.drive.data.local.GalleryDatabase
 import com.luminagallery.drive.data.local.LocalMediaRepository
+import com.luminagallery.drive.data.local.entity.CustomAlbumCoverEntity
 import com.luminagallery.drive.data.local.entity.FavoriteItemEntity
 import com.luminagallery.drive.data.local.entity.FavoriteStoryEntity
 import com.luminagallery.drive.data.local.entity.HiddenAlbumEntity
 import com.luminagallery.drive.data.local.entity.IgnoredCleanOutEntity
+import com.luminagallery.drive.data.local.entity.MediaAnnotationEntity
 import com.luminagallery.drive.data.local.entity.PhotoLocationEntity
 import com.luminagallery.drive.domain.model.GalleryStory
 import com.luminagallery.drive.domain.model.GeoTaggedMediaItem
@@ -74,6 +76,60 @@ class GalleryExtrasRepository(
 
     val ignoredCleanOutIdsFlow: Flow<Set<String>> = extrasDao.observeIgnoredCleanOutIds()
         .map { it.toSet() }
+
+    val customAlbumCoversFlow: Flow<Map<String, CustomAlbumCoverEntity>> =
+        extrasDao.observeCustomAlbumCovers()
+            .map { list -> list.associateBy { it.albumId } }
+            .flowOn(Dispatchers.Default)
+
+    val mediaAnnotationsFlow: Flow<Map<String, MediaAnnotationEntity>> =
+        extrasDao.observeAllAnnotations()
+            .map { list -> list.associateBy { it.itemId } }
+            .flowOn(Dispatchers.Default)
+
+    val cachedLocationsMapFlow: Flow<Map<String, PhotoLocationEntity>> =
+        extrasDao.observeCachedLocations()
+            .map { list -> list.associateBy { it.itemId } }
+            .flowOn(Dispatchers.Default)
+
+    fun observeAnnotation(itemId: String): Flow<MediaAnnotationEntity?> =
+        extrasDao.observeAnnotation(itemId)
+
+    suspend fun setCustomAlbumCover(albumId: String, item: MediaItem) = withContext(Dispatchers.IO) {
+        extrasDao.upsertCustomAlbumCover(
+            CustomAlbumCoverEntity(
+                albumId = albumId,
+                coverItemId = item.id,
+                coverThumbnailLink = if (item.isLocal) item.localContentUri else item.thumbnailLink,
+                isLocal = item.isLocal,
+                isVideo = item.isVideo,
+                sizeBytes = item.sizeBytes,
+                updatedAtEpochMs = System.currentTimeMillis()
+            )
+        )
+    }
+
+    suspend fun clearCustomAlbumCover(albumId: String) = withContext(Dispatchers.IO) {
+        extrasDao.deleteCustomAlbumCover(albumId)
+    }
+
+    suspend fun saveAnnotation(itemId: String, tags: List<String>, note: String) =
+        withContext(Dispatchers.IO) {
+            val cleanTags = tags.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+            val cleanNote = note.trim()
+            if (cleanTags.isEmpty() && cleanNote.isEmpty()) {
+                extrasDao.deleteAnnotation(itemId)
+            } else {
+                extrasDao.upsertAnnotation(
+                    MediaAnnotationEntity(
+                        itemId = itemId,
+                        tagsCsv = cleanTags.joinToString(","),
+                        note = cleanNote,
+                        updatedAtEpochMs = System.currentTimeMillis()
+                    )
+                )
+            }
+        }
 
     suspend fun ignoreCleanOutItems(itemIds: Collection<String>) = withContext(Dispatchers.IO) {
         if (itemIds.isEmpty()) return@withContext

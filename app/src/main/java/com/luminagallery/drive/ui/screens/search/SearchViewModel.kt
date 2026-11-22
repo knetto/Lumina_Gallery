@@ -8,17 +8,21 @@ import androidx.lifecycle.viewModelScope
 import com.luminagallery.drive.AppContainer
 import com.luminagallery.drive.data.local.LocalMediaRepository
 import com.luminagallery.drive.data.local.PreferencesManager
+import com.luminagallery.drive.data.local.entity.MediaAnnotationEntity
+import com.luminagallery.drive.data.local.entity.PhotoLocationEntity
 import com.luminagallery.drive.data.remote.NetworkMonitor
+import com.luminagallery.drive.data.repository.GalleryExtrasRepository
 import com.luminagallery.drive.data.repository.GalleryRepository
 import com.luminagallery.drive.domain.model.MediaItem
 import com.luminagallery.drive.domain.model.MediaType
 import com.luminagallery.drive.domain.usecase.ExportMediaUseCase
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
-import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -44,6 +48,9 @@ data class SearchUiState(
     val resolvedFromEpochMs: Long? = null,
     val resolvedToEpochMs: Long? = null,
     val results: List<MediaItem> = emptyList(),
+    val recentSearches: List<String> = emptyList(),
+    val suggestedCities: List<String> = emptyList(),
+    val suggestedTags: List<String> = emptyList(),
     val gridColumns: Int = 3,
     val isUnmeteredWifi: Boolean = true,
     val selectedIds: Set<String> = emptySet(),
@@ -67,6 +74,7 @@ private data class SearchQueryParams(
 class SearchViewModel(
     private val repository: GalleryRepository,
     private val localMediaRepository: LocalMediaRepository,
+    private val extrasRepository: GalleryExtrasRepository,
     private val preferencesManager: PreferencesManager,
     private val exportMediaUseCase: ExportMediaUseCase,
     networkMonitor: NetworkMonitor
@@ -85,7 +93,7 @@ class SearchViewModel(
     private val snackbarFlow = MutableStateFlow<String?>(null)
 
     private val filterParamsFlow = combine(
-        queryFlow.debounce(120L),
+        queryFlow.debounce(110L),
         mediaTypeFlow,
         datePresetFlow,
         customRangeFlow
@@ -94,24 +102,67 @@ class SearchViewModel(
         SearchQueryParams(query, type, from, to)
     }
 
-    private val searchResultsFlow = filterParamsFlow.flatMapLatest { params ->
-        combine(
-            localMediaRepository.searchLocalMedia(
-                query = params.query,
-                mediaType = params.mediaType,
-                fromEpochMs = params.fromEpochMs,
-                toEpochMs = params.toEpochMs
-            ),
-            repository.searchMedia(
-                query = params.query,
-                mediaType = params.mediaType,
-                fromEpochMs = params.fromEpochMs,
-                toEpochMs = params.toEpochMs
-            )
-        ) { localItems, driveItems ->
-            (localItems + driveItems).sortedByDescending { it.createdTimeEpochMs }
+    // Combined offline index across phone media, cached Drive media, GPS cities, and custom tags/notes
+    private val allSearchableMediaFlow = combine(
+        localMediaRepository.observeAllLocalMedia(),
+        repository.searchMedia("", null, null, null)
+    ) { local, drive ->
+        (local + drive).sortedByDescending { it.createdTimeEpochMs }
+    }.flowOn(Dispatchers.Default)
+
+    private val enrichmentFlow = combine(
+        extrasRepository.cachedLocationsMapFlow,
+        extrasRepository.mediaAnnotationsFlow,
+        preferencesManager.recentSearchesFlow
+    ) { locs, annotations, recents ->
+        SearchEnrichment(
+            locationsByItem = locs,
+            annotationsByItem = annotations,
+            recentSearches = recents,
+            topCities = locs.values
+                .map { it.city }
+                .filter { it.isNotBlank() && !it.contains("°") && !it.startsWith("Location") }
+                .groupingBy { it }
+                .eachCount()
+                .entries
+                .sortedByDescending { it.value }
+                .take(8)
+                .map { it.key },
+            topTags = annotations.values
+                .flatMap { it.tagsCsv.split(",") }
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .groupingBy { it }
+                .eachCount()
+                .entries
+                .sortedByDescending { it.value }
+                .take(10)
+                .map { it.key }
+        )
+    }.flowOn(Dispatchers.Default)
+
+    private val searchResultsFlow = combine(
+        filterParamsFlow,
+        allSearchableMediaFlow,
+        enrichmentFlow
+    ) { params, allMedia, enrich ->
+        val tokens = params.query.trim()
+            .split(Regex("\\s+"))
+            .map { it.removePrefix("#").trim() }
+            .filter { it.isNotEmpty() }
+
+        val filtered = allMedia.filter { item ->
+            if (params.mediaType != null && item.mediaType != params.mediaType) return@filter false
+            if (params.fromEpochMs != null && item.createdTimeEpochMs < params.fromEpochMs) return@filter false
+            if (params.toEpochMs != null && item.createdTimeEpochMs > params.toEpochMs) return@filter false
+            if (tokens.isEmpty()) return@filter true
+
+            val loc = enrich.locationsByItem[item.id]
+            val ann = enrich.annotationsByItem[item.id]
+            tokens.all { token -> matchesToken(item, loc, ann, token) }
         }
-    }
+        filtered to enrich
+    }.flowOn(Dispatchers.Default)
 
     private val queryControlsFlow = combine(
         queryFlow,
@@ -138,7 +189,7 @@ class SearchViewModel(
         preferencesManager.preferencesFlow,
         networkMonitor.networkState,
         interactionFlow
-    ) { controls, results, prefs, net, interaction ->
+    ) { controls, (results, enrich), prefs, net, interaction ->
         val (resolvedFrom, resolvedTo) = resolveDateRange(
             controls.preset,
             controls.customFrom,
@@ -153,8 +204,11 @@ class SearchViewModel(
             resolvedFromEpochMs = resolvedFrom,
             resolvedToEpochMs = resolvedTo,
             results = results,
+            recentSearches = enrich.recentSearches,
+            suggestedCities = enrich.topCities,
+            suggestedTags = enrich.topTags,
             gridColumns = prefs.gridColumns,
-            isUnmeteredWifi = net.isUnmeteredWifi,
+            isUnmeteredWifi = net.isUnmeteredWifi || !prefs.wifiOnlyHighRes,
             selectedIds = interaction.selectedIds,
             isExporting = interaction.isExporting,
             exportProgressText = interaction.exportProgressText,
@@ -169,8 +223,53 @@ class SearchViewModel(
         initialValue = SearchUiState()
     )
 
+    private fun matchesToken(
+        item: MediaItem,
+        location: PhotoLocationEntity?,
+        annotation: MediaAnnotationEntity?,
+        token: String
+    ): Boolean {
+        if (item.name.contains(token, ignoreCase = true)) return true
+        if (item.relativePath?.contains(token, ignoreCase = true) == true) return true
+        if (item.storagePath?.contains(token, ignoreCase = true) == true) return true
+        if (item.monthYearLabel.contains(token, ignoreCase = true)) return true
+        if (item.fullDateLabel.contains(token, ignoreCase = true)) return true
+        if (item.exif.cameraMake?.contains(token, ignoreCase = true) == true) return true
+        if (item.exif.cameraModel?.contains(token, ignoreCase = true) == true) return true
+        if (item.exif.lens?.contains(token, ignoreCase = true) == true) return true
+        if (location != null && (
+                location.city.contains(token, ignoreCase = true) ||
+                    location.country.contains(token, ignoreCase = true)
+                )
+        ) return true
+        if (annotation != null && (
+                annotation.tagsCsv.contains(token, ignoreCase = true) ||
+                    annotation.note.contains(token, ignoreCase = true)
+                )
+        ) return true
+        if (token.equals("video", ignoreCase = true) && item.isVideo) return true
+        if (token.equals("raw", ignoreCase = true) && item.isRaw) return true
+        if (token.equals("drive", ignoreCase = true) && !item.isLocal) return true
+        return false
+    }
+
     fun onQueryChanged(value: String) {
         queryFlow.value = value
+    }
+
+    fun commitSearchHistory(query: String = queryFlow.value) {
+        val clean = query.trim()
+        if (clean.length >= 2) {
+            viewModelScope.launch { preferencesManager.addRecentSearch(clean) }
+        }
+    }
+
+    fun removeRecentSearch(query: String) {
+        viewModelScope.launch { preferencesManager.removeRecentSearch(query) }
+    }
+
+    fun clearRecentSearches() {
+        viewModelScope.launch { preferencesManager.clearRecentSearches() }
     }
 
     fun onMediaTypeSelected(type: MediaType?) {
@@ -297,6 +396,14 @@ class SearchViewModel(
         }
     }
 
+    private data class SearchEnrichment(
+        val locationsByItem: Map<String, PhotoLocationEntity>,
+        val annotationsByItem: Map<String, MediaAnnotationEntity>,
+        val recentSearches: List<String>,
+        val topCities: List<String>,
+        val topTags: List<String>
+    )
+
     private data class SearchControls(
         val query: String,
         val mediaType: MediaType?,
@@ -319,6 +426,7 @@ class SearchViewModel(
         override fun <T : ViewModel> create(modelClass: Class<T>): T = SearchViewModel(
             repository = container.galleryRepository,
             localMediaRepository = container.localMediaRepository,
+            extrasRepository = container.galleryExtrasRepository,
             preferencesManager = container.preferencesManager,
             exportMediaUseCase = container.exportMediaUseCase,
             networkMonitor = container.networkMonitor

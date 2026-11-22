@@ -42,3 +42,34 @@ data class PhotoLocationEntity(
     val city: String,
     val country: String
 )
+
+@Entity(tableName = "custom_album_covers")
+data class CustomAlbumCoverEntity(
+    @PrimaryKey
+    val albumId: String,
+    val coverItemId: String,
+    val coverThumbnailLink: String?,
+    val isLocal: Boolean,
+    val isVideo: Boolean,
+    val sizeBytes: Long,
+    val updatedAtEpochMs: Long
+)
+
+@Entity(tableName = "media_annotations")
+data class MediaAnnotationEntity(
+    @PrimaryKey
+    val itemId: String,
+    val tagsCsv: String,
+    val note: String,
+    val updatedAtEpochMs: Long
+)
+
+@Entity(tableName = "offline_pinned_items")
+data class OfflinePinnedEntity(
+    @PrimaryKey
+    val itemId: String,
+    val folderId: String?,
+    val localFilePath: String,
+    val sizeBytes: Long,
+    val pinnedAtEpochMs: Long
+)

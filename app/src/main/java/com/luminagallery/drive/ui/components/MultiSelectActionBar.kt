@@ -18,7 +18,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.DriveFileMove
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Compare
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Info
@@ -43,6 +45,8 @@ fun MultiSelectActionBar(
     onShare: () -> Unit,
     onSaveToDevice: (() -> Unit)? = null,
     onDeleteLocal: (() -> Unit)? = null,
+    onCompare: (() -> Unit)? = null,
+    onMoveCopyLocal: (() -> Unit)? = null,
     onInfo: () -> Unit,
     onClearSelection: () -> Unit,
     modifier: Modifier = Modifier
@@ -102,7 +106,21 @@ fun MultiSelectActionBar(
                         strokeWidth = 2.5.dp
                     )
                 } else {
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                        if (onCompare != null && selectedCount in 2..4) {
+                            ActionIconPill(
+                                icon = Icons.Rounded.Compare,
+                                contentDescription = "Compare photos",
+                                onClick = onCompare
+                            )
+                        }
+                        if (onMoveCopyLocal != null) {
+                            ActionIconPill(
+                                icon = Icons.AutoMirrored.Rounded.DriveFileMove,
+                                contentDescription = "Move or copy to album",
+                                onClick = onMoveCopyLocal
+                            )
+                        }
                         ActionIconPill(
                             icon = Icons.Rounded.Share,
                             contentDescription = "Share",

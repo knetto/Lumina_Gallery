@@ -13,6 +13,7 @@ import com.luminagallery.drive.data.remote.auth.ServiceAccountTokenManager
 import com.luminagallery.drive.data.repository.CoilCacheManager
 import com.luminagallery.drive.data.repository.GalleryExtrasRepository
 import com.luminagallery.drive.data.repository.GalleryRepository
+import com.luminagallery.drive.data.repository.OfflineMediaManager
 import com.luminagallery.drive.data.repository.sync.DriveSyncScheduler
 import com.luminagallery.drive.domain.model.AlbumSortMode
 import com.luminagallery.drive.domain.model.MainTab
@@ -46,6 +47,8 @@ data class SettingsUiState(
     val networkState: NetworkState = NetworkState(),
     val hiddenAlbumCount: Int = 0,
     val ignoredCleanOutCount: Int = 0,
+    val offlinePinnedCount: Int = 0,
+    val offlinePinnedBytes: Long = 0L,
     val isClearingCache: Boolean = false,
     val snackbarMessage: String? = null
 )
@@ -58,6 +61,7 @@ class SettingsViewModel(
     private val coilCacheManager: CoilCacheManager,
     private val repository: GalleryRepository,
     private val extrasRepository: GalleryExtrasRepository,
+    private val offlineMediaManager: OfflineMediaManager,
     private val syncUseCase: SyncGalleryUseCase,
     networkMonitor: NetworkMonitor
 ) : ViewModel() {
@@ -81,8 +85,11 @@ class SettingsViewModel(
 
     private val extrasCountsFlow = combine(
         extrasRepository.hiddenAlbumIdsFlow,
-        extrasRepository.ignoredCleanOutIdsFlow
-    ) { hidden, ignored -> hidden.size to ignored.size }
+        extrasRepository.ignoredCleanOutIdsFlow,
+        offlineMediaManager.offlineItemsFlow
+    ) { hidden, ignored, offlineList ->
+        ExtrasSummary(hidden.size, ignored.size, offlineList.size, offlineList.sumOf { it.sizeBytes })
+    }
 
     private val localStatusFlow = combine(
         repository.syncStatusFlow,
@@ -90,8 +97,17 @@ class SettingsViewModel(
         extrasCountsFlow,
         isClearingCacheFlow,
         snackbarFlow
-    ) { sync, net, (hiddenCount, ignoredCount), clearing, snack ->
-        SettingsLocalStatus(sync, net, hiddenCount, ignoredCount, clearing, snack)
+    ) { sync, net, summary, clearing, snack ->
+        SettingsLocalStatus(
+            syncStatus = sync,
+            networkState = net,
+            hiddenAlbumCount = summary.hiddenCount,
+            ignoredCleanOutCount = summary.ignoredCount,
+            offlineCount = summary.offlineCount,
+            offlineBytes = summary.offlineBytes,
+            isClearingCache = clearing,
+            snackbarMessage = snack
+        )
     }
 
     val uiState: StateFlow<SettingsUiState> = combine(
@@ -108,6 +124,8 @@ class SettingsViewModel(
             networkState = local.networkState,
             hiddenAlbumCount = local.hiddenAlbumCount,
             ignoredCleanOutCount = local.ignoredCleanOutCount,
+            offlinePinnedCount = local.offlineCount,
+            offlinePinnedBytes = local.offlineBytes,
             isClearingCache = local.isClearingCache,
             snackbarMessage = local.snackbarMessage
         )
@@ -292,6 +310,13 @@ class SettingsViewModel(
         }
     }
 
+    fun clearAllOfflineMedia() {
+        viewModelScope.launch {
+            offlineMediaManager.clearAllOffline()
+            snackbarFlow.value = "Removed all offline Google Drive downloads"
+        }
+    }
+
     fun resetSettingsToDefaults() {
         viewModelScope.launch {
             val defaults = UserPreferences()
@@ -328,11 +353,20 @@ class SettingsViewModel(
         snackbarFlow.value = null
     }
 
+    private data class ExtrasSummary(
+        val hiddenCount: Int,
+        val ignoredCount: Int,
+        val offlineCount: Int,
+        val offlineBytes: Long
+    )
+
     private data class SettingsLocalStatus(
         val syncStatus: SyncStatus,
         val networkState: NetworkState,
         val hiddenAlbumCount: Int,
         val ignoredCleanOutCount: Int,
+        val offlineCount: Int,
+        val offlineBytes: Long,
         val isClearingCache: Boolean,
         val snackbarMessage: String?
     )
@@ -350,6 +384,7 @@ class SettingsViewModel(
             coilCacheManager = container.coilCacheManager,
             repository = container.galleryRepository,
             extrasRepository = container.galleryExtrasRepository,
+            offlineMediaManager = container.offlineMediaManager,
             syncUseCase = container.syncGalleryUseCase,
             networkMonitor = container.networkMonitor
         ) as T

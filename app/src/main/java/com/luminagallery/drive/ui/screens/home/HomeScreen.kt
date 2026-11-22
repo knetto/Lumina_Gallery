@@ -130,6 +130,7 @@ import com.luminagallery.drive.ui.components.ExifMetadataBottomSheet
 import com.luminagallery.drive.ui.components.FastScrollThumb
 import com.luminagallery.drive.ui.components.FormatUtils
 import com.luminagallery.drive.ui.components.MediaGridItem
+import com.luminagallery.drive.ui.components.MoveCopyToAlbumSheet
 import com.luminagallery.drive.ui.components.MultiSelectActionBar
 import com.luminagallery.drive.ui.components.OneUiBottomNavBar
 import com.luminagallery.drive.ui.components.OneUiMotion
@@ -155,7 +156,8 @@ fun HomeScreen(
     onOpenSettings: () -> Unit,
     onOpenSpecialFilter: (SpecialGalleryFilter) -> Unit,
     onOpenLocations: () -> Unit,
-    onOpenCleanOut: () -> Unit
+    onOpenCleanOut: () -> Unit,
+    onOpenCompare: (List<String>) -> Unit = {}
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -176,6 +178,7 @@ fun HomeScreen(
     var pendingGroupPair by remember { mutableStateOf<Pair<AlbumGridItem, AlbumGridItem>?>(null) }
     var showGroupSelectedDialog by remember { mutableStateOf(false) }
     var showMoveSelectedSheet by remember { mutableStateOf(false) }
+    var showMoveCopyPicturesSheet by remember { mutableStateOf(false) }
     var renameCollectionTarget by remember { mutableStateOf<Pair<String, String>?>(null) }
 
     BackHandler(enabled = uiState.isPictureSelectionMode || uiState.isAlbumSelectionMode) {
@@ -723,6 +726,16 @@ fun HomeScreen(
                 modifier = Modifier.align(Alignment.BottomCenter)
             )
 
+            val selectedPictures = remember(uiState.timelineEntries, uiState.selectedPictureIds) {
+                uiState.timelineEntries
+                    .filterIsInstance<PicturesTimelineEntry.PhotoTile>()
+                    .map { it.item }
+                    .filter { it.id in uiState.selectedPictureIds }
+            }
+            val comparablePictureIds = remember(selectedPictures) {
+                selectedPictures.filter { !it.isVideo }.map { it.id }
+            }
+
             // Multi-select bar for Pictures tab
             MultiSelectActionBar(
                 visible = uiState.isPictureSelectionMode,
@@ -732,9 +745,38 @@ fun HomeScreen(
                 onShare = viewModel::shareSelectedPictures,
                 onSaveToDevice = null,
                 onDeleteLocal = viewModel::requestTrashSelectedPictures,
+                onCompare = if (comparablePictureIds.size in 2..4) {
+                    {
+                        viewModel.clearPictureSelection()
+                        onOpenCompare(comparablePictureIds)
+                    }
+                } else null,
+                onMoveCopyLocal = if (selectedPictures.isNotEmpty()) {
+                    { showMoveCopyPicturesSheet = true }
+                } else null,
                 onInfo = viewModel::openSelectedPictureInfo,
                 onClearSelection = viewModel::clearPictureSelection,
                 modifier = Modifier.align(Alignment.BottomCenter)
+            )
+        }
+    }
+
+    if (showMoveCopyPicturesSheet) {
+        val itemsToMove = remember(uiState.timelineEntries, uiState.selectedPictureIds) {
+            uiState.timelineEntries
+                .filterIsInstance<PicturesTimelineEntry.PhotoTile>()
+                .map { it.item }
+                .filter { it.id in uiState.selectedPictureIds }
+        }
+        if (itemsToMove.isNotEmpty()) {
+            MoveCopyToAlbumSheet(
+                items = itemsToMove,
+                onDismiss = { showMoveCopyPicturesSheet = false },
+                onCompleted = { msg ->
+                    showMoveCopyPicturesSheet = false
+                    viewModel.clearPictureSelection()
+                    viewModel.showMessage(msg)
+                }
             )
         }
     }

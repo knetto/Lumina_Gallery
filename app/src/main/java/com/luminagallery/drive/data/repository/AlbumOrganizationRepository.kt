@@ -6,6 +6,7 @@ import com.luminagallery.drive.data.local.LocalMediaRepository
 import com.luminagallery.drive.data.local.PreferencesManager
 import com.luminagallery.drive.data.local.entity.AlbumCollectionEntity
 import com.luminagallery.drive.data.local.entity.AlbumLayoutEntity
+import com.luminagallery.drive.data.local.entity.CustomAlbumCoverEntity
 import com.luminagallery.drive.domain.model.AlbumCoverPreview
 import com.luminagallery.drive.domain.model.AlbumGridItem
 import com.luminagallery.drive.domain.model.AlbumSortMode
@@ -58,19 +59,47 @@ class AlbumOrganizationRepository(
         local + drive
     }.flowOn(Dispatchers.Default)
 
+    private fun applyCustomCovers(
+        albums: List<DriveFolder>,
+        customCovers: Map<String, CustomAlbumCoverEntity>
+    ): List<DriveFolder> {
+        if (customCovers.isEmpty()) return albums
+        return albums.map { folder ->
+            val override = customCovers[folder.id] ?: return@map folder
+            val preview = AlbumCoverPreview(
+                itemId = override.coverItemId,
+                thumbnailLink = override.coverThumbnailLink,
+                isLocal = override.isLocal,
+                isVideo = override.isVideo,
+                sizeBytes = override.sizeBytes
+            )
+            folder.copy(
+                coverItemId = override.coverItemId,
+                coverThumbnailLink = override.coverThumbnailLink,
+                coverIsVideo = override.isVideo,
+                coverSizeBytes = override.sizeBytes,
+                previewCovers = listOf(preview)
+            )
+        }
+    }
+
     fun observeGridItems(parentCollectionId: String?): Flow<List<AlbumGridItem>> = combine(
         localMediaRepository.observeLocalAlbums(),
         galleryRepository.observePinnedRoots(),
         collectionDao.observeAllCollections(),
         collectionDao.observeAllLayouts(),
-        combine(extrasRepository.hiddenAlbumIdsFlow, preferencesManager.preferencesFlow) { hidden, prefs ->
-            hidden to prefs.albumSortMode
+        combine(
+            extrasRepository.hiddenAlbumIdsFlow,
+            preferencesManager.preferencesFlow,
+            extrasRepository.customAlbumCoversFlow
+        ) { hidden, prefs, covers ->
+            Triple(hidden, prefs.albumSortMode, covers)
         }
-    ) { localAlbums, driveRoots, collections, layouts, (hiddenIds, sortMode) ->
+    ) { localAlbums, driveRoots, collections, layouts, (hiddenIds, sortMode, customCovers) ->
         buildGridForParent(
             targetParentId = parentCollectionId,
-            localAlbums = localAlbums.filterNot { it.id in hiddenIds },
-            driveRoots = driveRoots.filterNot { it.id in hiddenIds },
+            localAlbums = applyCustomCovers(localAlbums.filterNot { it.id in hiddenIds }, customCovers),
+            driveRoots = applyCustomCovers(driveRoots.filterNot { it.id in hiddenIds }, customCovers),
             collections = collections,
             layouts = layouts,
             sortMode = sortMode
@@ -90,12 +119,16 @@ class AlbumOrganizationRepository(
         ) { roots, driveByParent -> roots to driveByParent },
         collectionDao.observeAllCollections(),
         collectionDao.observeAllLayouts(),
-        combine(extrasRepository.hiddenAlbumIdsFlow, preferencesManager.preferencesFlow) { hidden, prefs ->
-            hidden to prefs.albumSortMode
+        combine(
+            extrasRepository.hiddenAlbumIdsFlow,
+            preferencesManager.preferencesFlow,
+            extrasRepository.customAlbumCoversFlow
+        ) { hidden, prefs, covers ->
+            Triple(hidden, prefs.albumSortMode, covers)
         }
-    ) { localAlbums, (driveRoots, driveByParent), collections, layouts, (hiddenIds, sortMode) ->
-        val visibleLocal = localAlbums.filterNot { it.id in hiddenIds }
-        val visibleDrive = driveRoots.filterNot { it.id in hiddenIds }
+    ) { localAlbums, (driveRoots, driveByParent), collections, layouts, (hiddenIds, sortMode, customCovers) ->
+        val visibleLocal = applyCustomCovers(localAlbums.filterNot { it.id in hiddenIds }, customCovers)
+        val visibleDrive = applyCustomCovers(driveRoots.filterNot { it.id in hiddenIds }, customCovers)
         val visited = HashSet<String>()
 
         fun buildDriveChildren(folderId: String): List<SidebarAlbumNode> {

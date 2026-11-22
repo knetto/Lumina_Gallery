@@ -11,10 +11,13 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -36,6 +39,8 @@ import com.luminagallery.drive.ui.screens.cleanout.CleanOutScreen
 import com.luminagallery.drive.ui.screens.cleanout.CleanOutViewModel
 import com.luminagallery.drive.ui.screens.collection.CollectionScreen
 import com.luminagallery.drive.ui.screens.collection.CollectionViewModel
+import com.luminagallery.drive.ui.screens.compare.CompareScreen
+import com.luminagallery.drive.ui.screens.editor.PhotoEditorScreen
 import com.luminagallery.drive.ui.screens.folder.FolderScreen
 import com.luminagallery.drive.ui.screens.folder.FolderViewModel
 import com.luminagallery.drive.ui.screens.home.HomeScreen
@@ -46,6 +51,7 @@ import com.luminagallery.drive.ui.screens.settings.SettingsScreen
 import com.luminagallery.drive.ui.screens.settings.SettingsViewModel
 import com.luminagallery.drive.ui.screens.special.LocationsScreen
 import com.luminagallery.drive.ui.screens.special.SpecialCollectionScreen
+import com.luminagallery.drive.ui.screens.viewer.ExternalMediaViewerOverlay
 import com.luminagallery.drive.ui.screens.viewer.ViewerLaunchContext
 import com.luminagallery.drive.ui.screens.viewer.ViewerScreen
 import com.luminagallery.drive.ui.screens.viewer.ViewerViewModel
@@ -96,13 +102,30 @@ data object SearchRoute
 @Serializable
 data object SettingsRoute
 
+@Serializable
+data class EditorRoute(
+    val itemId: String,
+    val sourceUri: String,
+    val displayName: String,
+    val isLocal: Boolean
+)
+
+@Serializable
+data class CompareRoute(
+    val itemIdsCsv: String
+)
+
 private const val KEY_LAST_VIEWED_ITEM_ID = "last_viewed_item_id"
 private val OneUiNavEasing = OneUiMotion.DecelerateEasing
 private val OneUiAlbumEasing = OneUiMotion.AlbumExpandEasing
 
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
-fun LuminaNavGraph() {
+fun LuminaNavGraph(
+    externalViewUri: String? = null,
+    externalViewMime: String? = null,
+    onConsumedExternalView: () -> Unit = {}
+) {
     val navController = rememberNavController()
     val container = LocalAppContainer.current
     val imageLoader = LocalGalleryImageLoader.current
@@ -129,6 +152,7 @@ fun LuminaNavGraph() {
     }
 
     CompositionLocalProvider(LocalAlbumTransitionOrigin provides originTracker) {
+        Box(modifier = Modifier.fillMaxSize()) {
         SharedTransitionLayout {
             NavHost(
                 navController = navController,
@@ -242,6 +266,9 @@ fun LuminaNavGraph() {
                     },
                     onOpenCleanOut = {
                         navController.navigate(CleanOutRoute)
+                    },
+                    onOpenCompare = { ids ->
+                        navController.navigate(CompareRoute(ids.joinToString(",")))
                     }
                 )
             }
@@ -414,6 +441,9 @@ fun LuminaNavGraph() {
                     },
                     onOpenSearch = {
                         navController.navigate(SearchRoute)
+                    },
+                    onOpenCompare = { ids ->
+                        navController.navigate(CompareRoute(ids.joinToString(",")))
                     }
                 )
             }
@@ -439,6 +469,9 @@ fun LuminaNavGraph() {
                                 toEpochMs = toMs
                             )
                         )
+                    },
+                    onOpenCompare = { ids ->
+                        navController.navigate(CompareRoute(ids.joinToString(",")))
                     }
                 )
             }
@@ -483,7 +516,40 @@ fun LuminaNavGraph() {
                             ?.savedStateHandle
                             ?.set(KEY_LAST_VIEWED_ITEM_ID, activeId)
                     },
+                    onOpenEditor = { itemId, sourceUri, displayName, isLocal ->
+                        navController.navigate(
+                            EditorRoute(
+                                itemId = itemId,
+                                sourceUri = sourceUri,
+                                displayName = displayName,
+                                isLocal = isLocal
+                            )
+                        )
+                    },
                     onDismiss = { navController.popBackStack() }
+                )
+            }
+
+            composable<EditorRoute> { backStackEntry ->
+                val route = backStackEntry.toRoute<EditorRoute>()
+                PhotoEditorScreen(
+                    itemId = route.itemId,
+                    sourceUri = route.sourceUri,
+                    displayName = route.displayName,
+                    isLocal = route.isLocal,
+                    onSavedAndClose = { navController.popBackStack() },
+                    onDismiss = { navController.popBackStack() }
+                )
+            }
+
+            composable<CompareRoute> { backStackEntry ->
+                val route = backStackEntry.toRoute<CompareRoute>()
+                val ids = remember(route.itemIdsCsv) {
+                    route.itemIdsCsv.split(",").filter { it.isNotBlank() }
+                }
+                CompareScreen(
+                    itemIds = ids,
+                    onNavigateBack = { navController.popBackStack() }
                 )
             }
 
@@ -501,5 +567,25 @@ fun LuminaNavGraph() {
             }
         }
     }
+
+        if (!externalViewUri.isNullOrBlank()) {
+            ExternalMediaViewerOverlay(
+                uriString = externalViewUri,
+                mimeType = externalViewMime ?: "image/*",
+                onOpenEditor = { uri, name ->
+                    onConsumedExternalView()
+                    navController.navigate(
+                        EditorRoute(
+                            itemId = "ext_${uri.hashCode()}",
+                            sourceUri = uri,
+                            displayName = name,
+                            isLocal = true
+                        )
+                    )
+                },
+                onDismiss = onConsumedExternalView
+            )
+        }
+        }
     }
 }

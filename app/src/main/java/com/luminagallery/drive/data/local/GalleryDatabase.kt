@@ -13,11 +13,14 @@ import com.luminagallery.drive.data.local.dao.PinnedRootDao
 import com.luminagallery.drive.data.local.dao.SyncStateDao
 import com.luminagallery.drive.data.local.entity.AlbumCollectionEntity
 import com.luminagallery.drive.data.local.entity.AlbumLayoutEntity
+import com.luminagallery.drive.data.local.entity.CustomAlbumCoverEntity
 import com.luminagallery.drive.data.local.entity.DriveItemEntity
 import com.luminagallery.drive.data.local.entity.FavoriteItemEntity
 import com.luminagallery.drive.data.local.entity.FavoriteStoryEntity
 import com.luminagallery.drive.data.local.entity.HiddenAlbumEntity
 import com.luminagallery.drive.data.local.entity.IgnoredCleanOutEntity
+import com.luminagallery.drive.data.local.entity.MediaAnnotationEntity
+import com.luminagallery.drive.data.local.entity.OfflinePinnedEntity
 import com.luminagallery.drive.data.local.entity.PhotoLocationEntity
 import com.luminagallery.drive.data.local.entity.PinnedRootEntity
 import com.luminagallery.drive.data.local.entity.SyncStateEntity
@@ -33,9 +36,12 @@ import com.luminagallery.drive.data.local.entity.SyncStateEntity
         HiddenAlbumEntity::class,
         FavoriteStoryEntity::class,
         IgnoredCleanOutEntity::class,
-        PhotoLocationEntity::class
+        PhotoLocationEntity::class,
+        CustomAlbumCoverEntity::class,
+        MediaAnnotationEntity::class,
+        OfflinePinnedEntity::class
     ],
-    version = 6,
+    version = 7,
     exportSchema = true
 )
 abstract class GalleryDatabase : RoomDatabase() {
@@ -157,13 +163,62 @@ abstract class GalleryDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `custom_album_covers` (
+                        `albumId` TEXT NOT NULL,
+                        `coverItemId` TEXT NOT NULL,
+                        `coverThumbnailLink` TEXT,
+                        `isLocal` INTEGER NOT NULL,
+                        `isVideo` INTEGER NOT NULL,
+                        `sizeBytes` INTEGER NOT NULL,
+                        `updatedAtEpochMs` INTEGER NOT NULL,
+                        PRIMARY KEY(`albumId`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `media_annotations` (
+                        `itemId` TEXT NOT NULL,
+                        `tagsCsv` TEXT NOT NULL,
+                        `note` TEXT NOT NULL,
+                        `updatedAtEpochMs` INTEGER NOT NULL,
+                        PRIMARY KEY(`itemId`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `offline_pinned_items` (
+                        `itemId` TEXT NOT NULL,
+                        `folderId` TEXT,
+                        `localFilePath` TEXT NOT NULL,
+                        `sizeBytes` INTEGER NOT NULL,
+                        `pinnedAtEpochMs` INTEGER NOT NULL,
+                        PRIMARY KEY(`itemId`)
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
         fun build(context: Context): GalleryDatabase =
             Room.databaseBuilder(
                 context.applicationContext,
                 GalleryDatabase::class.java,
                 DATABASE_NAME
             )
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+                .addMigrations(
+                    MIGRATION_1_2,
+                    MIGRATION_2_3,
+                    MIGRATION_3_4,
+                    MIGRATION_4_5,
+                    MIGRATION_5_6,
+                    MIGRATION_6_7
+                )
                 .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
                 .fallbackToDestructiveMigration(dropAllTables = true)
                 .build()

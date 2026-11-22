@@ -16,9 +16,12 @@ import androidx.annotation.OptIn
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
-import androidx.compose.foundation.clickable
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -32,6 +35,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -39,13 +43,17 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import java.io.File
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -81,6 +89,7 @@ class ActiveVideoController {
     var isPlaying by mutableStateOf(false)
     var isEnded by mutableStateOf(false)
     var isMuted by mutableStateOf(false)
+    var playbackSpeed by mutableFloatStateOf(1f)
     var currentPositionMs by mutableLongStateOf(0L)
     var durationMs by mutableLongStateOf(0L)
 
@@ -88,12 +97,23 @@ class ActiveVideoController {
     internal var onToggleMute: (() -> Unit)? = null
     internal var onSeekTo: ((Long) -> Unit)? = null
     internal var onCaptureFrame: (() -> Unit)? = null
+    internal var onSetSpeed: ((Float) -> Unit)? = null
 
     fun togglePlayPause() = onTogglePlayPause?.invoke()
     fun toggleMute() = onToggleMute?.invoke()
     fun seekTo(positionMs: Long) {
         currentPositionMs = positionMs.coerceIn(0L, durationMs.coerceAtLeast(1L))
         onSeekTo?.invoke(currentPositionMs)
+    }
+    fun skipBy(deltaMs: Long) {
+        seekTo(currentPositionMs + deltaMs)
+    }
+    fun cyclePlaybackSpeed() {
+        val speeds = listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f)
+        val idx = speeds.indexOfFirst { kotlin.math.abs(it - playbackSpeed) < 0.05f }
+        val next = speeds[(idx + 1) % speeds.size]
+        playbackSpeed = next
+        onSetSpeed?.invoke(next)
     }
     fun captureFrame() = onCaptureFrame?.invoke()
 }
@@ -160,10 +180,31 @@ fun VideoPlayerPage(
     var firstFrameRendered by remember(item.id) { mutableStateOf(false) }
     var playbackError by remember(item.id) { mutableStateOf<String?>(null) }
     var playerViewRef by remember(item.id) { mutableStateOf<PlayerView?>(null) }
+    var skipFeedbackText by remember(item.id) { mutableStateOf<String?>(null) }
+    var skipFeedbackLeft by remember(item.id) { mutableStateOf(false) }
 
-    val exoPlayer: ExoPlayer? = remember(item.id, item.isLocal, item.localContentUri, isActivePage) {
+    LaunchedEffect(skipFeedbackText) {
+        if (skipFeedbackText != null) {
+            delay(550L)
+            skipFeedbackText = null
+        }
+    }
+
+    val offlinePath = remember(item.id) { appContainer.offlineMediaManager.getOfflineFilePath(item.id) }
+
+    val exoPlayer: ExoPlayer? = remember(item.id, item.isLocal, item.localContentUri, offlinePath, isActivePage) {
         if (!isActivePage) {
             null
+        } else if (!offlinePath.isNullOrBlank() && File(offlinePath).exists()) {
+            ExoPlayer.Builder(context)
+                .build()
+                .apply {
+                    setMediaItem(Media3Item.fromUri(android.net.Uri.fromFile(File(offlinePath))))
+                    repeatMode = if (loopVideo) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+                    volume = if (startMuted) 0f else 1f
+                    playWhenReady = autoPlay
+                    prepare()
+                }
         } else if (item.isLocal && !item.localContentUri.isNullOrBlank()) {
             ExoPlayer.Builder(context)
                 .build()
@@ -203,6 +244,7 @@ fun VideoPlayerPage(
         videoController.durationMs = (exoPlayer.duration.takeIf { it > 0L } ?: item.durationMillis ?: 0L)
         videoController.currentPositionMs = exoPlayer.currentPosition.coerceAtLeast(0L)
         videoController.isMuted = isMuted
+        videoController.playbackSpeed = 1f
         videoController.isPlaying = exoPlayer.isPlaying
         videoController.isEnded = false
 
@@ -224,6 +266,9 @@ fun VideoPlayerPage(
         }
         videoController.onSeekTo = { posMs ->
             exoPlayer.seekTo(posMs)
+        }
+        videoController.onSetSpeed = { speed ->
+            exoPlayer.setPlaybackSpeed(speed)
         }
         videoController.onCaptureFrame = {
             val pv = playerViewRef
@@ -285,6 +330,7 @@ fun VideoPlayerPage(
                 videoController.onTogglePlayPause = null
                 videoController.onToggleMute = null
                 videoController.onSeekTo = null
+                videoController.onSetSpeed = null
                 videoController.onCaptureFrame = null
                 videoController.isPlaying = false
             }
@@ -355,11 +401,23 @@ fun VideoPlayerPage(
                 scaleY = dismissScale
                 translationY = dismissOffsetY.value
             }
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = onToggleChrome
-            ),
+            .pointerInput(item.id, exoPlayer) {
+                detectTapGestures(
+                    onTap = { onToggleChrome() },
+                    onDoubleTap = { offset ->
+                        if (exoPlayer != null) {
+                            val isLeft = offset.x < size.width / 2f
+                            val delta = if (isLeft) -5_000L else 5_000L
+                            val target = (exoPlayer.currentPosition + delta)
+                                .coerceIn(0L, exoPlayer.duration.coerceAtLeast(1L))
+                            exoPlayer.seekTo(target)
+                            videoController.currentPositionMs = target
+                            skipFeedbackLeft = isLeft
+                            skipFeedbackText = if (isLeft) "-5s" else "+5s"
+                        }
+                    }
+                )
+            },
         contentAlignment = Alignment.Center
     ) {
         if (exoPlayer != null) {
@@ -403,6 +461,31 @@ fun VideoPlayerPage(
                 strokeWidth = 2.5.dp,
                 modifier = Modifier.size(40.dp)
             )
+        }
+
+        // Double-tap ±5s skip indicator overlay
+        AnimatedVisibility(
+            visible = skipFeedbackText != null,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier
+                .align(if (skipFeedbackLeft) Alignment.CenterStart else Alignment.CenterEnd)
+                .padding(horizontal = 36.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(50))
+                    .background(Color.Black.copy(alpha = 0.65f))
+                    .padding(horizontal = 18.dp, vertical = 10.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = skipFeedbackText.orEmpty(),
+                    color = Color.White,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
         }
 
         playbackError?.let { err ->

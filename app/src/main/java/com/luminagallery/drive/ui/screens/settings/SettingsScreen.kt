@@ -471,6 +471,20 @@ fun SettingsScreen(
                     OneUiDivider()
 
                     OneUiActionRow(
+                        title = "Clear offline Drive downloads",
+                        subtitle = if (uiState.offlinePinnedCount > 0) {
+                            "${uiState.offlinePinnedCount} pinned file(s) · ${FormatUtils.formatFileSize(uiState.offlinePinnedBytes)}"
+                        } else {
+                            "No Drive files pinned offline"
+                        },
+                        subtitleAccent = uiState.offlinePinnedCount > 0,
+                        enabled = uiState.offlinePinnedCount > 0,
+                        onClick = viewModel::clearAllOfflineMedia
+                    )
+
+                    OneUiDivider()
+
+                    OneUiActionRow(
                         title = "Reset dismissed Clean Out items",
                         subtitle = if (uiState.ignoredCleanOutCount > 0) {
                             "${uiState.ignoredCleanOutCount} dismissed suggestion(s) will reappear"

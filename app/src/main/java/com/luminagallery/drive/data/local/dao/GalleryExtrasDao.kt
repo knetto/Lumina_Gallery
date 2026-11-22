@@ -3,10 +3,13 @@ package com.luminagallery.drive.data.local.dao
 import androidx.room.Dao
 import androidx.room.Query
 import androidx.room.Upsert
+import com.luminagallery.drive.data.local.entity.CustomAlbumCoverEntity
 import com.luminagallery.drive.data.local.entity.FavoriteItemEntity
 import com.luminagallery.drive.data.local.entity.FavoriteStoryEntity
 import com.luminagallery.drive.data.local.entity.HiddenAlbumEntity
 import com.luminagallery.drive.data.local.entity.IgnoredCleanOutEntity
+import com.luminagallery.drive.data.local.entity.MediaAnnotationEntity
+import com.luminagallery.drive.data.local.entity.OfflinePinnedEntity
 import com.luminagallery.drive.data.local.entity.PhotoLocationEntity
 import kotlinx.coroutines.flow.Flow
 
@@ -52,6 +55,54 @@ interface GalleryExtrasDao {
     @Query("SELECT * FROM photo_location_cache")
     suspend fun getAllCachedLocations(): List<PhotoLocationEntity>
 
+    @Query("SELECT * FROM photo_location_cache WHERE hasLocation = 1")
+    fun observeCachedLocations(): Flow<List<PhotoLocationEntity>>
+
     @Upsert
     suspend fun upsertPhotoLocations(items: List<PhotoLocationEntity>)
+
+    // Custom album covers
+    @Query("SELECT * FROM custom_album_covers")
+    fun observeCustomAlbumCovers(): Flow<List<CustomAlbumCoverEntity>>
+
+    @Upsert
+    suspend fun upsertCustomAlbumCover(cover: CustomAlbumCoverEntity)
+
+    @Query("DELETE FROM custom_album_covers WHERE albumId = :albumId")
+    suspend fun deleteCustomAlbumCover(albumId: String)
+
+    // Photo tags & notes
+    @Query("SELECT * FROM media_annotations")
+    fun observeAllAnnotations(): Flow<List<MediaAnnotationEntity>>
+
+    @Query("SELECT * FROM media_annotations WHERE itemId = :itemId LIMIT 1")
+    fun observeAnnotation(itemId: String): Flow<MediaAnnotationEntity?>
+
+    @Upsert
+    suspend fun upsertAnnotation(annotation: MediaAnnotationEntity)
+
+    @Query("DELETE FROM media_annotations WHERE itemId = :itemId")
+    suspend fun deleteAnnotation(itemId: String)
+
+    // Offline pinned Drive media
+    @Query("SELECT * FROM offline_pinned_items")
+    fun observeAllOfflineItems(): Flow<List<OfflinePinnedEntity>>
+
+    @Query("SELECT * FROM offline_pinned_items WHERE folderId = :folderId")
+    suspend fun getOfflineItemsByFolder(folderId: String): List<OfflinePinnedEntity>
+
+    @Query("SELECT * FROM offline_pinned_items WHERE itemId = :itemId LIMIT 1")
+    suspend fun getOfflineItem(itemId: String): OfflinePinnedEntity?
+
+    @Upsert
+    suspend fun upsertOfflineItem(item: OfflinePinnedEntity)
+
+    @Query("DELETE FROM offline_pinned_items WHERE itemId = :itemId")
+    suspend fun deleteOfflineItem(itemId: String)
+
+    @Query("DELETE FROM offline_pinned_items WHERE folderId = :folderId")
+    suspend fun deleteOfflineItemsByFolder(folderId: String)
+
+    @Query("DELETE FROM offline_pinned_items")
+    suspend fun clearAllOfflineItems()
 }

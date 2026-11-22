@@ -16,7 +16,11 @@ import com.luminagallery.drive.data.repository.AlbumOrganizationRepository
 import com.luminagallery.drive.data.repository.CoilCacheManager
 import com.luminagallery.drive.data.repository.GalleryExtrasRepository
 import com.luminagallery.drive.data.repository.GalleryRepository
+import com.luminagallery.drive.data.repository.LocalFileOperationsManager
 import com.luminagallery.drive.data.repository.MediaExportManager
+import com.luminagallery.drive.data.repository.MotionPhotoDetector
+import com.luminagallery.drive.data.repository.OfflineMediaManager
+import com.luminagallery.drive.data.repository.VideoTrimmer
 import com.luminagallery.drive.domain.usecase.ExportMediaUseCase
 import com.luminagallery.drive.domain.usecase.ManageRootsUseCase
 import com.luminagallery.drive.domain.usecase.SyncGalleryUseCase
@@ -83,6 +87,26 @@ class AppContainer(context: Context) {
     val mediaExportManager: MediaExportManager = MediaExportManager(
         context = appContext,
         driveApi = driveApiService
+    )
+
+    val offlineMediaManager: OfflineMediaManager = OfflineMediaManager(
+        context = appContext,
+        database = database,
+        driveApi = driveApiService
+    )
+
+    val motionPhotoDetector: MotionPhotoDetector = MotionPhotoDetector(appContext)
+
+    val localFileOperationsManager: LocalFileOperationsManager = LocalFileOperationsManager(
+        context = appContext,
+        driveApi = driveApiService,
+        offlineMediaManager = offlineMediaManager
+    )
+
+    val videoTrimmer: VideoTrimmer = VideoTrimmer(
+        context = appContext,
+        driveApi = driveApiService,
+        offlineMediaManager = offlineMediaManager
     )
 
     val syncGalleryUseCase: SyncGalleryUseCase = SyncGalleryUseCase(galleryRepository)
