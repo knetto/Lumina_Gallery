@@ -2,6 +2,8 @@ package com.luminagallery.drive.ui.navigation
 
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
+import androidx.compose.animation.core.FastOutLinearInEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -10,7 +12,9 @@ import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -20,10 +24,14 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.toRoute
 import com.luminagallery.drive.LocalAppContainer
+import com.luminagallery.drive.LocalGalleryImageLoader
 import com.luminagallery.drive.data.local.LocalMediaRepository
 import com.luminagallery.drive.domain.model.MediaType
 import com.luminagallery.drive.domain.model.SpecialGalleryFilter
+import com.luminagallery.drive.ui.components.AlbumTransitionOriginTracker
+import com.luminagallery.drive.ui.components.LocalAlbumTransitionOrigin
 import com.luminagallery.drive.ui.components.OneUiMotion
+import com.luminagallery.drive.ui.components.prefetchAlbumThumbnails
 import com.luminagallery.drive.ui.screens.cleanout.CleanOutScreen
 import com.luminagallery.drive.ui.screens.cleanout.CleanOutViewModel
 import com.luminagallery.drive.ui.screens.collection.CollectionScreen
@@ -90,65 +98,125 @@ data object SettingsRoute
 
 private const val KEY_LAST_VIEWED_ITEM_ID = "last_viewed_item_id"
 private val OneUiNavEasing = OneUiMotion.DecelerateEasing
+private val OneUiAlbumEasing = OneUiMotion.AlbumExpandEasing
 
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 fun LuminaNavGraph() {
     val navController = rememberNavController()
     val container = LocalAppContainer.current
+    val imageLoader = LocalGalleryImageLoader.current
     val appContext = LocalContext.current.applicationContext
+    val originTracker = remember { AlbumTransitionOriginTracker() }
 
-    SharedTransitionLayout {
-        NavHost(
-            navController = navController,
-            startDestination = HomeRoute,
-            enterTransition = {
-                slideInHorizontally(tween(360, easing = OneUiNavEasing)) { it / 5 } +
-                    scaleIn(tween(360, easing = OneUiNavEasing), initialScale = 0.94f) +
-                    fadeIn(tween(240, easing = OneUiNavEasing))
-            },
-            exitTransition = {
-                // Keep parent rock-solid (no scale jump!) when opening Photo Viewer for seamless 120Hz sharedElement morph!
-                if (targetState.destination.hasRoute<ViewerRoute>()) {
-                    fadeOut(tween(220))
-                } else {
-                    scaleOut(tween(340, easing = OneUiNavEasing), targetScale = 0.93f) +
-                        fadeOut(tween(220))
-                }
-            },
-            popEnterTransition = {
-                if (initialState.destination.hasRoute<ViewerRoute>()) {
-                    fadeIn(tween(200))
-                } else {
-                    scaleIn(tween(340, easing = OneUiNavEasing), initialScale = 0.93f) +
-                        fadeIn(tween(240, easing = OneUiNavEasing))
-                }
-            },
-            popExitTransition = {
-                slideOutHorizontally(tween(310, easing = OneUiNavEasing)) { it / 5 } +
-                    scaleOut(tween(310, easing = OneUiNavEasing), targetScale = 0.94f) +
-                    fadeOut(tween(200))
-            }
-        ) {
-            composable<HomeRoute> { backStackEntry ->
-                val homeViewModel: HomeViewModel = viewModel(
-                    factory = HomeViewModel.Factory(container)
-                )
-                val lastViewedItemId by backStackEntry.savedStateHandle
-                    .getStateFlow<String?>(KEY_LAST_VIEWED_ITEM_ID, null)
-                    .collectAsStateWithLifecycle()
+    fun prewarmFolderAndNavigate(folderId: String, folderName: String) {
+        val prefs = container.preferencesManager.latestPreferences
+        val highRes = container.networkMonitor.networkState.value.isUnmeteredWifi || !prefs.wifiOnlyHighRes
+        val cachedItems = if (LocalMediaRepository.isLocalFolderId(folderId)) {
+            container.localMediaRepository.getCachedAlbumMedia(folderId)
+        } else {
+            container.galleryRepository.getCachedFolderMedia(folderId).orEmpty()
+        }
+        if (cachedItems.isNotEmpty()) {
+            prefetchAlbumThumbnails(
+                context = appContext,
+                imageLoader = imageLoader,
+                items = cachedItems,
+                isUnmeteredWifi = highRes
+            )
+        }
+        navController.navigate(FolderRoute(folderId, folderName))
+    }
 
-                HomeScreen(
-                    viewModel = homeViewModel,
-                    lastViewedItemId = lastViewedItemId,
-                    onConsumedLastViewedItemId = {
-                        backStackEntry.savedStateHandle[KEY_LAST_VIEWED_ITEM_ID] = null
-                    },
-                    sharedTransitionScope = this@SharedTransitionLayout,
-                    animatedVisibilityScope = this,
-                    onOpenFolder = { folderId, folderName ->
-                        navController.navigate(FolderRoute(folderId, folderName))
-                    },
+    CompositionLocalProvider(LocalAlbumTransitionOrigin provides originTracker) {
+        SharedTransitionLayout {
+            NavHost(
+                navController = navController,
+                startDestination = HomeRoute,
+                enterTransition = {
+                    slideInHorizontally(tween(320, easing = OneUiNavEasing)) { it / 5 } +
+                        scaleIn(tween(320, easing = OneUiNavEasing), initialScale = 0.95f) +
+                        fadeIn(tween(200, easing = LinearOutSlowInEasing))
+                },
+                exitTransition = {
+                    when {
+                        targetState.destination.hasRoute<ViewerRoute>() -> {
+                            // Keep parent rock-solid for seamless 120Hz sharedElement photo morph!
+                            fadeOut(tween(200))
+                        }
+                        targetState.destination.hasRoute<FolderRoute>() ||
+                            targetState.destination.hasRoute<CollectionRoute>() -> {
+                            // Authentic Samsung One UI forward dive-through parallax into the tapped album card!
+                            val key = runCatching {
+                                if (targetState.destination.hasRoute<FolderRoute>()) {
+                                    targetState.toRoute<FolderRoute>().folderId
+                                } else {
+                                    targetState.toRoute<CollectionRoute>().collectionId
+                                }
+                            }.getOrNull()
+                            scaleOut(
+                                animationSpec = tween(300, easing = OneUiAlbumEasing),
+                                targetScale = 1.07f,
+                                transformOrigin = originTracker.originFor(key)
+                            ) + fadeOut(tween(150, easing = LinearOutSlowInEasing))
+                        }
+                        else -> {
+                            scaleOut(tween(300, easing = OneUiNavEasing), targetScale = 0.95f) +
+                                fadeOut(tween(180))
+                        }
+                    }
+                },
+                popEnterTransition = {
+                    when {
+                        initialState.destination.hasRoute<ViewerRoute>() -> {
+                            fadeIn(tween(180))
+                        }
+                        initialState.destination.hasRoute<FolderRoute>() ||
+                            initialState.destination.hasRoute<CollectionRoute>() -> {
+                            val key = runCatching {
+                                if (initialState.destination.hasRoute<FolderRoute>()) {
+                                    initialState.toRoute<FolderRoute>().folderId
+                                } else {
+                                    initialState.toRoute<CollectionRoute>().collectionId
+                                }
+                            }.getOrNull()
+                            scaleIn(
+                                animationSpec = tween(270, easing = OneUiAlbumEasing),
+                                initialScale = 1.07f,
+                                transformOrigin = originTracker.originFor(key)
+                            ) + fadeIn(tween(160, easing = LinearOutSlowInEasing))
+                        }
+                        else -> {
+                            scaleIn(tween(280, easing = OneUiNavEasing), initialScale = 0.95f) +
+                                fadeIn(tween(200))
+                        }
+                    }
+                },
+                popExitTransition = {
+                    slideOutHorizontally(tween(280, easing = OneUiNavEasing)) { it / 5 } +
+                        scaleOut(tween(280, easing = OneUiNavEasing), targetScale = 0.95f) +
+                        fadeOut(tween(180))
+                }
+            ) {
+                composable<HomeRoute> { backStackEntry ->
+                    val homeViewModel: HomeViewModel = viewModel(
+                        factory = HomeViewModel.Factory(container)
+                    )
+                    val lastViewedItemId by backStackEntry.savedStateHandle
+                        .getStateFlow<String?>(KEY_LAST_VIEWED_ITEM_ID, null)
+                        .collectAsStateWithLifecycle()
+
+                    HomeScreen(
+                        viewModel = homeViewModel,
+                        lastViewedItemId = lastViewedItemId,
+                        onConsumedLastViewedItemId = {
+                            backStackEntry.savedStateHandle[KEY_LAST_VIEWED_ITEM_ID] = null
+                        },
+                        sharedTransitionScope = this@SharedTransitionLayout,
+                        animatedVisibilityScope = this,
+                        onOpenFolder = { folderId, folderName ->
+                            prewarmFolderAndNavigate(folderId, folderName)
+                        },
                     onOpenCollection = { collectionId, collectionName ->
                         navController.navigate(CollectionRoute(collectionId, collectionName))
                     },
@@ -226,15 +294,23 @@ fun LuminaNavGraph() {
                 )
             }
 
-            // Samsung Gallery Depth-Zoom Expand when opening a Collection or Album!
+            // Samsung One UI 7/8 Spatial Zoom-Bloom out of the tapped Collection card!
             composable<CollectionRoute>(
                 enterTransition = {
-                    scaleIn(tween(380, easing = OneUiNavEasing), initialScale = 0.86f) +
-                        fadeIn(tween(240, easing = OneUiNavEasing))
+                    val key = runCatching { targetState.toRoute<CollectionRoute>().collectionId }.getOrNull()
+                    scaleIn(
+                        animationSpec = tween(300, easing = OneUiAlbumEasing),
+                        initialScale = 0.80f,
+                        transformOrigin = originTracker.originFor(key)
+                    ) + fadeIn(tween(120, easing = LinearOutSlowInEasing))
                 },
                 popExitTransition = {
-                    scaleOut(tween(320, easing = OneUiNavEasing), targetScale = 0.87f) +
-                        fadeOut(tween(200))
+                    val key = runCatching { initialState.toRoute<CollectionRoute>().collectionId }.getOrNull()
+                    scaleOut(
+                        animationSpec = tween(250, easing = OneUiAlbumEasing),
+                        targetScale = 0.80f,
+                        transformOrigin = originTracker.originFor(key)
+                    ) + fadeOut(tween(130, delayMillis = 55, easing = FastOutLinearInEasing))
                 }
             ) { backStackEntry ->
                 val route = backStackEntry.toRoute<CollectionRoute>()
@@ -253,7 +329,7 @@ fun LuminaNavGraph() {
                         navController.popBackStack(route = HomeRoute, inclusive = false)
                     },
                     onOpenAlbum = { folderId, folderName ->
-                        navController.navigate(FolderRoute(folderId, folderName))
+                        prewarmFolderAndNavigate(folderId, folderName)
                     },
                     onOpenSubCollection = { subId, subName ->
                         navController.navigate(CollectionRoute(subId, subName))
@@ -270,15 +346,23 @@ fun LuminaNavGraph() {
                 )
             }
 
-            // Samsung Gallery Depth-Zoom Expand when entering an Album / Folder!
+            // Samsung One UI 7/8 Spatial Zoom-Bloom out of the tapped Album / Folder card!
             composable<FolderRoute>(
                 enterTransition = {
-                    scaleIn(tween(380, easing = OneUiNavEasing), initialScale = 0.86f) +
-                        fadeIn(tween(240, easing = OneUiNavEasing))
+                    val key = runCatching { targetState.toRoute<FolderRoute>().folderId }.getOrNull()
+                    scaleIn(
+                        animationSpec = tween(300, easing = OneUiAlbumEasing),
+                        initialScale = 0.80f,
+                        transformOrigin = originTracker.originFor(key)
+                    ) + fadeIn(tween(120, easing = LinearOutSlowInEasing))
                 },
                 popExitTransition = {
-                    scaleOut(tween(320, easing = OneUiNavEasing), targetScale = 0.87f) +
-                        fadeOut(tween(200))
+                    val key = runCatching { initialState.toRoute<FolderRoute>().folderId }.getOrNull()
+                    scaleOut(
+                        animationSpec = tween(250, easing = OneUiAlbumEasing),
+                        targetScale = 0.80f,
+                        transformOrigin = originTracker.originFor(key)
+                    ) + fadeOut(tween(130, delayMillis = 55, easing = FastOutLinearInEasing))
                 }
             ) { backStackEntry ->
                 val route = backStackEntry.toRoute<FolderRoute>()
@@ -308,7 +392,7 @@ fun LuminaNavGraph() {
                         navController.popBackStack(route = HomeRoute, inclusive = false)
                     },
                     onOpenSubfolder = { subId, subName ->
-                        navController.navigate(FolderRoute(subId, subName))
+                        prewarmFolderAndNavigate(subId, subName)
                     },
                     onOpenBreadcrumb = { ancestorId, ancestorName ->
                         val popped = navController.popBackStack(
@@ -416,5 +500,6 @@ fun LuminaNavGraph() {
                 )
             }
         }
+    }
     }
 }

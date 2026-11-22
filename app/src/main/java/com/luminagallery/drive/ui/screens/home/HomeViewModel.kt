@@ -349,6 +349,11 @@ class HomeViewModel(
                 }
             }
         }
+        // Pre-warm sidebar & collection caches shortly after initial render so opening any album is 0ms!
+        viewModelScope.launch(Dispatchers.Default) {
+            delay(350L)
+            organizationRepository.observeSidebarTree().collect { /* keep warm */ }
+        }
         if (credentialStore.state.value is ServiceAccountState.Configured) {
             viewModelScope.launch {
                 // Let initial local UI & thumbnails render before starting Drive TLS sync

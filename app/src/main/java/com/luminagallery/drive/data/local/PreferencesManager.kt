@@ -22,6 +22,10 @@ private val Context.galleryDataStore: DataStore<Preferences> by preferencesDataS
 
 class PreferencesManager(private val context: Context) {
 
+    @Volatile
+    var latestPreferences: UserPreferences = UserPreferences()
+        private set
+
     val preferencesFlow: Flow<UserPreferences> = context.galleryDataStore.data.map { prefs ->
         val themeName = prefs[KEY_THEME_MODE] ?: ThemeMode.AMOLED_BLACK.name
         val themeMode = runCatching { ThemeMode.valueOf(themeName) }
@@ -55,7 +59,7 @@ class PreferencesManager(private val context: Context) {
             swipeDownToDismiss = prefs[KEY_SWIPE_DOWN_DISMISS] ?: true,
             prefetchAdjacentMedia = prefs[KEY_PREFETCH_ADJACENT] ?: true,
             wifiOnlyHighRes = prefs[KEY_WIFI_ONLY_HIGH_RES] ?: true
-        )
+        ).also { latestPreferences = it }
     }
 
     suspend fun getCurrentPreferences(): UserPreferences = preferencesFlow.first()

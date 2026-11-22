@@ -125,12 +125,13 @@ class FolderViewModel(
     networkMonitor: NetworkMonitor
 ) : ViewModel() {
 
+    private val initialPrefs = preferencesManager.latestPreferences
     private val activeFolderFlow = MutableStateFlow(initialFolderId to initialFolderName)
     private val viewModeFlow = MutableStateFlow(FolderViewMode.HIERARCHY)
     private val mediaFilterFlow = MutableStateFlow(AlbumMediaFilter.ALL)
     private val mediaGroupByFlow = MutableStateFlow(AlbumMediaGroupBy.NONE)
     private val mediaSortFlow = MutableStateFlow(AlbumMediaSort.DATE_DESC)
-    private val showSidebarFlow = MutableStateFlow(true)
+    private val showSidebarFlow = MutableStateFlow(initialPrefs.showAlbumSidebarDefault)
     private val breadcrumbsFlow = MutableStateFlow(listOf(BreadcrumbItem(initialFolderId, initialFolderName)))
     private val isRefreshingFlow = MutableStateFlow(false)
     private val hasLoadedOnceFlow = MutableStateFlow(LocalMediaRepository.isLocalFolderId(initialFolderId))
@@ -185,38 +186,69 @@ class FolderViewModel(
                 )
             }.flowOn(Dispatchers.Default)
         } else {
-            combine(
-                viewModeFlow,
-                repository.observeSubfolders(activeId),
-                repository.observeMediaInFolder(activeId),
-                repository.observeFlattenedMedia(activeId),
-                displayOptionsFlow
-            ) { mode, subfolders, directMedia, flattenedMedia, opts ->
-                val rawActive = if (mode == FolderViewMode.HIERARCHY) directMedia else flattenedMedia
-                val processed = applyFilterAndSort(rawActive, opts.filter, opts.sort, opts.favoriteIds)
-                val entries = buildGroupedEntries(
-                    mode = mode,
-                    subfolders = if (mode == FolderViewMode.HIERARCHY) subfolders else emptyList(),
-                    mediaItems = processed,
-                    groupBy = opts.groupBy,
-                    sort = opts.sort
-                )
-                FolderContent(
-                    folderId = activeId,
-                    folderName = activeName,
-                    isLocal = false,
-                    mode = mode,
-                    subfolders = subfolders,
-                    mediaItems = processed,
-                    unfilteredCount = rawActive.size,
-                    gridEntries = entries,
-                    filter = opts.filter,
-                    groupBy = opts.groupBy,
-                    sort = opts.sort,
-                    showSidebar = opts.showSidebar,
-                    favoriteIds = opts.favoriteIds
-                )
-            }.flowOn(Dispatchers.Default)
+            // Only execute the heavy 32-level recursive CTE when user explicitly switches to FLATTENED mode!
+            viewModeFlow.flatMapLatest { mode ->
+                if (mode == FolderViewMode.HIERARCHY) {
+                    combine(
+                        repository.observeSubfolders(activeId),
+                        repository.observeMediaInFolder(activeId),
+                        displayOptionsFlow
+                    ) { subfolders, directMedia, opts ->
+                        val processed = applyFilterAndSort(directMedia, opts.filter, opts.sort, opts.favoriteIds)
+                        val entries = buildGroupedEntries(
+                            mode = FolderViewMode.HIERARCHY,
+                            subfolders = subfolders,
+                            mediaItems = processed,
+                            groupBy = opts.groupBy,
+                            sort = opts.sort
+                        )
+                        FolderContent(
+                            folderId = activeId,
+                            folderName = activeName,
+                            isLocal = false,
+                            mode = FolderViewMode.HIERARCHY,
+                            subfolders = subfolders,
+                            mediaItems = processed,
+                            unfilteredCount = directMedia.size,
+                            gridEntries = entries,
+                            filter = opts.filter,
+                            groupBy = opts.groupBy,
+                            sort = opts.sort,
+                            showSidebar = opts.showSidebar,
+                            favoriteIds = opts.favoriteIds
+                        )
+                    }.flowOn(Dispatchers.Default)
+                } else {
+                    combine(
+                        repository.observeFlattenedMedia(activeId),
+                        displayOptionsFlow
+                    ) { flattenedMedia, opts ->
+                        val processed = applyFilterAndSort(flattenedMedia, opts.filter, opts.sort, opts.favoriteIds)
+                        val entries = buildGroupedEntries(
+                            mode = FolderViewMode.FLATTENED,
+                            subfolders = emptyList(),
+                            mediaItems = processed,
+                            groupBy = opts.groupBy,
+                            sort = opts.sort
+                        )
+                        FolderContent(
+                            folderId = activeId,
+                            folderName = activeName,
+                            isLocal = false,
+                            mode = FolderViewMode.FLATTENED,
+                            subfolders = emptyList(),
+                            mediaItems = processed,
+                            unfilteredCount = flattenedMedia.size,
+                            gridEntries = entries,
+                            filter = opts.filter,
+                            groupBy = opts.groupBy,
+                            sort = opts.sort,
+                            showSidebar = opts.showSidebar,
+                            favoriteIds = opts.favoriteIds
+                        )
+                    }.flowOn(Dispatchers.Default)
+                }
+            }
         }
     }
 
@@ -300,21 +332,57 @@ class FolderViewModel(
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000L),
-        initialValue = FolderUiState(
-            folderId = initialFolderId,
-            folderName = initialFolderName,
-            isLocalAlbum = LocalMediaRepository.isLocalFolderId(initialFolderId),
-            breadcrumbs = listOf(BreadcrumbItem(initialFolderId, initialFolderName))
+        initialValue = buildInstantInitialState(
+            initialFolderId = initialFolderId,
+            initialFolderName = initialFolderName,
+            initialNet = networkMonitor.networkState.value
         )
     )
 
-    init {
-        viewModelScope.launch {
-            val defaultSidebar = runCatching {
-                preferencesManager.getCurrentPreferences().showAlbumSidebarDefault
-            }.getOrDefault(true)
-            showSidebarFlow.value = defaultSidebar
+    private fun buildInstantInitialState(
+        initialFolderId: String,
+        initialFolderName: String,
+        initialNet: com.luminagallery.drive.domain.model.NetworkState
+    ): FolderUiState {
+        val isLocal = LocalMediaRepository.isLocalFolderId(initialFolderId)
+        val cachedSubfolders = if (isLocal) emptyList() else repository.getCachedSubfolders(initialFolderId).orEmpty()
+        val cachedMedia = if (isLocal) {
+            localMediaRepository.getCachedAlbumMedia(initialFolderId)
+        } else {
+            repository.getCachedFolderMedia(initialFolderId).orEmpty()
         }
+        val initialEntries = if (cachedSubfolders.isNotEmpty() || cachedMedia.isNotEmpty()) {
+            buildGroupedEntries(
+                mode = FolderViewMode.HIERARCHY,
+                subfolders = cachedSubfolders,
+                mediaItems = cachedMedia,
+                groupBy = AlbumMediaGroupBy.NONE,
+                sort = AlbumMediaSort.DATE_DESC
+            )
+        } else {
+            emptyList()
+        }
+        return FolderUiState(
+            folderId = initialFolderId,
+            folderName = initialFolderName,
+            isLocalAlbum = isLocal,
+            showSidebar = initialPrefs.showAlbumSidebarDefault,
+            sidebarNodes = organizationRepository.currentSidebarTree(),
+            breadcrumbs = listOf(BreadcrumbItem(initialFolderId, initialFolderName)),
+            subfolders = cachedSubfolders,
+            mediaItems = cachedMedia,
+            unfilteredItemCount = cachedMedia.size,
+            gridEntries = initialEntries,
+            gridColumns = initialPrefs.gridColumns,
+            showCloudBadges = initialPrefs.showCloudBadges,
+            hasCompletedInitialLoad = isLocal || cachedSubfolders.isNotEmpty() || cachedMedia.isNotEmpty(),
+            isOnline = initialNet.isOnline,
+            isUnmeteredWifi = initialNet.isUnmeteredWifi || !initialPrefs.wifiOnlyHighRes,
+            favoriteItemIds = extrasRepository.latestFavoriteItemIds
+        )
+    }
+
+    init {
         if (!LocalMediaRepository.isLocalFolderId(initialFolderId)) {
             loadBreadcrumbs(initialFolderId)
             refreshFolder(silent = true)

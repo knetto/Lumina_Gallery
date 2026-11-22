@@ -12,12 +12,18 @@ import com.luminagallery.drive.domain.model.AlbumSortMode
 import com.luminagallery.drive.domain.model.BreadcrumbItem
 import com.luminagallery.drive.domain.model.DriveFolder
 import com.luminagallery.drive.domain.model.SidebarAlbumNode
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.withContext
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Manages Samsung Gallery-style unified Album Organization:
@@ -34,6 +40,13 @@ class AlbumOrganizationRepository(
     private val preferencesManager: PreferencesManager
 ) {
     private val collectionDao = database.albumCollectionDao()
+    private val repoScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val gridCacheByParent = ConcurrentHashMap<String, List<AlbumGridItem>>()
+
+    fun getCachedGridItems(parentCollectionId: String?): List<AlbumGridItem> =
+        gridCacheByParent[parentCollectionId ?: ROOT_CACHE_KEY].orEmpty()
+
+    fun currentSidebarTree(): List<SidebarAlbumNode> = sharedSidebarTreeState.value
 
     fun observeAllCollections(): Flow<List<AlbumCollectionEntity>> =
         collectionDao.observeAllCollections()
@@ -61,14 +74,15 @@ class AlbumOrganizationRepository(
             collections = collections,
             layouts = layouts,
             sortMode = sortMode
-        )
+        ).also { gridCacheByParent[parentCollectionId ?: ROOT_CACHE_KEY] = it }
     }.flowOn(Dispatchers.Default)
 
     /**
-     * Full recursive Albums + Album Groups + Nested Google Drive Folders tree for the
-     * Samsung-style left sidebar rail inside any opened photo/video album.
+     * Shared hot StateFlow powering Samsung-style expandable Albums + Album Groups + Nested
+     * Google Drive Folders in the left sidebar rail — stays warm in memory so opening any
+     * album NEVER stalls waiting for SQLite or recursive tree rebuilding!
      */
-    fun observeSidebarTree(): Flow<List<SidebarAlbumNode>> = combine(
+    private val sharedSidebarTreeState: StateFlow<List<SidebarAlbumNode>> = combine(
         localMediaRepository.observeLocalAlbums(),
         combine(
             galleryRepository.observePinnedRoots(),
@@ -109,6 +123,8 @@ class AlbumOrganizationRepository(
                 layouts = layouts,
                 sortMode = sortMode
             )
+            // Warm collection grid cache alongside sidebar tree so opening any collection is 0ms!
+            gridCacheByParent[parentId ?: ROOT_CACHE_KEY] = gridItems
             return gridItems.map { item ->
                 val children = when (item) {
                     is AlbumGridItem.CollectionEntry -> if (visited.add(item.id)) {
@@ -124,7 +140,13 @@ class AlbumOrganizationRepository(
         }
 
         buildNodes(parentId = null)
-    }.flowOn(Dispatchers.Default)
+    }.flowOn(Dispatchers.Default).stateIn(
+        scope = repoScope,
+        started = SharingStarted.Lazily,
+        initialValue = emptyList()
+    )
+
+    fun observeSidebarTree(): StateFlow<List<SidebarAlbumNode>> = sharedSidebarTreeState
 
     suspend fun getCollectionBreadcrumbs(collectionId: String): List<BreadcrumbItem> =
         withContext(Dispatchers.IO) {
@@ -476,5 +498,6 @@ class AlbumOrganizationRepository(
 
     companion object {
         const val COLLECTION_PREFIX = "col_"
+        private const val ROOT_CACHE_KEY = "__root__"
     }
 }

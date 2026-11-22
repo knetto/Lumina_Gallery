@@ -60,6 +60,22 @@ class LocalMediaRepository(private val context: Context) {
     private val permissionRefreshTrigger = MutableStateFlow(0)
     private val geocodeCache = ConcurrentHashMap<String, Pair<String, String>>() // roundedCoord -> (city, country)
 
+    // Pre-indexed in-memory snapshots for 0ms Frame-0 album opening (zero copy: shares exact MediaItem instances)
+    @Volatile
+    private var latestAllMedia: List<MediaItem> = emptyList()
+
+    @Volatile
+    private var latestVideosMedia: List<MediaItem> = emptyList()
+
+    @Volatile
+    private var latestMediaByBucket: Map<String, List<MediaItem>> = emptyMap()
+
+    fun getCachedAlbumMedia(bucketId: String): List<MediaItem> = when (bucketId) {
+        LOCAL_BUCKET_ALL -> latestAllMedia
+        LOCAL_BUCKET_VIDEOS -> latestVideosMedia
+        else -> latestMediaByBucket[bucketId].orEmpty()
+    }
+
     // Single shared ContentObserver & MediaStore change stream (immediate first tick, 250ms burst coalescing)
     private val sharedMediaStoreTriggers: Flow<Unit> = combine(
         observeMediaStoreChanges(),
@@ -72,42 +88,30 @@ class LocalMediaRepository(private val context: Context) {
             replay = 1
         )
 
-    private val sharedAllLocalMedia: Flow<List<MediaItem>> = sharedMediaStoreTriggers
-        .conflate()
-        .map {
-            if (!hasMediaPermission()) emptyList() else queryLocalMedia(trashedOnly = false)
-        }
-        .flowOn(Dispatchers.IO)
-        .shareIn(
-            scope = repoScope,
-            started = SharingStarted.WhileSubscribed(stopTimeoutMillis = 5_000L, replayExpirationMillis = 15_000L),
-            replay = 1
-        )
+    private data class IndexedLocalMedia(
+        val allItems: List<MediaItem>,
+        val videos: List<MediaItem>,
+        val byBucket: Map<String, List<MediaItem>>,
+        val albums: List<DriveFolder>
+    )
 
-    private val sharedSystemFavoriteIds: Flow<Set<String>> = sharedMediaStoreTriggers
+    private val sharedIndexedLocalMedia: Flow<IndexedLocalMedia> = sharedMediaStoreTriggers
         .conflate()
         .map {
-            if (!hasMediaPermission() || Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-                emptySet()
-            } else {
-                querySystemFavoriteIds()
+            val allItems = if (!hasMediaPermission()) emptyList() else queryLocalMedia(trashedOnly = false)
+            if (allItems.isEmpty()) {
+                latestAllMedia = emptyList()
+                latestVideosMedia = emptyList()
+                latestMediaByBucket = emptyMap()
+                return@map IndexedLocalMedia(emptyList(), emptyList(), emptyMap(), emptyList())
             }
-        }
-        .flowOn(Dispatchers.IO)
-        .shareIn(
-            scope = repoScope,
-            started = SharingStarted.WhileSubscribed(stopTimeoutMillis = 5_000L, replayExpirationMillis = 15_000L),
-            replay = 1
-        )
-
-    private val sharedLocalAlbums: Flow<List<DriveFolder>> = sharedAllLocalMedia
-        .map { allItems ->
-            if (allItems.isEmpty()) return@map emptyList()
 
             val grouped = LinkedHashMap<String, MutableList<MediaItem>>()
+            val videos = ArrayList<MediaItem>(64)
             for (item in allItems) {
                 val bucketId = item.parentId ?: LOCAL_BUCKET_UNKNOWN
                 grouped.getOrPut(bucketId) { mutableListOf() }.add(item)
+                if (item.isVideo) videos.add(item)
             }
 
             val albums = grouped.map { (bucketId, items) ->
@@ -131,19 +135,48 @@ class LocalMediaRepository(private val context: Context) {
                     coverIsVideo = newest.isVideo,
                     coverSizeBytes = newest.sizeBytes
                 )
-            }
-
-            albums.sortedWith(
+            }.sortedWith(
                 compareBy<DriveFolder> { albumPriority(it.name) }
                     .thenByDescending { it.modifiedTimeEpochMs }
             )
+
+            latestAllMedia = allItems
+            latestVideosMedia = videos
+            latestMediaByBucket = grouped
+
+            IndexedLocalMedia(
+                allItems = allItems,
+                videos = videos,
+                byBucket = grouped,
+                albums = albums
+            )
         }
-        .flowOn(Dispatchers.Default)
+        .flowOn(Dispatchers.IO)
         .shareIn(
             scope = repoScope,
             started = SharingStarted.WhileSubscribed(stopTimeoutMillis = 5_000L, replayExpirationMillis = 15_000L),
             replay = 1
         )
+
+    private val sharedAllLocalMedia: Flow<List<MediaItem>> = sharedIndexedLocalMedia.map { it.allItems }
+
+    private val sharedSystemFavoriteIds: Flow<Set<String>> = sharedMediaStoreTriggers
+        .conflate()
+        .map {
+            if (!hasMediaPermission() || Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                emptySet()
+            } else {
+                querySystemFavoriteIds()
+            }
+        }
+        .flowOn(Dispatchers.IO)
+        .shareIn(
+            scope = repoScope,
+            started = SharingStarted.WhileSubscribed(stopTimeoutMillis = 5_000L, replayExpirationMillis = 15_000L),
+            replay = 1
+        )
+
+    private val sharedLocalAlbums: Flow<List<DriveFolder>> = sharedIndexedLocalMedia.map { it.albums }
 
     fun notifyPermissionChanged() {
         permissionRefreshTrigger.value++
@@ -215,11 +248,11 @@ class LocalMediaRepository(private val context: Context) {
     fun observeLocalAlbums(): Flow<List<DriveFolder>> = sharedLocalAlbums
 
     fun observeLocalAlbumMedia(bucketId: String): Flow<List<MediaItem>> =
-        observeAllLocalMedia().map { allItems ->
+        sharedIndexedLocalMedia.map { indexed ->
             when (bucketId) {
-                LOCAL_BUCKET_ALL -> allItems
-                LOCAL_BUCKET_VIDEOS -> allItems.filter { it.isVideo }
-                else -> allItems.filter { it.parentId == bucketId }
+                LOCAL_BUCKET_ALL -> indexed.allItems
+                LOCAL_BUCKET_VIDEOS -> indexed.videos
+                else -> indexed.byBucket[bucketId].orEmpty()
             }
         }
 

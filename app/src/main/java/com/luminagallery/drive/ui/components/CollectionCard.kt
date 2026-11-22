@@ -38,7 +38,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -87,14 +90,30 @@ fun CollectionCard(
         label = "collectionCoverScale"
     )
 
+    val originTracker = LocalAlbumTransitionOrigin.current
+    val hostView = LocalView.current
+    val cardPivotRef = remember { floatArrayOf(0.5f, 0.5f) }
+
     Column(
         modifier = modifier
             .fillMaxWidth()
+            .onGloballyPositioned { coords ->
+                val vw = hostView.width.toFloat()
+                val vh = hostView.height.toFloat()
+                if (vw > 0f && vh > 0f) {
+                    val b = coords.boundsInRoot()
+                    cardPivotRef[0] = b.center.x / vw
+                    cardPivotRef[1] = b.center.y / vh
+                }
+            }
             .hoverable(interactionSource = interactionSource)
             .clickable(
                 interactionSource = interactionSource,
                 indication = null,
-                onClick = onClick
+                onClick = {
+                    originTracker.record(collection.id, cardPivotRef[0], cardPivotRef[1])
+                    onClick()
+                }
             )
     ) {
         Box(

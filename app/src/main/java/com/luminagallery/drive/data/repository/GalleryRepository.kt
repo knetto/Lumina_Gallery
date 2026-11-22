@@ -17,20 +17,25 @@ import com.luminagallery.drive.domain.model.DriveFolder
 import com.luminagallery.drive.domain.model.MediaItem
 import com.luminagallery.drive.domain.model.MediaType
 import com.luminagallery.drive.domain.model.SyncStatus
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.shareIn
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Single source of truth implementing Stale-While-Revalidate:
@@ -75,12 +80,23 @@ class GalleryRepository(
         val previewCovers: List<AlbumCoverPreview>
     )
 
+    private val repoScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val folderMediaCache = ConcurrentHashMap<String, List<MediaItem>>()
+    private val subfoldersCache = ConcurrentHashMap<String, List<DriveFolder>>()
+
+    fun getCachedFolderMedia(parentId: String): List<MediaItem>? = folderMediaCache[parentId]
+    fun getCachedSubfolders(parentId: String): List<DriveFolder>? = subfoldersCache[parentId]
+
     private val folderRollupsFlow: Flow<Map<String, FolderRollup>> = combine(
         itemDao.observeAllFoldersLight(),
         itemDao.observeParentCoverSummaries()
     ) { allFolders, mediaSummaries ->
         computeRecursiveRollups(allFolders, mediaSummaries)
-    }.flowOn(Dispatchers.Default)
+    }.flowOn(Dispatchers.Default).shareIn(
+        scope = repoScope,
+        started = SharingStarted.WhileSubscribed(stopTimeoutMillis = 10_000L, replayExpirationMillis = 30_000L),
+        replay = 1
+    )
 
     fun observePinnedRoots(): Flow<List<DriveFolder>> = combine(
         pinnedRootDao.observePinnedRootsWithStats(),
@@ -113,7 +129,7 @@ class GalleryRepository(
      * Full parentId -> direct child DriveFolders map with recursive rollups & collage covers,
      * powering Samsung-style expandable Drive folders in the left album sidebar.
      */
-    fun observeAllDriveSubfoldersByParent(): Flow<Map<String, List<DriveFolder>>> = combine(
+    private val sharedDriveSubfoldersByParent: Flow<Map<String, List<DriveFolder>>> = combine(
         itemDao.observeAllFoldersLight(),
         folderRollupsFlow
     ) { allFolders, rollups ->
@@ -139,8 +155,16 @@ class GalleryRepository(
             byParent.getOrPut(parent) { mutableListOf() }.add(folder)
         }
         byParent.values.forEach { list -> list.sortBy { it.name.lowercase() } }
+        byParent.forEach { (parentId, list) -> subfoldersCache[parentId] = list }
         byParent
-    }.flowOn(Dispatchers.Default)
+    }.flowOn(Dispatchers.Default).shareIn(
+        scope = repoScope,
+        started = SharingStarted.WhileSubscribed(stopTimeoutMillis = 10_000L, replayExpirationMillis = 30_000L),
+        replay = 1
+    )
+
+    fun observeAllDriveSubfoldersByParent(): Flow<Map<String, List<DriveFolder>>> =
+        sharedDriveSubfoldersByParent
 
     fun observeSubfolders(parentId: String): Flow<List<DriveFolder>> = combine(
         itemDao.observeSubfoldersWithStats(parentId),
@@ -163,7 +187,7 @@ class GalleryRepository(
                 coverSizeBytes = rollup?.coverSizeBytes ?: 0L,
                 previewCovers = rollup?.previewCovers.orEmpty()
             )
-        }
+        }.also { subfoldersCache[parentId] = it }
     }.flowOn(Dispatchers.Default)
 
     /**
@@ -289,13 +313,13 @@ class GalleryRepository(
 
     fun observeMediaInFolder(parentId: String): Flow<List<MediaItem>> =
         itemDao.observeMediaInFolder(parentId).map { entities ->
-            entities.map(DriveMapper::entityToMediaItem)
-        }
+            entities.map(DriveMapper::entityToMediaItem).also { folderMediaCache[parentId] = it }
+        }.flowOn(Dispatchers.Default)
 
     fun observeFlattenedMedia(rootFolderId: String): Flow<List<MediaItem>> =
         itemDao.observeFlattenedMediaRecursive(rootFolderId).map { entities ->
             entities.map(DriveMapper::entityToMediaItem)
-        }
+        }.flowOn(Dispatchers.Default)
 
     fun searchMedia(
         query: String,

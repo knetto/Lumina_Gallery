@@ -83,7 +83,10 @@ class CollectionViewModel(
         started = SharingStarted.WhileSubscribed(5_000L),
         initialValue = CollectionUiState(
             collectionId = collectionId,
-            collectionName = initialCollectionName
+            collectionName = initialCollectionName,
+            breadcrumbs = listOf(BreadcrumbItem(collectionId, initialCollectionName)),
+            items = organizationRepository.getCachedGridItems(collectionId),
+            isUnmeteredWifi = networkMonitor.networkState.value.isUnmeteredWifi
         )
     )
 

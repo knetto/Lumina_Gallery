@@ -55,11 +55,15 @@ class GalleryExtrasRepository(
     private val _locationProgressFlow = MutableStateFlow(LocationScanProgress(isScanning = true))
     val locationProgressFlow: StateFlow<LocationScanProgress> = _locationProgressFlow.asStateFlow()
 
+    @Volatile
+    var latestFavoriteItemIds: Set<String> = emptySet()
+        private set
+
     val favoriteItemIdsFlow: Flow<Set<String>> = combine(
         extrasDao.observeFavoriteItemIds(),
         localMediaRepository.observeSystemFavoriteLocalIds()
     ) { dbFavs, sysFavs ->
-        (dbFavs + sysFavs).toSet()
+        (dbFavs + sysFavs).toSet().also { latestFavoriteItemIds = it }
     }.flowOn(Dispatchers.Default)
 
     val hiddenAlbumIdsFlow: Flow<Set<String>> = extrasDao.observeHiddenAlbumIds()

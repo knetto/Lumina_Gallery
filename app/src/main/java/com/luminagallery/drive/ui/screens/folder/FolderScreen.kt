@@ -123,9 +123,13 @@ import com.luminagallery.drive.ui.components.FormatUtils
 import com.luminagallery.drive.ui.components.MediaGridItem
 import com.luminagallery.drive.ui.components.MediaGridShimmer
 import com.luminagallery.drive.ui.components.MultiSelectActionBar
+import com.luminagallery.drive.LocalAppContainer
+import com.luminagallery.drive.LocalGalleryImageLoader
+import com.luminagallery.drive.data.local.LocalMediaRepository
 import com.luminagallery.drive.ui.components.OneUiMotion
 import com.luminagallery.drive.ui.components.PinchZoomGridContainer
 import com.luminagallery.drive.ui.components.oneUiClickable
+import com.luminagallery.drive.ui.components.prefetchAlbumThumbnails
 import com.luminagallery.drive.ui.screens.stories.StorySlideshowDialog
 import kotlinx.coroutines.delay
 
@@ -148,6 +152,8 @@ fun FolderScreen(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val appContainer = LocalAppContainer.current
+    val imageLoader = LocalGalleryImageLoader.current
     val haptic = LocalHapticFeedback.current
     val gridState = rememberLazyGridState()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -199,9 +205,13 @@ fun FolderScreen(
         viewModel.clearSnackbar()
     }
 
-    // Reset grid scroll cleanly when switching album via left sidebar
+    // Reset grid scroll cleanly ONLY when switching album via left sidebar (never on initial mount!)
+    var lastMountedFolderId by remember { mutableStateOf(uiState.folderId) }
     LaunchedEffect(uiState.folderId) {
-        gridState.scrollToItem(0)
+        if (uiState.folderId != lastMountedFolderId) {
+            lastMountedFolderId = uiState.folderId
+            gridState.scrollToItem(0)
+        }
     }
 
     var autoScrollDelta by remember { mutableFloatStateOf(0f) }
@@ -411,6 +421,19 @@ fun FolderScreen(
                         activeFolderId = uiState.folderId,
                         isUnmeteredWifi = uiState.isUnmeteredWifi,
                         onSelectAlbum = { id, name ->
+                            val cached = if (LocalMediaRepository.isLocalFolderId(id)) {
+                                appContainer.localMediaRepository.getCachedAlbumMedia(id)
+                            } else {
+                                appContainer.galleryRepository.getCachedFolderMedia(id).orEmpty()
+                            }
+                            if (cached.isNotEmpty()) {
+                                prefetchAlbumThumbnails(
+                                    context = context.applicationContext,
+                                    imageLoader = imageLoader,
+                                    items = cached,
+                                    isUnmeteredWifi = uiState.isUnmeteredWifi
+                                )
+                            }
                             viewModel.switchToAlbum(id, name)
                         }
                     )
@@ -499,12 +522,10 @@ fun FolderScreen(
                         AnimatedContent(
                             targetState = uiState.folderId,
                             transitionSpec = {
-                                (scaleIn(tween(280, easing = SidebarEasing), initialScale = 0.96f) +
-                                    slideInVertically(tween(280, easing = SidebarEasing)) { it / 36 } +
-                                    fadeIn(tween(220, easing = SidebarEasing)))
+                                (scaleIn(tween(180, easing = OneUiMotion.AlbumExpandEasing), initialScale = 0.985f) +
+                                    fadeIn(tween(140, easing = OneUiMotion.AlbumExpandEasing)))
                                     .togetherWith(
-                                        scaleOut(tween(170, easing = SidebarEasing), targetScale = 0.98f) +
-                                            fadeOut(tween(140))
+                                        fadeOut(tween(100))
                                     )
                             },
                             label = "albumSwitchTransition"
