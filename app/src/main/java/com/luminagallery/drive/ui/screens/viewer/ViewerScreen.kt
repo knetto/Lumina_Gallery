@@ -112,9 +112,12 @@ import coil3.compose.AsyncImage
 import coil3.request.CachePolicy
 import coil3.request.Disposable
 import coil3.request.ImageRequest
+import coil3.request.allowRgb565
 import coil3.request.crossfade
+import coil3.size.Precision
 import com.luminagallery.drive.LocalGalleryImageLoader
 import com.luminagallery.drive.data.remote.DriveConstants
+import com.luminagallery.drive.data.repository.LocalThumbnailRequest
 import com.luminagallery.drive.domain.model.MediaItem
 import com.luminagallery.drive.ui.components.ExifMetadataBottomSheet
 import com.luminagallery.drive.ui.components.FormatUtils
@@ -753,12 +756,15 @@ private fun SamsungFilmstripScrubber(
                     label = "stripGap"
                 )
 
-                val thumbRequest = remember(item.id, item.isLocal, item.localContentUri, item.thumbnailLink, isUnmeteredWifi) {
+                val thumbRequest = remember(item.id, item.isLocal, item.localContentUri, item.thumbnailLink, item.isVideo, isUnmeteredWifi) {
                     if (item.isLocal && !item.localContentUri.isNullOrBlank()) {
                         ImageRequest.Builder(context)
-                            .data(item.localContentUri)
+                            .data(LocalThumbnailRequest(item.localContentUri, item.isVideo))
                             .memoryCacheKey(DriveConstants.stableThumbMemoryKey(item.id))
                             .size(160)
+                            .precision(Precision.INEXACT)
+                            .allowRgb565(true)
+                            .crossfade(false)
                             .build()
                     } else {
                         val url = DriveConstants.buildThumbnailUrl(
@@ -773,6 +779,9 @@ private fun SamsungFilmstripScrubber(
                             .memoryCacheKey(DriveConstants.stableThumbMemoryKey(item.id))
                             .diskCacheKey(DriveConstants.thumbnailCacheKey(item.id, isUnmeteredWifi))
                             .size(160)
+                            .precision(Precision.INEXACT)
+                            .allowRgb565(true)
+                            .crossfade(false)
                             .build()
                     }
                 }

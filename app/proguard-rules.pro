@@ -52,4 +52,5 @@
 # Room
 -keep class * extends androidx.room.RoomDatabase
 -keep @androidx.room.Entity class *
+-keep class com.luminagallery.drive.data.local.dao.** { *; }
 -dontwarn androidx.room.paging.**

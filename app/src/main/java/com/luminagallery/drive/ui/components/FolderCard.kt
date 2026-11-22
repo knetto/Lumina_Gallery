@@ -47,11 +47,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
+import coil3.request.allowRgb565
 import coil3.request.crossfade
+import coil3.size.Precision
 import com.luminagallery.drive.LocalGalleryImageLoader
 import com.luminagallery.drive.data.local.LocalMediaRepository
 import com.luminagallery.drive.data.remote.DriveConstants
+import com.luminagallery.drive.data.repository.LocalThumbnailRequest
 import com.luminagallery.drive.domain.model.DriveFolder
+
+private val FolderCoverShape = RoundedCornerShape(18.dp)
 
 /**
  * Samsung One UI Gallery album tile:
@@ -188,7 +193,7 @@ fun FolderCoverArtwork(
 
     val context = LocalContext.current
     val imageLoader = LocalGalleryImageLoader.current
-    val coverShape = RoundedCornerShape(18.dp)
+    val coverShape = FolderCoverShape
 
     val coverRequest = remember(
         folder.isLocal,
@@ -202,9 +207,12 @@ fun FolderCoverArtwork(
         if (folder.isLocal) {
             val uriStr = folder.coverThumbnailLink ?: return@remember null
             ImageRequest.Builder(context)
-                .data(uriStr)
+                .data(LocalThumbnailRequest(uriStr, folder.coverIsVideo))
+                .size(420)
+                .precision(Precision.INEXACT)
+                .allowRgb565(true)
                 .memoryCacheKey(DriveConstants.stableThumbMemoryKey(coverId))
-                .crossfade(120)
+                .crossfade(false)
                 .build()
         } else {
             val url = DriveConstants.buildThumbnailUrl(
@@ -216,9 +224,12 @@ fun FolderCoverArtwork(
             ) ?: return@remember null
             ImageRequest.Builder(context)
                 .data(url)
+                .size(420)
+                .precision(Precision.INEXACT)
+                .allowRgb565(true)
                 .memoryCacheKey(DriveConstants.stableThumbMemoryKey(coverId))
                 .diskCacheKey(DriveConstants.thumbnailCacheKey(coverId, isUnmeteredWifi))
-                .crossfade(140)
+                .crossfade(100)
                 .build()
         }
     }

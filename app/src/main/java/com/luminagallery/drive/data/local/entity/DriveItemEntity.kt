@@ -10,6 +10,7 @@ import androidx.room.PrimaryKey
         Index(value = ["parentId"]),
         Index(value = ["isFolder"]),
         Index(value = ["parentId", "isFolder", "trashed"]),
+        Index(value = ["parentId", "isFolder", "trashed", "createdTimeEpochMs"]),
         Index(value = ["createdTimeEpochMs"]),
         Index(value = ["mediaType"]),
         Index(value = ["name"])

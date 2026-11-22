@@ -31,11 +31,14 @@ import com.luminagallery.drive.domain.usecase.ExportMediaUseCase
 import com.luminagallery.drive.domain.usecase.ManageRootsUseCase
 import com.luminagallery.drive.domain.usecase.SyncGalleryUseCase
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChangedBy
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -130,6 +133,7 @@ class HomeViewModel(
 ) : ViewModel() {
 
     private val selectedTabFlow = MutableStateFlow(MainTab.ALBUMS)
+    private val storiesActivatedFlow = MutableStateFlow(false)
     private val albumsFilterFlow = MutableStateFlow(AlbumsTabFilter.ALL)
     private val permissionGrantedFlow = MutableStateFlow(localMediaRepository.hasMediaPermission())
     private val locationPermVersionFlow = MutableStateFlow(0)
@@ -168,22 +172,31 @@ class HomeViewModel(
         )
     }.flowOn(Dispatchers.Default)
 
+    private val lazyStoriesFlow = storiesActivatedFlow.flatMapLatest { active ->
+        if (!active) {
+            flowOf(emptyList())
+        } else {
+            combine(
+                localMediaRepository.observeAllLocalMedia(),
+                repository.searchMedia("", null, null, null),
+                locationsFlow,
+                extrasRepository.favoriteStoryIdsFlow
+            ) { localPics, drivePics, locations, favStoryIds ->
+                extrasRepository.generateStories(
+                    allMedia = (localPics + drivePics).sortedByDescending { it.createdTimeEpochMs },
+                    locations = locations,
+                    favoriteStoryIds = favStoryIds
+                )
+            }.flowOn(Dispatchers.Default)
+        }
+    }
+
     private val storiesAndExtrasFlow = combine(
-        localMediaRepository.observeAllLocalMedia(),
-        repository.searchMedia("", null, null, null),
-        locationsFlow,
-        extrasRepository.favoriteStoryIdsFlow,
-        combine(
-            organizationRepository.observeAllAvailableAlbums(),
-            extrasRepository.hiddenAlbumIdsFlow,
-            extrasRepository.favoriteItemIdsFlow
-        ) { allAlbums, hiddenIds, favIds -> Triple(allAlbums, hiddenIds, favIds) }
-    ) { localPics, drivePics, locations, favStoryIds, (allAlbums, hiddenIds, favIds) ->
-        val stories = extrasRepository.generateStories(
-            allMedia = (localPics + drivePics).sortedByDescending { it.createdTimeEpochMs },
-            locations = locations,
-            favoriteStoryIds = favStoryIds
-        )
+        lazyStoriesFlow,
+        organizationRepository.observeAllAvailableAlbums(),
+        extrasRepository.hiddenAlbumIdsFlow,
+        extrasRepository.favoriteItemIdsFlow
+    ) { stories, allAlbums, hiddenIds, favIds ->
         ExtrasBundle(
             stories = stories,
             allAvailableAlbums = allAlbums,
@@ -305,7 +318,11 @@ class HomeViewModel(
 
     init {
         if (credentialStore.state.value is ServiceAccountState.Configured) {
-            triggerSmartSync()
+            viewModelScope.launch {
+                // Let initial local UI & thumbnails render before starting Drive TLS sync
+                delay(600L)
+                triggerSmartSync()
+            }
         }
         // Observe shared Room-cached location index for Pictures day headers + Stories Trips
         viewModelScope.launch {
@@ -315,6 +332,8 @@ class HomeViewModel(
             }
         }
         viewModelScope.launch(Dispatchers.IO) {
+            // Defer background EXIF GPS indexing briefly so cold launch has uncontested CPU & flash I/O
+            delay(1_500L)
             combine(
                 localMediaRepository.observeAllLocalMedia(),
                 locationPermVersionFlow
@@ -330,6 +349,9 @@ class HomeViewModel(
 
     fun selectTab(tab: MainTab) {
         selectedTabFlow.value = tab
+        if (tab == MainTab.STORIES) {
+            storiesActivatedFlow.value = true
+        }
         if (tab != MainTab.PICTURES) {
             selectedPictureIdsFlow.value = emptySet()
             forcePictureSelectionFlow.value = false

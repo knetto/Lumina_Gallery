@@ -36,7 +36,7 @@ class CoilCacheManager(
 
     val currentImageLoader: ImageLoader get() = _imageLoader.value
 
-    private val _diskUsageBytes = MutableStateFlow(computeDirectoryBytes(diskCacheDir))
+    private val _diskUsageBytes = MutableStateFlow(0L)
     val diskUsageBytesFlow: StateFlow<Long> = _diskUsageBytes.asStateFlow()
 
     suspend fun updateMaxCacheSizeMb(maxSizeMb: Int) = withContext(Dispatchers.IO) {
@@ -69,11 +69,12 @@ class CoilCacheManager(
     }
 
     private fun buildImageLoader(maxCacheMb: Int): ImageLoader {
-        if (!diskCacheDir.exists()) diskCacheDir.mkdirs()
         val maxBytes = maxCacheMb.toLong() * 1024L * 1024L
 
         return ImageLoader.Builder(context)
             .components {
+                add(LocalMediaThumbnailKeyer())
+                add(LocalMediaThumbnailFetcher.Factory(context))
                 add(RawImageDecoder.Factory())
                 add(VideoFrameDecoder.Factory())
                 add(
@@ -84,16 +85,17 @@ class CoilCacheManager(
             }
             .memoryCache {
                 MemoryCache.Builder()
-                    .maxSizePercent(context, 0.25)
+                    .maxSizePercent(context, 0.28)
                     .build()
             }
             .diskCache {
+                if (!diskCacheDir.exists()) diskCacheDir.mkdirs()
                 DiskCache.Builder()
                     .directory(diskCacheDir.toOkioPath())
                     .maxSizeBytes(maxBytes)
                     .build()
             }
-            .crossfade(160)
+            .crossfade(false)
             .build()
     }
 

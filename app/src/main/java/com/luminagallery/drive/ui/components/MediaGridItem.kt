@@ -12,9 +12,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -46,13 +44,33 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
+import coil3.request.allowRgb565
 import coil3.request.crossfade
+import coil3.size.Precision
 import com.luminagallery.drive.LocalGalleryImageLoader
 import com.luminagallery.drive.data.remote.DriveConstants
+import com.luminagallery.drive.data.repository.LocalThumbnailRequest
 import com.luminagallery.drive.domain.model.MediaItem
+
+private val VideoBottomScrimBrush = Brush.verticalGradient(
+    colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.62f))
+)
+private val RawBadgeShape = RoundedCornerShape(5.dp)
+private val RawBadgeBg = Color.Black.copy(alpha = 0.58f)
+private val TilePressScrimColor = Color.Black.copy(alpha = 0.14f)
+private val SelectionUnselectedBg = Color.Black.copy(alpha = 0.28f)
+private val SelectionBorderColor = Color.White.copy(alpha = 0.85f)
+private val FavoriteRedColor = Color(0xFFFF4D67)
+private val FavoriteShadowColor = Color.Black.copy(alpha = 0.42f)
+private val SelectionSpringSpec = spring<Dp>(
+    dampingRatio = Spring.DampingRatioNoBouncy,
+    stiffness = Spring.StiffnessMediumLow
+)
+private val TilePressSpringSpec = spring<Float>(dampingRatio = 0.75f, stiffness = 580f)
 
 @OptIn(ExperimentalSharedTransitionApi::class, ExperimentalFoundationApi::class)
 @Composable
@@ -72,30 +90,36 @@ fun MediaGridItem(
     val context = LocalContext.current
     val imageLoader = LocalGalleryImageLoader.current
 
-    val insetPadding by animateDpAsState(
-        targetValue = if (isSelected) 7.dp else 0.dp,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioNoBouncy,
-            stiffness = Spring.StiffnessMediumLow
-        ),
-        label = "selectionInset"
-    )
+    // Avoid allocating selection spring animations per tile during normal 120Hz scrolling
+    val insetPadding = if (isSelectionMode) {
+        animateDpAsState(
+            targetValue = if (isSelected) 7.dp else 0.dp,
+            animationSpec = SelectionSpringSpec,
+            label = "selectionInset"
+        ).value
+    } else {
+        0.dp
+    }
 
-    val cornerRadius by animateDpAsState(
-        targetValue = if (isSelected) 10.dp else 0.dp,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioNoBouncy,
-            stiffness = Spring.StiffnessMediumLow
-        ),
-        label = "selectionRadius"
-    )
+    val cornerRadius = if (isSelectionMode) {
+        animateDpAsState(
+            targetValue = if (isSelected) 10.dp else 0.dp,
+            animationSpec = SelectionSpringSpec,
+            label = "selectionRadius"
+        ).value
+    } else {
+        0.dp
+    }
 
-    val imageRequest = remember(item.isLocal, item.localContentUri, item.id, item.thumbnailLink, isUnmeteredWifi) {
+    val imageRequest = remember(item.isLocal, item.localContentUri, item.id, item.thumbnailLink, item.isVideo, isUnmeteredWifi) {
         if (item.isLocal && !item.localContentUri.isNullOrBlank()) {
             ImageRequest.Builder(context)
-                .data(item.localContentUri)
+                .data(LocalThumbnailRequest(item.localContentUri, item.isVideo))
+                .size(360)
+                .precision(Precision.INEXACT)
+                .allowRgb565(true)
                 .memoryCacheKey(DriveConstants.stableThumbMemoryKey(item.id))
-                .crossfade(100)
+                .crossfade(false)
                 .build()
         } else {
             val url = DriveConstants.buildThumbnailUrl(
@@ -107,9 +131,12 @@ fun MediaGridItem(
             ) ?: return@remember null
             ImageRequest.Builder(context)
                 .data(url)
+                .size(360)
+                .precision(Precision.INEXACT)
+                .allowRgb565(true)
                 .memoryCacheKey(DriveConstants.stableThumbMemoryKey(item.id))
                 .diskCacheKey(DriveConstants.thumbnailCacheKey(item.id, isUnmeteredWifi))
-                .crossfade(120)
+                .crossfade(80)
                 .build()
         }
     }
@@ -120,10 +147,9 @@ fun MediaGridItem(
 
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
-    val isHovered by interactionSource.collectIsHoveredAsState()
     val pressScale by animateFloatAsState(
         targetValue = if (isPressed) 0.945f else 1f,
-        animationSpec = spring(dampingRatio = 0.75f, stiffness = 580f),
+        animationSpec = TilePressSpringSpec,
         label = "mediaTilePress"
     )
 
@@ -147,26 +173,32 @@ fun MediaGridItem(
             .fillMaxWidth()
             .aspectRatio(1f)
             .graphicsLayer {
-                scaleX = pressScale
-                scaleY = pressScale
+                if (pressScale != 1f) {
+                    scaleX = pressScale
+                    scaleY = pressScale
+                }
             }
             .background(
                 if (isSelected) MaterialTheme.colorScheme.surfaceContainerHigh
                 else MaterialTheme.colorScheme.surfaceContainerLow
             )
-            .hoverable(interactionSource = interactionSource)
             .then(clickModifier)
     ) {
-        val tileModifier = with(sharedTransitionScope) {
+        val baseTileMod = if (insetPadding > 0.dp || cornerRadius > 0.dp) {
             Modifier
                 .fillMaxSize()
                 .padding(insetPadding)
                 .clip(RoundedCornerShape(cornerRadius))
-                .sharedElement(
-                    sharedContentState = rememberSharedContentState(key = "media_${item.id}"),
-                    animatedVisibilityScope = animatedVisibilityScope,
-                    boundsTransform = OneUiMotion.SharedPhotoBoundsTransform
-                )
+        } else {
+            Modifier.fillMaxSize()
+        }
+
+        val tileModifier = with(sharedTransitionScope) {
+            baseTileMod.sharedElement(
+                sharedContentState = rememberSharedContentState(key = "media_${item.id}"),
+                animatedVisibilityScope = animatedVisibilityScope,
+                boundsTransform = OneUiMotion.SharedPhotoBoundsTransform
+            )
         }
 
         AsyncImage(
@@ -177,12 +209,13 @@ fun MediaGridItem(
             modifier = tileModifier.background(MaterialTheme.colorScheme.surfaceContainer)
         )
 
-        OneUiCoverHighlightOverlay(
-            isPressed = isPressed,
-            isHovered = isHovered,
-            shape = RoundedCornerShape(cornerRadius),
-            hoverBorderWidth = 1.dp
-        )
+        if (isPressed) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(TilePressScrimColor)
+            )
+        }
 
         // Minimal Samsung Gallery-style bottom corner video duration
         if (item.isVideo) {
@@ -190,11 +223,7 @@ fun MediaGridItem(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
-                    .background(
-                        Brush.verticalGradient(
-                            colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.62f))
-                        )
-                    )
+                    .background(VideoBottomScrimBrush)
                     .padding(horizontal = 5.dp, vertical = 4.dp)
             ) {
                 Row(
@@ -225,8 +254,8 @@ fun MediaGridItem(
                 modifier = Modifier
                     .align(Alignment.BottomStart)
                     .padding(4.dp)
-                    .clip(RoundedCornerShape(5.dp))
-                    .background(Color.Black.copy(alpha = 0.58f))
+                    .clip(RawBadgeShape)
+                    .background(RawBadgeBg)
                     .padding(horizontal = 4.dp, vertical = 1.dp)
             )
         }
@@ -254,7 +283,7 @@ fun MediaGridItem(
                         Icon(
                             imageVector = Icons.Rounded.Favorite,
                             contentDescription = null,
-                            tint = Color.Black.copy(alpha = 0.42f),
+                            tint = FavoriteShadowColor,
                             modifier = Modifier
                                 .size(15.dp)
                                 .offset(y = 0.8.dp)
@@ -262,7 +291,7 @@ fun MediaGridItem(
                         Icon(
                             imageVector = Icons.Rounded.Favorite,
                             contentDescription = "Favorite",
-                            tint = Color(0xFFFF4D67),
+                            tint = FavoriteRedColor,
                             modifier = Modifier.size(14.dp)
                         )
                     }
@@ -280,11 +309,11 @@ fun MediaGridItem(
                     .clip(CircleShape)
                     .background(
                         if (isSelected) MaterialTheme.colorScheme.primary
-                        else Color.Black.copy(alpha = 0.28f)
+                        else SelectionUnselectedBg
                     )
                     .border(
                         width = if (isSelected) 0.dp else 1.5.dp,
-                        color = Color.White.copy(alpha = 0.85f),
+                        color = SelectionBorderColor,
                         shape = CircleShape
                     ),
                 contentAlignment = Alignment.Center

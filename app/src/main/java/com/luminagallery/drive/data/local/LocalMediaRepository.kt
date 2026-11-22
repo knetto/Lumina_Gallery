@@ -25,17 +25,20 @@ import com.luminagallery.drive.domain.model.ExifMetadata
 import com.luminagallery.drive.domain.model.LocationPhotoGroup
 import com.luminagallery.drive.domain.model.MediaItem
 import com.luminagallery.drive.domain.model.MediaType
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.shareIn
 import kotlinx.coroutines.withContext
 import java.security.MessageDigest
 import java.time.Instant
@@ -53,8 +56,94 @@ import kotlin.math.roundToInt
  */
 class LocalMediaRepository(private val context: Context) {
 
+    private val repoScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val permissionRefreshTrigger = MutableStateFlow(0)
     private val geocodeCache = ConcurrentHashMap<String, Pair<String, String>>() // roundedCoord -> (city, country)
+
+    // Single shared ContentObserver & MediaStore change stream (immediate first tick, 250ms burst coalescing)
+    private val sharedMediaStoreTriggers: Flow<Unit> = combine(
+        observeMediaStoreChanges(),
+        permissionRefreshTrigger
+    ) { _, _ -> Unit }
+        .conflate()
+        .shareIn(
+            scope = repoScope,
+            started = SharingStarted.WhileSubscribed(stopTimeoutMillis = 5_000L, replayExpirationMillis = 0L),
+            replay = 1
+        )
+
+    private val sharedAllLocalMedia: Flow<List<MediaItem>> = sharedMediaStoreTriggers
+        .conflate()
+        .map {
+            if (!hasMediaPermission()) emptyList() else queryLocalMedia(trashedOnly = false)
+        }
+        .flowOn(Dispatchers.IO)
+        .shareIn(
+            scope = repoScope,
+            started = SharingStarted.WhileSubscribed(stopTimeoutMillis = 5_000L, replayExpirationMillis = 15_000L),
+            replay = 1
+        )
+
+    private val sharedSystemFavoriteIds: Flow<Set<String>> = sharedMediaStoreTriggers
+        .conflate()
+        .map {
+            if (!hasMediaPermission() || Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                emptySet()
+            } else {
+                querySystemFavoriteIds()
+            }
+        }
+        .flowOn(Dispatchers.IO)
+        .shareIn(
+            scope = repoScope,
+            started = SharingStarted.WhileSubscribed(stopTimeoutMillis = 5_000L, replayExpirationMillis = 15_000L),
+            replay = 1
+        )
+
+    private val sharedLocalAlbums: Flow<List<DriveFolder>> = sharedAllLocalMedia
+        .map { allItems ->
+            if (allItems.isEmpty()) return@map emptyList()
+
+            val grouped = LinkedHashMap<String, MutableList<MediaItem>>()
+            for (item in allItems) {
+                val bucketId = item.parentId ?: LOCAL_BUCKET_UNKNOWN
+                grouped.getOrPut(bucketId) { mutableListOf() }.add(item)
+            }
+
+            val albums = grouped.map { (bucketId, items) ->
+                val newest = items.first()
+                val folderName = newest.relativePath
+                    ?.trimEnd('/')
+                    ?.substringAfterLast('/')
+                    ?.takeIf { it.isNotBlank() }
+                    ?: "Device Folder"
+                DriveFolder(
+                    id = bucketId,
+                    parentId = null,
+                    name = folderName,
+                    subfolderCount = 0,
+                    mediaCount = items.size,
+                    coverThumbnailLink = newest.localContentUri,
+                    coverItemId = newest.id,
+                    modifiedTimeEpochMs = newest.createdTimeEpochMs,
+                    isPinned = false,
+                    isLocal = true,
+                    coverIsVideo = newest.isVideo,
+                    coverSizeBytes = newest.sizeBytes
+                )
+            }
+
+            albums.sortedWith(
+                compareBy<DriveFolder> { albumPriority(it.name) }
+                    .thenByDescending { it.modifiedTimeEpochMs }
+            )
+        }
+        .flowOn(Dispatchers.Default)
+        .shareIn(
+            scope = repoScope,
+            started = SharingStarted.WhileSubscribed(stopTimeoutMillis = 5_000L, replayExpirationMillis = 15_000L),
+            replay = 1
+        )
 
     fun notifyPermissionChanged() {
         permissionRefreshTrigger.value++
@@ -104,20 +193,9 @@ class LocalMediaRepository(private val context: Context) {
         }
     }
 
-    fun observeAllLocalMedia(): Flow<List<MediaItem>> = combine(
-        observeMediaStoreChanges(),
-        permissionRefreshTrigger
-    ) { _, _ -> Unit }
-        .conflate()
-        .map {
-            if (!hasMediaPermission()) emptyList() else queryLocalMedia(trashedOnly = false)
-        }
-        .flowOn(Dispatchers.IO)
+    fun observeAllLocalMedia(): Flow<List<MediaItem>> = sharedAllLocalMedia
 
-    fun observeTrashedLocalMedia(): Flow<List<MediaItem>> = combine(
-        observeMediaStoreChanges(),
-        permissionRefreshTrigger
-    ) { _, _ -> Unit }
+    fun observeTrashedLocalMedia(): Flow<List<MediaItem>> = sharedMediaStoreTriggers
         .conflate()
         .map {
             if (!hasMediaPermission() || Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
@@ -128,59 +206,13 @@ class LocalMediaRepository(private val context: Context) {
         }
         .flowOn(Dispatchers.IO)
 
-    fun observeSystemFavoriteLocalIds(): Flow<Set<String>> = combine(
-        observeMediaStoreChanges(),
-        permissionRefreshTrigger
-    ) { _, _ -> Unit }
-        .conflate()
-        .map {
-            if (!hasMediaPermission() || Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-                emptySet()
-            } else {
-                querySystemFavoriteIds()
-            }
-        }
-        .flowOn(Dispatchers.IO)
+    fun observeSystemFavoriteLocalIds(): Flow<Set<String>> = sharedSystemFavoriteIds
 
     /**
      * Samsung Gallery style: real folder albums ONLY (no artificial separate "Videos" album;
      * "Videos" lives cleanly inside the ≡ Menu sheet).
      */
-    fun observeLocalAlbums(): Flow<List<DriveFolder>> = observeAllLocalMedia().map { allItems ->
-        if (allItems.isEmpty()) return@map emptyList()
-
-        val grouped = LinkedHashMap<String, MutableList<MediaItem>>()
-        for (item in allItems) {
-            val bucketId = item.parentId ?: LOCAL_BUCKET_UNKNOWN
-            grouped.getOrPut(bucketId) { mutableListOf() }.add(item)
-        }
-
-        val albums = grouped.map { (bucketId, items) ->
-            val newest = items.first()
-            val folderName = newest.relativePath
-                ?.trimEnd('/')
-                ?.substringAfterLast('/')
-                ?.takeIf { it.isNotBlank() }
-                ?: "Device Folder"
-            DriveFolder(
-                id = bucketId,
-                parentId = null,
-                name = folderName,
-                subfolderCount = 0,
-                mediaCount = items.size,
-                coverThumbnailLink = newest.localContentUri,
-                coverItemId = newest.id,
-                modifiedTimeEpochMs = newest.createdTimeEpochMs,
-                isPinned = false,
-                isLocal = true
-            )
-        }
-
-        albums.sortedWith(
-            compareBy<DriveFolder> { albumPriority(it.name) }
-                .thenByDescending { it.modifiedTimeEpochMs }
-        )
-    }.flowOn(Dispatchers.Default)
+    fun observeLocalAlbums(): Flow<List<DriveFolder>> = sharedLocalAlbums
 
     fun observeLocalAlbumMedia(bucketId: String): Flow<List<MediaItem>> =
         observeAllLocalMedia().map { allItems ->
@@ -643,9 +675,12 @@ class LocalMediaRepository(private val context: Context) {
 
     private fun observeMediaStoreChanges(): Flow<Unit> = callbackFlow {
         trySend(Unit)
-        val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
+        val mainHandler = Handler(Looper.getMainLooper())
+        val coalescedEmit = Runnable { trySend(Unit) }
+        val observer = object : ContentObserver(mainHandler) {
             override fun onChange(selfChange: Boolean) {
-                launch { trySend(Unit) }
+                mainHandler.removeCallbacks(coalescedEmit)
+                mainHandler.postDelayed(coalescedEmit, 250L)
             }
         }
         val resolver = context.contentResolver
@@ -654,6 +689,7 @@ class LocalMediaRepository(private val context: Context) {
             resolver.registerContentObserver(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, true, observer)
         }
         awaitClose {
+            mainHandler.removeCallbacks(coalescedEmit)
             runCatching { resolver.unregisterContentObserver(observer) }
         }
     }
@@ -703,7 +739,7 @@ class LocalMediaRepository(private val context: Context) {
         val rawLikes = RAW_EXTS.joinToString(" OR ") { ext ->
             "LOWER(${MediaStore.Files.FileColumns.DISPLAY_NAME}) LIKE '%.$ext'"
         }
-        val selection = "(${MediaStore.Files.FileColumns.MEDIA_TYPE} IN (?, ?) OR $rawLikes) AND ${MediaStore.Files.FileColumns.SIZE} > 0"
+        val selection = "(${MediaStore.Files.FileColumns.MEDIA_TYPE} IN (?, ?) OR (${MediaStore.Files.FileColumns.MEDIA_TYPE} = ${MediaStore.Files.FileColumns.MEDIA_TYPE_NONE} AND ($rawLikes))) AND ${MediaStore.Files.FileColumns.SIZE} > 0"
         val selectionArgs = arrayOf(
             MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE.toString(),
             MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO.toString()
@@ -714,6 +750,7 @@ class LocalMediaRepository(private val context: Context) {
         val zone = ZoneId.systemDefault()
         val today = LocalDate.now(zone)
         val yesterday = today.minusDays(1)
+        val dateLabelCache = HashMap<Long, Pair<String, String>>(128)
 
         val cursor = runCatching {
             if (trashedOnly && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -789,17 +826,20 @@ class LocalMediaRepository(private val context: Context) {
 
                 val zdt = Instant.ofEpochMilli(epochMs.coerceAtLeast(0L)).atZone(zone)
                 val date = zdt.toLocalDate()
-                val monthYear = MONTH_YEAR_FMT.format(zdt)
-                val fullDate = FULL_DATE_FMT.format(zdt)
-                val dayLabel = when (date) {
-                    today -> "Today"
-                    yesterday -> "Yesterday"
-                    else -> if (date.year == today.year) {
-                        SAME_YEAR_DAY_FMT.format(zdt)
-                    } else {
-                        OTHER_YEAR_DAY_FMT.format(zdt)
+                val (monthYear, dayLabel) = dateLabelCache.getOrPut(date.toEpochDay()) {
+                    val m = MONTH_YEAR_FMT.format(zdt)
+                    val d = when (date) {
+                        today -> "Today"
+                        yesterday -> "Yesterday"
+                        else -> if (date.year == today.year) {
+                            SAME_YEAR_DAY_FMT.format(zdt)
+                        } else {
+                            OTHER_YEAR_DAY_FMT.format(zdt)
+                        }
                     }
+                    m to d
                 }
+                val fullDate = FULL_DATE_FMT.format(zdt)
 
                 val folderPathDisplay = relPath?.trimEnd('/')?.takeIf { it.isNotBlank() }
                     ?: bucketDisplay ?: "Device"

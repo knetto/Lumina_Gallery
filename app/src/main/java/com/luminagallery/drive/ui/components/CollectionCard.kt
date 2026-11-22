@@ -44,11 +44,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
+import coil3.request.allowRgb565
 import coil3.request.crossfade
+import coil3.size.Precision
 import com.luminagallery.drive.LocalGalleryImageLoader
 import com.luminagallery.drive.data.remote.DriveConstants
+import com.luminagallery.drive.data.repository.LocalThumbnailRequest
 import com.luminagallery.drive.domain.model.AlbumCoverPreview
 import com.luminagallery.drive.domain.model.AlbumGridItem
+
+private val CollectionCoverShape = RoundedCornerShape(18.dp)
 
 /**
  * Pixel-faithful Samsung One UI Gallery Collection / Group cover:
@@ -149,7 +154,7 @@ fun CollectionCoverArtwork(
     isSelectionMode: Boolean = false,
     isSelected: Boolean = false
 ) {
-    val coverShape = RoundedCornerShape(18.dp)
+    val coverShape = CollectionCoverShape
     val dividerColor = MaterialTheme.colorScheme.background
     val gap = 2.dp
 
@@ -369,9 +374,12 @@ private fun CollageTile(
         if (preview.isLocal) {
             val uri = preview.thumbnailLink ?: return@remember null
             ImageRequest.Builder(context)
-                .data(uri)
+                .data(LocalThumbnailRequest(uri, preview.isVideo))
+                .size(256)
+                .precision(Precision.INEXACT)
+                .allowRgb565(true)
                 .memoryCacheKey(DriveConstants.stableThumbMemoryKey(preview.itemId))
-                .crossfade(100)
+                .crossfade(false)
                 .build()
         } else {
             val url = DriveConstants.buildThumbnailUrl(
@@ -383,9 +391,12 @@ private fun CollageTile(
             ) ?: return@remember null
             ImageRequest.Builder(context)
                 .data(url)
+                .size(256)
+                .precision(Precision.INEXACT)
+                .allowRgb565(true)
                 .memoryCacheKey(DriveConstants.stableThumbMemoryKey(preview.itemId))
                 .diskCacheKey(DriveConstants.thumbnailCacheKey(preview.itemId, isUnmeteredWifi))
-                .crossfade(100)
+                .crossfade(80)
                 .build()
         }
     }

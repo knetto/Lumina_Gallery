@@ -20,12 +20,16 @@ import com.luminagallery.drive.data.repository.MediaExportManager
 import com.luminagallery.drive.domain.usecase.ExportMediaUseCase
 import com.luminagallery.drive.domain.usecase.ManageRootsUseCase
 import com.luminagallery.drive.domain.usecase.SyncGalleryUseCase
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 
 class AppContainer(context: Context) {
     private val appContext = context.applicationContext
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     val json: Json = NetworkModule.createJson()
     val credentialStore: CredentialStore = CredentialStore(appContext, json)
@@ -39,15 +43,23 @@ class AppContainer(context: Context) {
     val localMediaRepository: LocalMediaRepository = LocalMediaRepository(appContext)
     val preferencesManager: PreferencesManager = PreferencesManager(appContext)
 
-    private val initialCacheLimitMb: Int = runBlocking {
-        preferencesManager.getCurrentPreferences().maxCacheSizeMb
-    }
-
     val coilCacheManager: CoilCacheManager = CoilCacheManager(
         context = appContext,
         okHttpClient = okHttpClient,
-        initialMaxCacheMb = initialCacheLimitMb
+        initialMaxCacheMb = PreferencesManager.DEFAULT_CACHE_MB
     )
+
+    init {
+        // Apply custom cache size asynchronously without blocking cold startup on the main thread
+        appScope.launch {
+            val savedCacheMb = runCatching {
+                preferencesManager.getCurrentPreferences().maxCacheSizeMb
+            }.getOrDefault(PreferencesManager.DEFAULT_CACHE_MB)
+            if (savedCacheMb != PreferencesManager.DEFAULT_CACHE_MB) {
+                coilCacheManager.updateMaxCacheSizeMb(savedCacheMb)
+            }
+        }
+    }
 
     val galleryRepository: GalleryRepository = GalleryRepository(
         database = database,

@@ -23,6 +23,7 @@ googleAuth = "1.58.0"
 playServicesAuth = "22.0.0"
 coil = "3.6.3"
 exifinterface = "1.4.2"
+profileinstaller = "1.4.1"
 media3 = "1.11.1"
 maplibre = "13.7.1"
 
@@ -72,6 +73,7 @@ coil-compose = { group = "io.coil-kt.coil3", name = "coil-compose", version.ref 
 coil-network-okhttp = { group = "io.coil-kt.coil3", name = "coil-network-okhttp", version.ref = "coil" }
 coil-video = { group = "io.coil-kt.coil3", name = "coil-video", version.ref = "coil" }
 androidx-exifinterface = { group = "androidx.exifinterface", name = "exifinterface", version.ref = "exifinterface" }
+androidx-profileinstaller = { group = "androidx.profileinstaller", name = "profileinstaller", version.ref = "profileinstaller" }
 
 # Media3 ExoPlayer Video Streaming
 androidx-media3-exoplayer = { group = "androidx.media3", name = "media3-exoplayer", version.ref = "media3" }

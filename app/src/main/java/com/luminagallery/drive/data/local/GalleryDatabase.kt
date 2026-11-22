@@ -35,7 +35,7 @@ import com.luminagallery.drive.data.local.entity.SyncStateEntity
         IgnoredCleanOutEntity::class,
         PhotoLocationEntity::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = true
 )
 abstract class GalleryDatabase : RoomDatabase() {
@@ -149,13 +149,21 @@ abstract class GalleryDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_drive_items_parentId_isFolder_trashed_createdTimeEpochMs` ON `drive_items` (`parentId`, `isFolder`, `trashed`, `createdTimeEpochMs`)"
+                )
+            }
+        }
+
         fun build(context: Context): GalleryDatabase =
             Room.databaseBuilder(
                 context.applicationContext,
                 GalleryDatabase::class.java,
                 DATABASE_NAME
             )
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                 .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
                 .fallbackToDestructiveMigration(dropAllTables = true)
                 .build()
