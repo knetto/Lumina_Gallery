@@ -7,81 +7,95 @@ import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
-import com.google.android.gms.auth.api.identity.Identity
-import com.luminagallery.drive.LocalAppContainer
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
-import androidx.compose.material.icons.rounded.AccountCircle
-import androidx.compose.material.icons.rounded.BatteryChargingFull
-import androidx.compose.material.icons.rounded.CleaningServices
-import androidx.compose.material.icons.rounded.ContentCopy
-import androidx.compose.material.icons.rounded.DeleteOutline
-import androidx.compose.material.icons.rounded.Key
-import androidx.compose.material.icons.rounded.Palette
-import androidx.compose.material.icons.rounded.Refresh
-import androidx.compose.material.icons.rounded.SignalCellularAlt
-import androidx.compose.material.icons.rounded.Storage
-import androidx.compose.material.icons.rounded.Sync
-import androidx.compose.material.icons.rounded.UploadFile
-import androidx.compose.material.icons.rounded.Wifi
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.CloudDone
+import androidx.compose.material.icons.rounded.CloudOff
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LargeTopAppBar
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
-import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.luminagallery.drive.domain.model.CredentialSource
+import com.google.android.gms.auth.api.identity.Identity
+import com.luminagallery.drive.BuildConfig
+import com.luminagallery.drive.LocalAppContainer
+import com.luminagallery.drive.R
+import com.luminagallery.drive.domain.model.AlbumSortMode
+import com.luminagallery.drive.domain.model.MainTab
 import com.luminagallery.drive.domain.model.ServiceAccountState
 import com.luminagallery.drive.domain.model.ThemeMode
 import com.luminagallery.drive.ui.components.FormatUtils
 import java.util.Locale
-import kotlin.math.roundToInt
+
+private enum class SettingsPickerSheet {
+    THEME,
+    START_TAB,
+    GRID_DENSITY,
+    ALBUM_SORT,
+    CACHE_LIMIT
+}
+
+private val OneUiGroupShape = RoundedCornerShape(26.dp)
+private val OneUiSheetShape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -92,11 +106,14 @@ fun SettingsScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val appContainer = LocalAppContainer.current
+    val haptic = LocalHapticFeedback.current
     val snackbarHostState = remember { SnackbarHostState() }
+    val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
 
-    var sliderCacheMb by remember(uiState.preferences.maxCacheSizeMb) {
-        mutableFloatStateOf(uiState.preferences.maxCacheSizeMb.toFloat())
-    }
+    var activePicker by remember { mutableStateOf<SettingsPickerSheet?>(null) }
+    var showSignOutDialog by remember { mutableStateOf(false) }
+    var showResetDefaultsDialog by remember { mutableStateOf(false) }
+    var showAboutDialog by remember { mutableStateOf(false) }
 
     val googleAuthLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
@@ -144,26 +161,30 @@ fun SettingsScreen(
             }
     }
 
-    val credentialsPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        if (uri != null) {
-            viewModel.importCredentials(uri)
-        }
-    }
-
     LaunchedEffect(uiState.snackbarMessage) {
         val msg = uiState.snackbarMessage ?: return@LaunchedEffect
         snackbarHostState.showSnackbar(msg)
         viewModel.clearSnackbar()
     }
 
+    val prefs = uiState.preferences
+    val configuredAccount = uiState.serviceAccountState as? ServiceAccountState.Configured
+    val isSignedIn = configuredAccount != null
+
     Scaffold(
+        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         containerColor = MaterialTheme.colorScheme.background,
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
-            TopAppBar(
-                title = { Text("Settings") },
+            LargeTopAppBar(
+                title = {
+                    Text(
+                        text = "Gallery settings",
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                },
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
                         Icon(
@@ -172,8 +193,10 @@ fun SettingsScreen(
                         )
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.background
+                scrollBehavior = scrollBehavior,
+                colors = TopAppBarDefaults.largeTopAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.background,
+                    scrolledContainerColor = MaterialTheme.colorScheme.background
                 )
             )
         }
@@ -182,456 +205,958 @@ fun SettingsScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 36.dp),
+            verticalArrangement = Arrangement.spacedBy(18.dp)
         ) {
-            // 1. Storage Manager Card
-            item(key = "section_storage") {
-                SettingsCard(
-                    title = "Storage Manager",
-                    subtitle = "Thumbnails use an LRU disk cache; full-res photos & videos never persist on disk",
-                    icon = Icons.Rounded.Storage
-                ) {
-                    val maxBytes = (uiState.storageStats.maxCacheLimitMb.toLong() * 1024L * 1024L)
-                        .coerceAtLeast(1L)
-                    val usedRatio = (uiState.storageStats.diskCacheUsedBytes.toFloat() / maxBytes.toFloat())
-                        .coerceIn(0f, 1f)
-                    val animatedRatio by animateFloatAsState(
-                        targetValue = usedRatio,
-                        label = "cacheUsageBar"
-                    )
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.Bottom
-                    ) {
-                        Column {
-                            Text(
-                                text = FormatUtils.formatFileSize(uiState.storageStats.diskCacheUsedBytes),
-                                style = MaterialTheme.typography.headlineSmall
-                            )
-                            Text(
-                                text = "of ${formatMbLabel(uiState.storageStats.maxCacheLimitMb)} thumbnail cache",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Text(
-                            text = "${uiState.storageStats.cachedMediaCount} items · ${uiState.storageStats.cachedFolderCount} folders",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-
-                    LinearProgressIndicator(
-                        progress = { animatedRatio },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(8.dp),
-                        strokeCap = StrokeCap.Round
-                    )
-
-                    Spacer(Modifier.height(4.dp))
-
-                    // Max cache limit slider (250 MB – 2 GB)
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(
-                            text = "Max thumbnail cache cap",
-                            style = MaterialTheme.typography.labelLarge
-                        )
-                        Text(
-                            text = formatMbLabel(sliderCacheMb.roundToInt()),
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                    }
-
-                    Slider(
-                        value = sliderCacheMb,
-                        onValueChange = { raw ->
-                            sliderCacheMb = (raw / 50f).roundToInt() * 50f
+            // 1. CLOUD & SYNC (Samsung "Cloud sync" style top card — NO JSON Import)
+            item(key = "section_cloud") {
+                OneUiSettingsSection(title = "Cloud sync") {
+                    OneUiAccountRow(
+                        account = configuredAccount,
+                        onSignInClick = ::startGoogleSignIn,
+                        onCopyEmail = { email ->
+                            val clipboard = context.getSystemService(
+                                Context.CLIPBOARD_SERVICE
+                            ) as ClipboardManager
+                            clipboard.setPrimaryClip(ClipData.newPlainText("Google Account", email))
+                            viewModel.showMessage("Copied email to clipboard")
                         },
-                        onValueChangeFinished = {
-                            val committed = sliderCacheMb.roundToInt().coerceIn(250, 2048)
-                            if (committed != uiState.preferences.maxCacheSizeMb) {
-                                viewModel.updateMaxCacheSizeMb(committed)
-                            }
-                        },
-                        valueRange = 250f..2048f
+                        onSignOutClick = { showSignOutDialog = true }
                     )
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("250 MB", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text("1 GB", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text("2 GB", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
+                    OneUiDivider()
 
-                    Spacer(Modifier.height(4.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Button(
-                            onClick = viewModel::clearThumbnailCache,
-                            enabled = !uiState.isClearingCache,
-                            shape = RoundedCornerShape(14.dp),
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            if (uiState.isClearingCache) {
+                    OneUiActionRow(
+                        title = "Sync now",
+                        subtitle = if (uiState.syncStatus.isSyncing) {
+                            "Syncing Google Drive changes…"
+                        } else if (!isSignedIn) {
+                            "Sign in to sync your Drive albums"
+                        } else {
+                            "Last synced · ${FormatUtils.formatLastSync(uiState.syncStatus.lastSyncEpochMs)}"
+                        },
+                        subtitleAccent = uiState.syncStatus.isSyncing,
+                        enabled = isSignedIn && !uiState.syncStatus.isSyncing,
+                        trailingContent = if (uiState.syncStatus.isSyncing) {
+                            {
                                 CircularProgressIndicator(
                                     modifier = Modifier.size(18.dp),
                                     strokeWidth = 2.dp,
-                                    color = MaterialTheme.colorScheme.onPrimary
+                                    color = MaterialTheme.colorScheme.primary
                                 )
-                            } else {
-                                Icon(
-                                    imageVector = Icons.Rounded.CleaningServices,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Spacer(Modifier.width(8.dp))
-                                Text("Clear Thumbnail Cache")
                             }
-                        }
-                    }
-
-                    OutlinedButton(
-                        onClick = viewModel::rebuildMetadataIndex,
-                        enabled = !uiState.syncStatus.isSyncing,
-                        shape = RoundedCornerShape(14.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Refresh,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text("Rebuild Local Metadata Index")
-                    }
-                }
-            }
-
-            // 2. Battery & Network Optimization Card
-            item(key = "section_power") {
-                SettingsCard(
-                    title = "Battery & Sync Optimization",
-                    subtitle = "Zero background wakeups by default; incremental Drive changes.list delta sync",
-                    icon = Icons.Rounded.BatteryChargingFull
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        Icon(
-                            imageVector = if (uiState.networkState.isUnmeteredWifi) {
-                                Icons.Rounded.Wifi
-                            } else {
-                                Icons.Rounded.SignalCellularAlt
-                            },
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = if (uiState.networkState.isUnmeteredWifi) {
-                                    "Unmetered Wi-Fi Active"
-                                } else if (uiState.networkState.isOnline) {
-                                    "Metered Cellular Active"
-                                } else {
-                                    "Offline Mode"
-                                },
-                                style = MaterialTheme.typography.titleSmall
-                            )
-                            Text(
-                                text = if (uiState.networkState.isUnmeteredWifi) {
-                                    "Full-res ±1 pre-fetch & high-DPI thumbnails enabled"
-                                } else {
-                                    "Full-res pre-fetch paused; eco thumbnails active to save radio power"
-                                },
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
-                            Text(
-                                text = "Background Delta Sync",
-                                style = MaterialTheme.typography.titleSmall
-                            )
-                            Text(
-                                text = "Optional WorkManager sync strictly while charging on unmetered Wi-Fi",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Switch(
-                            checked = uiState.preferences.backgroundSyncEnabled,
-                            onCheckedChange = viewModel::setBackgroundSyncEnabled
-                        )
-                    }
-
-                    FilledTonalButton(
-                        onClick = viewModel::triggerDeltaSync,
-                        enabled = !uiState.syncStatus.isSyncing,
-                        shape = RoundedCornerShape(14.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        if (uiState.syncStatus.isSyncing) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(18.dp),
-                                strokeWidth = 2.dp
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            Text("Syncing delta changes…")
-                        } else {
-                            Icon(Icons.Rounded.Sync, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(8.dp))
-                            Text("Sync Delta Now · ${FormatUtils.formatLastSync(uiState.syncStatus.lastSyncEpochMs)}")
-                        }
-                    }
-                }
-            }
-
-            // 3. Appearance & OLED Efficiency Card
-            item(key = "section_appearance") {
-                SettingsCard(
-                    title = "Appearance & OLED",
-                    subtitle = "Pitch black #000000 saves OLED display power",
-                    icon = Icons.Rounded.Palette
-                ) {
-                    val modes = listOf(
-                        ThemeMode.AMOLED_BLACK to "AMOLED",
-                        ThemeMode.DARK to "Dark",
-                        ThemeMode.LIGHT to "Light",
-                        ThemeMode.SYSTEM to "System"
+                        } else null,
+                        onClick = viewModel::triggerDeltaSync
                     )
 
-                    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                        modes.forEachIndexed { index, (mode, label) ->
-                            SegmentedButton(
-                                selected = uiState.preferences.themeMode == mode,
-                                onClick = { viewModel.setThemeMode(mode) },
-                                shape = SegmentedButtonDefaults.itemShape(index, modes.size)
-                            ) {
-                                Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            }
-                        }
-                    }
+                    OneUiDivider()
+
+                    OneUiToggleRow(
+                        title = "Background delta sync",
+                        subtitle = "Sync automatically only while charging on unmetered Wi-Fi",
+                        checked = prefs.backgroundSyncEnabled,
+                        enabled = isSignedIn,
+                        onCheckedChange = viewModel::setBackgroundSyncEnabled
+                    )
+
+                    OneUiDivider()
+
+                    OneUiToggleRow(
+                        title = "High-res on Wi-Fi only",
+                        subtitle = if (uiState.networkState.isUnmeteredWifi) {
+                            "Wi-Fi active · HD thumbnails & pre-fetch enabled"
+                        } else if (uiState.networkState.isOnline) {
+                            "Mobile data active · eco thumbnails active"
+                        } else {
+                            "Offline · browsing cached albums & local media"
+                        },
+                        checked = prefs.wifiOnlyHighRes,
+                        onCheckedChange = viewModel::setWifiOnlyHighRes
+                    )
+                }
+            }
+
+            // 2. DISPLAY & LAYOUT
+            item(key = "section_display") {
+                OneUiSettingsSection(title = "View & layout") {
+                    OneUiValueRow(
+                        title = "Theme",
+                        value = themeModeLabel(prefs.themeMode),
+                        onClick = { activePicker = SettingsPickerSheet.THEME }
+                    )
 
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
-                                Text(
-                                    text = "Dynamic Color (Material You)",
-                                    style = MaterialTheme.typography.titleSmall
-                                )
-                                Text(
-                                    text = "Adapts accent palette from wallpaper while keeping #000000 AMOLED black",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            Switch(
-                                checked = uiState.preferences.dynamicColor,
-                                onCheckedChange = viewModel::setDynamicColor
-                            )
-                        }
+                        OneUiDivider()
+                        OneUiToggleRow(
+                            title = "Color palette (Material You)",
+                            subtitle = "Match accent color to wallpaper while keeping AMOLED black",
+                            checked = prefs.dynamicColor,
+                            onCheckedChange = viewModel::setDynamicColor
+                        )
                     }
+
+                    OneUiDivider()
+
+                    OneUiValueRow(
+                        title = "Default start tab",
+                        value = startTabLabel(prefs.defaultStartTab),
+                        onClick = { activePicker = SettingsPickerSheet.START_TAB }
+                    )
+
+                    OneUiDivider()
+
+                    OneUiValueRow(
+                        title = "Grid density",
+                        value = gridColumnsLabel(prefs.gridColumns),
+                        onClick = { activePicker = SettingsPickerSheet.GRID_DENSITY }
+                    )
+
+                    OneUiDivider()
+
+                    OneUiValueRow(
+                        title = "Album sort order",
+                        value = prefs.albumSortMode.label,
+                        onClick = { activePicker = SettingsPickerSheet.ALBUM_SORT }
+                    )
+
+                    OneUiDivider()
+
+                    OneUiToggleRow(
+                        title = "Show location in Pictures",
+                        subtitle = "Display city and region beside date headers",
+                        checked = prefs.showDayLocationHeaders,
+                        onCheckedChange = viewModel::setShowDayLocationHeaders
+                    )
+
+                    OneUiDivider()
+
+                    OneUiToggleRow(
+                        title = "Show album sidebar rail",
+                        subtitle = "Show quick-switch album rail inside folders",
+                        checked = prefs.showAlbumSidebarDefault,
+                        onCheckedChange = viewModel::setShowAlbumSidebarDefault
+                    )
+
+                    OneUiDivider()
+
+                    OneUiToggleRow(
+                        title = "Show cloud badges",
+                        subtitle = "Display Google Drive badge on synced albums and photos",
+                        checked = prefs.showCloudBadges,
+                        onCheckedChange = viewModel::setShowCloudBadges
+                    )
                 }
             }
 
-            // 4. Google Drive Account & Credentials Card
-            item(key = "section_credentials") {
-                SettingsCard(
-                    title = "Google Drive Account",
-                    subtitle = "Read-only Google Drive access (drive.readonly)",
-                    icon = Icons.Rounded.Key
+            // 3. VIEWER & VIDEO PLAYBACK (Signature Samsung Gallery viewer controls)
+            item(key = "section_viewer") {
+                OneUiSettingsSection(title = "Viewer & video playback") {
+                    OneUiToggleRow(
+                        title = "Auto-play videos",
+                        subtitle = "Start playing videos automatically when opened",
+                        checked = prefs.autoPlayVideos,
+                        onCheckedChange = viewModel::setAutoPlayVideos
+                    )
+
+                    OneUiDivider()
+
+                    OneUiToggleRow(
+                        title = "Start videos muted",
+                        subtitle = "Mute audio until you tap the sound icon",
+                        checked = prefs.startVideosMuted,
+                        onCheckedChange = viewModel::setStartVideosMuted
+                    )
+
+                    OneUiDivider()
+
+                    OneUiToggleRow(
+                        title = "Loop videos",
+                        subtitle = "Automatically repeat videos when playback ends",
+                        checked = prefs.loopVideos,
+                        onCheckedChange = viewModel::setLoopVideos
+                    )
+
+                    OneUiDivider()
+
+                    OneUiToggleRow(
+                        title = "Show filmstrip in viewer",
+                        subtitle = "Display scrollable thumbnail strip at the bottom of photos",
+                        checked = prefs.showViewerFilmstrip,
+                        onCheckedChange = viewModel::setShowViewerFilmstrip
+                    )
+
+                    OneUiDivider()
+
+                    OneUiToggleRow(
+                        title = "Maximum screen brightness",
+                        subtitle = "Boost brightness when viewing full-screen photos and videos",
+                        checked = prefs.maxViewerBrightness,
+                        onCheckedChange = viewModel::setMaxViewerBrightness
+                    )
+
+                    OneUiDivider()
+
+                    OneUiToggleRow(
+                        title = "Keep screen on in viewer",
+                        subtitle = "Prevent display timeout while browsing full-screen media",
+                        checked = prefs.keepScreenOnViewer,
+                        onCheckedChange = viewModel::setKeepScreenOnViewer
+                    )
+
+                    OneUiDivider()
+
+                    OneUiToggleRow(
+                        title = "Swipe down to close",
+                        subtitle = "Drag downward on any photo or video to return to the grid",
+                        checked = prefs.swipeDownToDismiss,
+                        onCheckedChange = viewModel::setSwipeDownToDismiss
+                    )
+
+                    OneUiDivider()
+
+                    OneUiToggleRow(
+                        title = "Pre-fetch adjacent photos",
+                        subtitle = "Preload next and previous Drive photos into RAM for instant swipes",
+                        checked = prefs.prefetchAdjacentMedia,
+                        onCheckedChange = viewModel::setPrefetchAdjacentMedia
+                    )
+                }
+            }
+
+            // 4. STORAGE & DATA
+            item(key = "section_storage") {
+                OneUiSettingsSection(title = "Storage & cache") {
+                    OneUiStorageMeterBlock(
+                        usedBytes = uiState.storageStats.diskCacheUsedBytes,
+                        maxCacheMb = uiState.storageStats.maxCacheLimitMb,
+                        cachedMediaCount = uiState.storageStats.cachedMediaCount,
+                        cachedFolderCount = uiState.storageStats.cachedFolderCount
+                    )
+
+                    OneUiDivider()
+
+                    OneUiValueRow(
+                        title = "Thumbnail cache limit",
+                        value = formatMbLabel(prefs.maxCacheSizeMb),
+                        onClick = { activePicker = SettingsPickerSheet.CACHE_LIMIT }
+                    )
+
+                    OneUiDivider()
+
+                    OneUiActionRow(
+                        title = "Clear thumbnail cache",
+                        subtitle = "Frees ${FormatUtils.formatFileSize(uiState.storageStats.diskCacheUsedBytes)} of cached thumbnails · original photos stay safe",
+                        enabled = !uiState.isClearingCache,
+                        trailingContent = if (uiState.isClearingCache) {
+                            {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        } else null,
+                        onClick = viewModel::clearThumbnailCache
+                    )
+
+                    OneUiDivider()
+
+                    OneUiActionRow(
+                        title = "Rebuild Drive folder index",
+                        subtitle = "Refresh all cached Google Drive folders and metadata",
+                        enabled = isSignedIn && !uiState.syncStatus.isSyncing,
+                        onClick = viewModel::rebuildMetadataIndex
+                    )
+
+                    OneUiDivider()
+
+                    OneUiActionRow(
+                        title = "Reset dismissed Clean Out items",
+                        subtitle = if (uiState.ignoredCleanOutCount > 0) {
+                            "${uiState.ignoredCleanOutCount} dismissed suggestion(s) will reappear"
+                        } else {
+                            "No dismissed Clean Out items"
+                        },
+                        enabled = uiState.ignoredCleanOutCount > 0,
+                        onClick = viewModel::resetIgnoredCleanOut
+                    )
+                }
+            }
+
+            // 5. GENERAL & ABOUT
+            item(key = "section_about") {
+                OneUiSettingsSection(title = "General") {
+                    OneUiActionRow(
+                        title = "Reset settings to defaults",
+                        subtitle = "Restore display, viewer, and sync preferences",
+                        onClick = { showResetDefaultsDialog = true }
+                    )
+
+                    OneUiDivider()
+
+                    OneUiActionRow(
+                        title = "About Lumina Gallery",
+                        subtitle = "Version ${BuildConfig.VERSION_NAME}",
+                        subtitleAccent = true,
+                        showChevron = true,
+                        onClick = { showAboutDialog = true }
+                    )
+                }
+            }
+        }
+    }
+
+    // --- One UI Option Picker Bottom Sheets ---
+    activePicker?.let { sheet ->
+        ModalBottomSheet(
+            onDismissRequest = { activePicker = null },
+            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+            shape = OneUiSheetShape,
+            dragHandle = {
+                Box(
+                    modifier = Modifier
+                        .padding(top = 12.dp, bottom = 6.dp)
+                        .size(width = 36.dp, height = 4.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.32f))
+                )
+            }
+        ) {
+            when (sheet) {
+                SettingsPickerSheet.THEME -> OneUiPickerSheetContent(
+                    title = "Theme",
+                    options = listOf(
+                        PickerOption(ThemeMode.AMOLED_BLACK, "AMOLED black", "Pure #000000 black for OLED battery savings"),
+                        PickerOption(ThemeMode.DARK, "Dark", "Deep charcoal dark mode"),
+                        PickerOption(ThemeMode.LIGHT, "Light", "Clean bright One UI light palette"),
+                        PickerOption(ThemeMode.SYSTEM, "Match system", "Follow Android system theme")
+                    ),
+                    selected = prefs.themeMode,
+                    onSelect = {
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        viewModel.setThemeMode(it)
+                        activePicker = null
+                    }
+                )
+
+                SettingsPickerSheet.START_TAB -> OneUiPickerSheetContent(
+                    title = "Default start tab",
+                    options = listOf(
+                        PickerOption(MainTab.PICTURES, "Pictures", "Chronological timeline of all photos & videos"),
+                        PickerOption(MainTab.ALBUMS, "Albums", "Unified device & Google Drive album grid"),
+                        PickerOption(MainTab.STORIES, "Stories", "Auto-curated trips and photo journals")
+                    ),
+                    selected = prefs.defaultStartTab,
+                    onSelect = {
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        viewModel.setDefaultStartTab(it)
+                        activePicker = null
+                    }
+                )
+
+                SettingsPickerSheet.GRID_DENSITY -> OneUiPickerSheetContent(
+                    title = "Grid density",
+                    options = listOf(
+                        PickerOption(2, "2 columns", "Large detailed thumbnails"),
+                        PickerOption(3, "3 columns", "Balanced medium tiles"),
+                        PickerOption(4, "4 columns", "Samsung Gallery default"),
+                        PickerOption(5, "5 columns", "Compact overview for large libraries")
+                    ),
+                    selected = prefs.gridColumns,
+                    onSelect = {
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        viewModel.setGridColumns(it)
+                        activePicker = null
+                    }
+                )
+
+                SettingsPickerSheet.ALBUM_SORT -> OneUiPickerSheetContent(
+                    title = "Album sort order",
+                    options = AlbumSortMode.entries.map { mode ->
+                        PickerOption(
+                            value = mode,
+                            label = mode.label,
+                            description = when (mode) {
+                                AlbumSortMode.CUSTOM -> "Keep your manual drag-and-drop arrangement"
+                                AlbumSortMode.NAME_ASC -> "Alphabetical order from A to Z"
+                                AlbumSortMode.COUNT_DESC -> "Largest albums shown first"
+                                AlbumSortMode.DATE_DESC -> "Most recently updated albums first"
+                            }
+                        )
+                    },
+                    selected = prefs.albumSortMode,
+                    onSelect = {
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        viewModel.setAlbumSortMode(it)
+                        activePicker = null
+                    }
+                )
+
+                SettingsPickerSheet.CACHE_LIMIT -> OneUiPickerSheetContent(
+                    title = "Thumbnail cache limit",
+                    options = listOf(
+                        PickerOption(250, "250 MB", "Minimal disk footprint"),
+                        PickerOption(500, "500 MB", "Recommended default"),
+                        PickerOption(750, "750 MB", "Balanced for medium libraries"),
+                        PickerOption(1024, "1.0 GB", "Fast recall for large Drive collections"),
+                        PickerOption(1536, "1.5 GB", "Extra headroom for heavy photo libraries"),
+                        PickerOption(2048, "2.0 GB", "Maximum offline thumbnail cache")
+                    ),
+                    selected = nearestCachePreset(prefs.maxCacheSizeMb),
+                    onSelect = {
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        viewModel.updateMaxCacheSizeMb(it)
+                        activePicker = null
+                    }
+                )
+            }
+        }
+    }
+
+    // --- Confirmation & About Dialogs ---
+    if (showSignOutDialog) {
+        AlertDialog(
+            onDismissRequest = { showSignOutDialog = false },
+            shape = OneUiGroupShape,
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            title = { Text("Sign out of Google Drive?", fontWeight = FontWeight.SemiBold) },
+            text = {
+                Text(
+                    "Your on-device photos stay untouched. You can sign back in anytime to view your Google Drive folders.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showSignOutDialog = false
+                        viewModel.signOutGoogleAccount()
+                    }
                 ) {
-                    when (val account = uiState.serviceAccountState) {
-                        ServiceAccountState.NotConfigured -> {
-                            Text(
-                                text = "Not signed in to Google Drive yet.",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
+                    Text("Sign out", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.SemiBold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSignOutDialog = false }) { Text("Cancel") }
+            }
+        )
+    }
 
-                        is ServiceAccountState.Configured -> {
-                            Surface(
-                                shape = RoundedCornerShape(14.dp),
-                                color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable {
-                                        val clipboard = context.getSystemService(
-                                            Context.CLIPBOARD_SERVICE
-                                        ) as ClipboardManager
-                                        clipboard.setPrimaryClip(
-                                            ClipData.newPlainText(
-                                                "Google Account Email",
-                                                account.clientEmail
-                                            )
-                                        )
-                                        viewModel.showMessage("Copied email to clipboard")
-                                    }
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(14.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = account.clientEmail,
-                                            style = MaterialTheme.typography.labelLarge,
-                                            color = MaterialTheme.colorScheme.primary,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                        Spacer(Modifier.height(2.dp))
-                                        val sourceLabel = when (account.source) {
-                                            CredentialSource.GOOGLE_SIGN_IN ->
-                                                "Native Google Sign-In (${account.projectId})"
-                                            CredentialSource.ENCRYPTED_PREFS ->
-                                                "Service Account · EncryptedSharedPreferences"
-                                            CredentialSource.BUNDLED_ASSETS ->
-                                                "Service Account · Bundled Assets"
-                                        }
-                                        Text(
-                                            text = sourceLabel,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                    Icon(
-                                        imageVector = Icons.Rounded.ContentCopy,
-                                        contentDescription = "Copy email",
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                }
-                            }
-                        }
+    if (showResetDefaultsDialog) {
+        AlertDialog(
+            onDismissRequest = { showResetDefaultsDialog = false },
+            shape = OneUiGroupShape,
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            title = { Text("Reset settings?", fontWeight = FontWeight.SemiBold) },
+            text = {
+                Text(
+                    "All display, viewer, playback, and cache limit settings will return to their defaults. Your albums, favorites, and Google account stay untouched.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showResetDefaultsDialog = false
+                        viewModel.resetSettingsToDefaults()
                     }
+                ) {
+                    Text("Reset", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showResetDefaultsDialog = false }) { Text("Cancel") }
+            }
+        )
+    }
 
-                    Button(
-                        onClick = ::startGoogleSignIn,
-                        shape = RoundedCornerShape(14.dp),
-                        modifier = Modifier.fillMaxWidth()
+    if (showAboutDialog) {
+        AlertDialog(
+            onDismissRequest = { showAboutDialog = false },
+            shape = OneUiGroupShape,
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            title = null,
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(72.dp)
+                            .clip(RoundedCornerShape(22.dp))
+                            .background(Color.White),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Icon(Icons.Rounded.AccountCircle, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("Sign in with Google")
+                        Image(
+                            painter = painterResource(id = R.drawable.ic_launcher_foreground),
+                            contentDescription = "Lumina Gallery",
+                            modifier = Modifier.size(96.dp)
+                        )
                     }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        FilledTonalButton(
-                            onClick = {
-                                credentialsPickerLauncher.launch(arrayOf("application/json", "*/*"))
-                            },
-                            shape = RoundedCornerShape(14.dp),
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Icon(Icons.Rounded.UploadFile, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text("Import JSON")
-                        }
-
-                        val activeSource = (uiState.serviceAccountState as? ServiceAccountState.Configured)?.source
-                        if (activeSource == CredentialSource.GOOGLE_SIGN_IN ||
-                            activeSource == CredentialSource.ENCRYPTED_PREFS
-                        ) {
-                            OutlinedButton(
-                                onClick = {
-                                    if (activeSource == CredentialSource.GOOGLE_SIGN_IN) {
-                                        viewModel.signOutGoogleAccount()
-                                    } else {
-                                        viewModel.clearImportedCredentials()
-                                    }
-                                },
-                                shape = RoundedCornerShape(14.dp),
-                                colors = ButtonDefaults.outlinedButtonColors(
-                                    contentColor = MaterialTheme.colorScheme.error
-                                )
-                            ) {
-                                Icon(Icons.Rounded.DeleteOutline, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(Modifier.width(4.dp))
-                                Text(if (activeSource == CredentialSource.GOOGLE_SIGN_IN) "Sign Out" else "Remove")
-                            }
-                        }
+                    Text(
+                        text = "Lumina Gallery",
+                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.SemiBold)
+                    )
+                    Text(
+                        text = "Version ${BuildConfig.VERSION_NAME}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = "Fast 120 Hz unified photo & video gallery for your phone and Google Drive.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (uiState.hiddenAlbumCount > 0) {
+                        Text(
+                            text = "${uiState.hiddenAlbumCount} hidden album(s) · ${uiState.storageStats.cachedMediaCount} indexed Drive items",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
+            },
+            confirmButton = {
+                TextButton(onClick = { showAboutDialog = false }) {
+                    Text("Done", fontWeight = FontWeight.SemiBold)
+                }
             }
+        )
+    }
+}
 
-            item { Spacer(Modifier.height(24.dp)) }
+// ============================================================================================
+// Samsung One UI Settings Building Blocks
+// ============================================================================================
+
+@Composable
+private fun OneUiSettingsSection(
+    title: String,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.labelLarge.copy(
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                letterSpacing = 0.2.sp
+            ),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 20.dp, bottom = 8.dp)
+        )
+        Surface(
+            shape = OneUiGroupShape,
+            color = MaterialTheme.colorScheme.surfaceContainer,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                content = content
+            )
         }
     }
 }
 
 @Composable
-private fun SettingsCard(
-    title: String,
-    subtitle: String,
-    icon: ImageVector,
-    content: @Composable () -> Unit
+private fun OneUiDivider() {
+    HorizontalDivider(
+        modifier = Modifier.padding(horizontal = 20.dp),
+        thickness = 0.6.dp,
+        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.65f)
+    )
+}
+
+@Composable
+private fun OneUiAccountRow(
+    account: ServiceAccountState.Configured?,
+    onSignInClick: () -> Unit,
+    onCopyEmail: (String) -> Unit,
+    onSignOutClick: () -> Unit
 ) {
-    Surface(
-        shape = RoundedCornerShape(22.dp),
-        color = MaterialTheme.colorScheme.surfaceContainer,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column(
-            modifier = Modifier.padding(18.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(22.dp)
-                )
-                Column {
-                    Text(text = title, style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        text = subtitle,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable {
+                if (account != null) onCopyEmail(account.clientEmail) else onSignInClick()
             }
-            content()
+            .padding(horizontal = 20.dp, vertical = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .clip(CircleShape)
+                .background(
+                    if (account != null) MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                    else MaterialTheme.colorScheme.surfaceContainerHigh
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = if (account != null) Icons.Rounded.CloudDone else Icons.Rounded.CloudOff,
+                contentDescription = null,
+                tint = if (account != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(21.dp)
+            )
+        }
+
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = "Sync with Google Drive",
+                style = MaterialTheme.typography.bodyLarge.copy(
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Medium
+                ),
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text = account?.clientEmail ?: "Tap to sign in with Google",
+                style = MaterialTheme.typography.bodySmall.copy(fontSize = 13.sp),
+                color = if (account != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+
+        if (account != null) {
+            Text(
+                text = "Sign out",
+                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(50))
+                    .clickable(onClick = onSignOutClick)
+                    .padding(horizontal = 10.dp, vertical = 6.dp)
+            )
+        } else {
+            Text(
+                text = "Sign in",
+                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(50))
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f))
+                    .clickable(onClick = onSignInClick)
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+            )
         }
     }
 }
 
+@Composable
+private fun OneUiToggleRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    enabled: Boolean = true,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .alpha(if (enabled) 1f else 0.45f)
+            .clickable(enabled = enabled) { onCheckedChange(!checked) }
+            .padding(horizontal = 20.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyLarge.copy(
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Normal
+                ),
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall.copy(fontSize = 13.sp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+
+        Switch(
+            checked = checked,
+            onCheckedChange = if (enabled) onCheckedChange else null,
+            enabled = enabled,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = Color.White,
+                checkedTrackColor = MaterialTheme.colorScheme.primary,
+                uncheckedThumbColor = Color.White,
+                uncheckedTrackColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                uncheckedBorderColor = Color.Transparent
+            )
+        )
+    }
+}
+
+@Composable
+private fun OneUiValueRow(
+    title: String,
+    value: String,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 20.dp, vertical = 15.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyLarge.copy(
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Normal
+                ),
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text = value,
+                style = MaterialTheme.typography.bodySmall.copy(
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium
+                ),
+                color = MaterialTheme.colorScheme.primary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+
+        Icon(
+            imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+            modifier = Modifier.size(20.dp)
+        )
+    }
+}
+
+@Composable
+private fun OneUiActionRow(
+    title: String,
+    subtitle: String,
+    subtitleAccent: Boolean = false,
+    enabled: Boolean = true,
+    showChevron: Boolean = false,
+    trailingContent: (@Composable () -> Unit)? = null,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .alpha(if (enabled) 1f else 0.45f)
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 20.dp, vertical = 15.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyLarge.copy(
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Normal
+                ),
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall.copy(fontSize = 13.sp),
+                color = if (subtitleAccent) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+
+        if (trailingContent != null) {
+            trailingContent()
+        } else if (showChevron) {
+            Icon(
+                imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                modifier = Modifier.size(20.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun OneUiStorageMeterBlock(
+    usedBytes: Long,
+    maxCacheMb: Int,
+    cachedMediaCount: Int,
+    cachedFolderCount: Int
+) {
+    val maxBytes = (maxCacheMb.toLong() * 1024L * 1024L).coerceAtLeast(1L)
+    val usedRatio = (usedBytes.toFloat() / maxBytes.toFloat()).coerceIn(0f, 1f)
+    val animatedRatio by animateFloatAsState(
+        targetValue = usedRatio,
+        label = "oneUiCacheBar"
+    )
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.Bottom
+        ) {
+            Column {
+                Text(
+                    text = FormatUtils.formatFileSize(usedBytes),
+                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.SemiBold),
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = "used of ${formatMbLabel(maxCacheMb)} thumbnail cache",
+                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.5.sp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Text(
+                text = "$cachedMediaCount items · $cachedFolderCount folders",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        LinearProgressIndicator(
+            progress = { animatedRatio },
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(7.dp),
+            color = MaterialTheme.colorScheme.primary,
+            trackColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+            strokeCap = StrokeCap.Round
+        )
+    }
+}
+
+private data class PickerOption<T>(
+    val value: T,
+    val label: String,
+    val description: String
+)
+
+@Composable
+private fun <T> OneUiPickerSheetContent(
+    title: String,
+    options: List<PickerOption<T>>,
+    selected: T,
+    onSelect: (T) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .navigationBarsPadding()
+            .padding(bottom = 22.dp)
+    ) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleMedium.copy(
+                fontSize = 19.sp,
+                fontWeight = FontWeight.SemiBold
+            ),
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp)
+        )
+
+        options.forEachIndexed { idx, opt ->
+            val isSelected = opt.value == selected
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onSelect(opt.value) }
+                    .padding(horizontal = 24.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = opt.label,
+                        style = MaterialTheme.typography.bodyLarge.copy(
+                            fontSize = 16.sp,
+                            fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
+                        ),
+                        color = if (isSelected) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurface
+                        }
+                    )
+                    Text(
+                        text = opt.description,
+                        style = MaterialTheme.typography.bodySmall.copy(fontSize = 13.sp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                if (isSelected) {
+                    Icon(
+                        imageVector = Icons.Rounded.Check,
+                        contentDescription = "Selected",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(22.dp)
+                    )
+                } else {
+                    Spacer(Modifier.width(22.dp))
+                }
+            }
+            if (idx < options.lastIndex) {
+                HorizontalDivider(
+                    modifier = Modifier.padding(horizontal = 24.dp),
+                    thickness = 0.5.dp,
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)
+                )
+            }
+        }
+    }
+}
+
+private fun themeModeLabel(mode: ThemeMode): String = when (mode) {
+    ThemeMode.AMOLED_BLACK -> "AMOLED black"
+    ThemeMode.DARK -> "Dark"
+    ThemeMode.LIGHT -> "Light"
+    ThemeMode.SYSTEM -> "Match system"
+}
+
+private fun startTabLabel(tab: MainTab): String = when (tab) {
+    MainTab.PICTURES -> "Pictures"
+    MainTab.ALBUMS -> "Albums"
+    MainTab.STORIES -> "Stories"
+}
+
+private fun gridColumnsLabel(columns: Int): String = "$columns columns"
+
 private fun formatMbLabel(mb: Int): String =
-    if (mb >= 1024) String.format(Locale.US, "%.2f GB", mb / 1024f) else "$mb MB"
+    if (mb >= 1024) String.format(Locale.US, "%.1f GB", mb / 1024f) else "$mb MB"
+
+private fun nearestCachePreset(mb: Int): Int {
+    val presets = listOf(250, 500, 750, 1024, 1536, 2048)
+    return presets.minByOrNull { kotlin.math.abs(it - mb) } ?: 500
+}

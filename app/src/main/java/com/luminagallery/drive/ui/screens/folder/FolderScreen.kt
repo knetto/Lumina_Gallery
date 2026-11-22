@@ -643,6 +643,7 @@ fun FolderScreen(
                                                             FolderCard(
                                                                 folder = entry.first,
                                                                 isUnmeteredWifi = uiState.isUnmeteredWifi,
+                                                                showDriveBadge = uiState.showCloudBadges && !entry.first.isLocal,
                                                                 onClick = { onOpenSubfolder(entry.first.id, entry.first.name) },
                                                                 modifier = Modifier.weight(1f)
                                                             )
@@ -650,6 +651,7 @@ fun FolderScreen(
                                                                 FolderCard(
                                                                     folder = entry.second,
                                                                     isUnmeteredWifi = uiState.isUnmeteredWifi,
+                                                                    showDriveBadge = uiState.showCloudBadges && !entry.second.isLocal,
                                                                     onClick = { onOpenSubfolder(entry.second.id, entry.second.name) },
                                                                     modifier = Modifier.weight(1f)
                                                                 )
@@ -660,6 +662,7 @@ fun FolderScreen(
                                                                 FolderCard(
                                                                     folder = entry.third,
                                                                     isUnmeteredWifi = uiState.isUnmeteredWifi,
+                                                                    showDriveBadge = uiState.showCloudBadges && !entry.third.isLocal,
                                                                     onClick = { onOpenSubfolder(entry.third.id, entry.third.name) },
                                                                     modifier = Modifier.weight(1f)
                                                                 )
@@ -707,6 +710,7 @@ fun FolderScreen(
                                                             isSelectionMode = uiState.isSelectionMode,
                                                             isSelected = isSelected,
                                                             isFavorite = entry.item.id in uiState.favoriteItemIds,
+                                                            showCloudBadge = uiState.showCloudBadges,
                                                             sharedTransitionScope = sharedTransitionScope,
                                                             animatedVisibilityScope = animatedVisibilityScope,
                                                             onClick = {

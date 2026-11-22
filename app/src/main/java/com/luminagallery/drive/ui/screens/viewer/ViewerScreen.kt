@@ -1,6 +1,7 @@
 package com.luminagallery.drive.ui.screens.viewer
 
 import android.app.Activity
+import android.view.WindowManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -151,6 +152,37 @@ fun ViewerScreen(
     var dismissDragFraction by remember { mutableFloatStateOf(0f) }
     val activeVideoController = remember { ActiveVideoController() }
 
+    val prefs = uiState.preferences
+
+    // Samsung Gallery "Maximum brightness" & "Keep screen on" viewer flags
+    DisposableEffect(prefs.maxViewerBrightness, prefs.keepScreenOnViewer) {
+        val window = (context as? Activity)?.window
+        val previousBrightness = window?.attributes?.screenBrightness
+            ?: WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+        if (window != null) {
+            if (prefs.keepScreenOnViewer) {
+                window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            } else {
+                window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+            if (prefs.maxViewerBrightness) {
+                val lp = window.attributes
+                lp.screenBrightness = 1.0f
+                window.attributes = lp
+            }
+        }
+        onDispose {
+            if (window != null) {
+                window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                if (prefs.maxViewerBrightness) {
+                    val lp = window.attributes
+                    lp.screenBrightness = previousBrightness
+                    window.attributes = lp
+                }
+            }
+        }
+    }
+
     // Sync system status & navigation bar visibility with immersive chrome toggle
     DisposableEffect(chromeVisible) {
         val window = (context as? Activity)?.window
@@ -217,11 +249,10 @@ fun ViewerScreen(
     }
 
     // Network-aware full-resolution pre-fetching:
-    // On Unmetered Wi-Fi -> pre-fetch index - 1 and index + 1 into RAM only (no disk write!).
-    // On Metered Cellular -> strictly on-demand (zero background pre-fetching!).
-    DisposableEffect(pagerState.currentPage, items.size, uiState.isUnmeteredWifi) {
+    // Respects user preferences for neighbor prefetching & Wi-Fi-only high-res.
+    DisposableEffect(pagerState.currentPage, items.size, uiState.isUnmeteredWifi, prefs.prefetchAdjacentMedia) {
         val activePrefetches = mutableListOf<Disposable>()
-        if (uiState.isUnmeteredWifi) {
+        if (uiState.isUnmeteredWifi && prefs.prefetchAdjacentMedia) {
             val neighborIndices = listOf(pagerState.currentPage - 1, pagerState.currentPage + 1)
                 .filter { it in items.indices }
             for (idx in neighborIndices) {
@@ -257,8 +288,13 @@ fun ViewerScreen(
     ) {
         // Media Pager (sits neatly above the pure-black Samsung bottom dock when chrome is visible
         // so bright screenshots never clash with bottom icons, and goes full-bleed when immersive!)
+        val showFilmstrip = prefs.showViewerFilmstrip
         val bottomDockClearance by animateDpAsState(
-            targetValue = if (showChromeNow) 118.dp else 0.dp,
+            targetValue = when {
+                !showChromeNow -> 0.dp
+                showFilmstrip -> 118.dp
+                else -> 60.dp
+            },
             animationSpec = tween(durationMillis = 200),
             label = "mediaBottomClearance"
         )
@@ -295,6 +331,10 @@ fun ViewerScreen(
                     isUnmeteredWifi = uiState.isUnmeteredWifi,
                     chromeVisible = showChromeNow,
                     videoController = activeVideoController,
+                    autoPlay = prefs.autoPlayVideos,
+                    startMuted = prefs.startVideosMuted,
+                    loopVideo = prefs.loopVideos,
+                    swipeDownToDismiss = prefs.swipeDownToDismiss,
                     onToggleChrome = { chromeVisible = !chromeVisible },
                     onVerticalDismissProgress = { fraction ->
                         if (isActivePage) dismissDragFraction = fraction
@@ -310,6 +350,7 @@ fun ViewerScreen(
                 ZoomablePhotoPage(
                     item = pageItem,
                     isUnmeteredWifi = uiState.isUnmeteredWifi,
+                    swipeDownToDismiss = prefs.swipeDownToDismiss,
                     onTap = { chromeVisible = !chromeVisible },
                     onZoomStateChanged = { zoomed ->
                         if (isActivePage) isCurrentPageZoomed = zoomed
@@ -438,32 +479,34 @@ fun ViewerScreen(
                         .navigationBarsPadding()
                 ) {
                     // 2. Samsung Filmstrip Thumbnail Scrubber
-                    SamsungFilmstripScrubber(
-                        items = items,
-                        currentIndex = pagerState.currentPage,
-                        isUnmeteredWifi = uiState.isUnmeteredWifi,
-                        videoPositionMs = activeVideoController.currentPositionMs,
-                        videoDurationMs = activeVideoController.durationMs.takeIf { it > 0L }
-                            ?: (currentItem.durationMillis ?: 0L),
-                        onSelectPage = { targetIdx ->
-                            coroutineScope.launch {
-                                if (abs(targetIdx - pagerState.currentPage) <= 3) {
-                                    pagerState.animateScrollToPage(targetIdx)
-                                } else {
-                                    pagerState.scrollToPage(targetIdx)
+                    if (showFilmstrip) {
+                        SamsungFilmstripScrubber(
+                            items = items,
+                            currentIndex = pagerState.currentPage,
+                            isUnmeteredWifi = uiState.isUnmeteredWifi,
+                            videoPositionMs = activeVideoController.currentPositionMs,
+                            videoDurationMs = activeVideoController.durationMs.takeIf { it > 0L }
+                                ?: (currentItem.durationMillis ?: 0L),
+                            onSelectPage = { targetIdx ->
+                                coroutineScope.launch {
+                                    if (abs(targetIdx - pagerState.currentPage) <= 3) {
+                                        pagerState.animateScrollToPage(targetIdx)
+                                    } else {
+                                        pagerState.scrollToPage(targetIdx)
+                                    }
                                 }
-                            }
-                        },
-                        onScrubPage = { targetIdx ->
-                            if (targetIdx != pagerState.currentPage && targetIdx in items.indices) {
-                                coroutineScope.launch { pagerState.scrollToPage(targetIdx) }
-                            }
-                        },
-                        onSeekVideoMs = activeVideoController::seekTo,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(58.dp)
-                    )
+                            },
+                            onScrubPage = { targetIdx ->
+                                if (targetIdx != pagerState.currentPage && targetIdx in items.indices) {
+                                    coroutineScope.launch { pagerState.scrollToPage(targetIdx) }
+                                }
+                            },
+                            onSeekVideoMs = activeVideoController::seekTo,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(58.dp)
+                        )
+                    }
 
                     // 3. Minimalist Icon-Only Samsung Action Row (zero text label clutter!)
                     Row(
@@ -877,6 +920,7 @@ private fun SamsungFilmstripScrubber(
 private fun ZoomablePhotoPage(
     item: MediaItem,
     isUnmeteredWifi: Boolean,
+    swipeDownToDismiss: Boolean = true,
     onTap: () -> Unit,
     onZoomStateChanged: (Boolean) -> Unit,
     onVerticalDismissProgress: (Float) -> Unit,
@@ -965,7 +1009,7 @@ private fun ZoomablePhotoPage(
                     }
                 )
             }
-            .pointerInput(item.id) {
+            .pointerInput(item.id, swipeDownToDismiss) {
                 awaitEachGesture {
                     awaitFirstDown(requireUnconsumed = false)
                     var isVerticalDismissDrag = false
@@ -1031,7 +1075,8 @@ private fun ZoomablePhotoPage(
                                     isVerticalDismissDrag = true
                                 }
                                 if (isVerticalDismissDrag) {
-                                    val newY = dismissOffsetY.value + pan.y
+                                    val rawY = dismissOffsetY.value + pan.y
+                                    val newY = if (!swipeDownToDismiss && rawY > 0f) 0f else rawY
                                     coroutineScope.launch {
                                         dismissOffsetY.snapTo(newY)
                                     }
@@ -1046,7 +1091,7 @@ private fun ZoomablePhotoPage(
                         val dismissThresholdPx = (containerSize.height * 0.16f).coerceAtLeast(210f)
                         val swipeUpThresholdPx = 150f
                         when {
-                            dismissOffsetY.value > dismissThresholdPx -> {
+                            swipeDownToDismiss && dismissOffsetY.value > dismissThresholdPx -> {
                                 onVerticalDismissProgress(0f)
                                 onDismiss()
                             }

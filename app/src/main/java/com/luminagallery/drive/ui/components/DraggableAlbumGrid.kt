@@ -76,6 +76,7 @@ fun DraggableAlbumGrid(
     onDropToGroup: (dragged: AlbumGridItem, target: AlbumGridItem) -> Unit,
     headerContent: (@Composable () -> Unit)? = null,
     forceSelectionMode: Boolean = false,
+    showCloudBadges: Boolean = true,
     modifier: Modifier = Modifier,
     gridState: LazyGridState = rememberLazyGridState()
 ) {
@@ -343,6 +344,7 @@ fun DraggableAlbumGrid(
                             FolderCard(
                                 folder = entry.folder,
                                 isUnmeteredWifi = isUnmeteredWifi,
+                                showDriveBadge = showCloudBadges && !entry.folder.isLocal,
                                 isSelectionMode = isSelectionMode,
                                 isSelected = isSelected,
                                 onClick = {
@@ -353,7 +355,7 @@ fun DraggableAlbumGrid(
 
                         is AlbumGridItem.CollectionEntry -> {
                             CollectionCard(
-                                collection = entry,
+                                collection = if (showCloudBadges) entry else entry.copy(hasDriveChild = false),
                                 isUnmeteredWifi = isUnmeteredWifi,
                                 isSelectionMode = isSelectionMode,
                                 isSelected = isSelected,

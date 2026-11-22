@@ -94,6 +94,8 @@ data class HomeUiState(
     val albumsFilter: AlbumsTabFilter = AlbumsTabFilter.ALL,
     val stories: List<GalleryStory> = emptyList(),
     val gridColumns: Int = 4,
+    val showCloudBadges: Boolean = true,
+    val highResThumbnailsAllowed: Boolean = true,
     val serviceAccountState: ServiceAccountState = ServiceAccountState.NotConfigured,
     val pinnedRoots: List<DriveFolder> = emptyList(),
     val syncStatus: SyncStatus = SyncStatus(),
@@ -133,6 +135,7 @@ class HomeViewModel(
 ) : ViewModel() {
 
     private val selectedTabFlow = MutableStateFlow(MainTab.ALBUMS)
+    private var hasUserChangedTab = false
     private val storiesActivatedFlow = MutableStateFlow(false)
     private val albumsFilterFlow = MutableStateFlow(AlbumsTabFilter.ALL)
     private val permissionGrantedFlow = MutableStateFlow(localMediaRepository.hasMediaPermission())
@@ -156,16 +159,22 @@ class HomeViewModel(
         permissionGrantedFlow,
         combine(
             localMediaRepository.observeAllLocalMedia(),
-            dayLocationsFlow
-        ) { pics, dayLocs -> pics to dayLocs },
+            dayLocationsFlow,
+            preferencesManager.preferencesFlow
+        ) { pics, dayLocs, prefs ->
+            Triple(pics, dayLocs, prefs.showDayLocationHeaders)
+        },
         localMediaRepository.observeLocalAlbums(),
         organizationRepository.observeGridItems(parentCollectionId = null),
         organizationRepository.observeAllCollections()
-    ) { hasPerm, (pictures, dayLocs), albums, unifiedItems, allCols ->
+    ) { hasPerm, (pictures, dayLocs, showDayLocations), albums, unifiedItems, allCols ->
         LocalContent(
             hasPermission = hasPerm,
             pictures = pictures,
-            timelineEntries = buildTimelineEntries(pictures, dayLocs),
+            timelineEntries = buildTimelineEntries(
+                items = pictures,
+                dayLocations = if (showDayLocations) dayLocs else emptyMap()
+            ),
             albums = albums,
             unifiedGridItems = unifiedItems,
             allCollections = allCols
@@ -248,7 +257,17 @@ class HomeViewModel(
         snackbarFlow,
         rootPickerFlow
     ) { (tab, filter), prefs, setupErr, snack, picker ->
-        MiscBundle(tab, filter, prefs.gridColumns, prefs.albumSortMode, setupErr, snack, picker)
+        MiscBundle(
+            selectedTab = tab,
+            albumsFilter = filter,
+            gridColumns = prefs.gridColumns,
+            albumSortMode = prefs.albumSortMode,
+            showCloudBadges = prefs.showCloudBadges,
+            wifiOnlyHighRes = prefs.wifiOnlyHighRes,
+            setupError = setupErr,
+            snackbarMessage = snack,
+            rootPicker = picker
+        )
     }
 
     val uiState: StateFlow<HomeUiState> = combine(
@@ -288,6 +307,8 @@ class HomeViewModel(
             albumsFilter = misc.albumsFilter,
             stories = extras.stories,
             gridColumns = misc.gridColumns,
+            showCloudBadges = misc.showCloudBadges,
+            highResThumbnailsAllowed = drive.networkState.isUnmeteredWifi || !misc.wifiOnlyHighRes,
             serviceAccountState = drive.account,
             pinnedRoots = drive.pinnedRoots,
             syncStatus = drive.syncStatus,
@@ -317,6 +338,17 @@ class HomeViewModel(
     )
 
     init {
+        viewModelScope.launch {
+            val startTab = runCatching {
+                preferencesManager.getCurrentPreferences().defaultStartTab
+            }.getOrDefault(MainTab.ALBUMS)
+            if (!hasUserChangedTab) {
+                selectedTabFlow.value = startTab
+                if (startTab == MainTab.STORIES) {
+                    storiesActivatedFlow.value = true
+                }
+            }
+        }
         if (credentialStore.state.value is ServiceAccountState.Configured) {
             viewModelScope.launch {
                 // Let initial local UI & thumbnails render before starting Drive TLS sync
@@ -348,6 +380,7 @@ class HomeViewModel(
     }
 
     fun selectTab(tab: MainTab) {
+        hasUserChangedTab = true
         selectedTabFlow.value = tab
         if (tab == MainTab.STORIES) {
             storiesActivatedFlow.value = true
@@ -837,6 +870,8 @@ class HomeViewModel(
         val albumsFilter: AlbumsTabFilter,
         val gridColumns: Int,
         val albumSortMode: AlbumSortMode,
+        val showCloudBadges: Boolean,
+        val wifiOnlyHighRes: Boolean,
         val setupError: String?,
         val snackbarMessage: String?,
         val rootPicker: RootPickerUiState

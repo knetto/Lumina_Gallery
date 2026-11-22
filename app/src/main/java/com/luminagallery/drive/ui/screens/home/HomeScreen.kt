@@ -536,10 +536,11 @@ fun HomeScreen(
                                                         val isSelected = entry.item.id in uiState.selectedPictureIds
                                                         MediaGridItem(
                                                             item = entry.item,
-                                                            isUnmeteredWifi = uiState.networkState.isUnmeteredWifi,
+                                                            isUnmeteredWifi = uiState.highResThumbnailsAllowed,
                                                             isSelectionMode = uiState.isPictureSelectionMode,
                                                             isSelected = isSelected,
                                                             isFavorite = entry.item.id in uiState.favoriteItemIds,
+                                                            showCloudBadge = uiState.showCloudBadges,
                                                             sharedTransitionScope = sharedTransitionScope,
                                                             animatedVisibilityScope = animatedVisibilityScope,
                                                             onClick = {
@@ -592,9 +593,10 @@ fun HomeScreen(
                                     } else {
                                         DraggableAlbumGrid(
                                             items = uiState.unifiedAlbumGridItems,
-                                            isUnmeteredWifi = uiState.networkState.isUnmeteredWifi,
+                                            isUnmeteredWifi = uiState.highResThumbnailsAllowed,
                                             selectedIds = uiState.selectedAlbumIds,
                                             forceSelectionMode = uiState.forceAlbumSelectionMode,
+                                            showCloudBadges = uiState.showCloudBadges,
                                             contentPadding = PaddingValues(
                                                 start = 16.dp,
                                                 end = 16.dp,

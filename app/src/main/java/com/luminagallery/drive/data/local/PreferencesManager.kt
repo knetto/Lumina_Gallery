@@ -9,6 +9,7 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.luminagallery.drive.domain.model.AlbumSortMode
+import com.luminagallery.drive.domain.model.MainTab
 import com.luminagallery.drive.domain.model.ThemeMode
 import com.luminagallery.drive.domain.model.UserPreferences
 import kotlinx.coroutines.flow.Flow
@@ -30,13 +31,30 @@ class PreferencesManager(private val context: Context) {
         val sortMode = runCatching { AlbumSortMode.valueOf(sortName) }
             .getOrDefault(AlbumSortMode.CUSTOM)
 
+        val tabName = prefs[KEY_DEFAULT_START_TAB] ?: MainTab.ALBUMS.name
+        val startTab = runCatching { MainTab.valueOf(tabName) }
+            .getOrDefault(MainTab.ALBUMS)
+
         UserPreferences(
             maxCacheSizeMb = (prefs[KEY_MAX_CACHE_MB] ?: DEFAULT_CACHE_MB).coerceIn(250, 2048),
             themeMode = themeMode,
             dynamicColor = prefs[KEY_DYNAMIC_COLOR] ?: true,
             gridColumns = (prefs[KEY_GRID_COLUMNS] ?: DEFAULT_GRID_COLUMNS).coerceIn(2, 5),
             backgroundSyncEnabled = prefs[KEY_BACKGROUND_SYNC] ?: false,
-            albumSortMode = sortMode
+            albumSortMode = sortMode,
+            defaultStartTab = startTab,
+            showDayLocationHeaders = prefs[KEY_SHOW_DAY_LOCATIONS] ?: true,
+            showAlbumSidebarDefault = prefs[KEY_SHOW_ALBUM_SIDEBAR] ?: true,
+            showCloudBadges = prefs[KEY_SHOW_CLOUD_BADGES] ?: true,
+            autoPlayVideos = prefs[KEY_AUTO_PLAY_VIDEOS] ?: true,
+            startVideosMuted = prefs[KEY_START_VIDEOS_MUTED] ?: false,
+            loopVideos = prefs[KEY_LOOP_VIDEOS] ?: false,
+            showViewerFilmstrip = prefs[KEY_SHOW_VIEWER_FILMSTRIP] ?: true,
+            maxViewerBrightness = prefs[KEY_MAX_VIEWER_BRIGHTNESS] ?: false,
+            keepScreenOnViewer = prefs[KEY_KEEP_SCREEN_ON_VIEWER] ?: true,
+            swipeDownToDismiss = prefs[KEY_SWIPE_DOWN_DISMISS] ?: true,
+            prefetchAdjacentMedia = prefs[KEY_PREFETCH_ADJACENT] ?: true,
+            wifiOnlyHighRes = prefs[KEY_WIFI_ONLY_HIGH_RES] ?: true
         )
     }
 
@@ -78,6 +96,84 @@ class PreferencesManager(private val context: Context) {
         }
     }
 
+    suspend fun setDefaultStartTab(tab: MainTab) {
+        context.galleryDataStore.edit { prefs ->
+            prefs[KEY_DEFAULT_START_TAB] = tab.name
+        }
+    }
+
+    suspend fun setShowDayLocationHeaders(enabled: Boolean) {
+        context.galleryDataStore.edit { prefs ->
+            prefs[KEY_SHOW_DAY_LOCATIONS] = enabled
+        }
+    }
+
+    suspend fun setShowAlbumSidebarDefault(enabled: Boolean) {
+        context.galleryDataStore.edit { prefs ->
+            prefs[KEY_SHOW_ALBUM_SIDEBAR] = enabled
+        }
+    }
+
+    suspend fun setShowCloudBadges(enabled: Boolean) {
+        context.galleryDataStore.edit { prefs ->
+            prefs[KEY_SHOW_CLOUD_BADGES] = enabled
+        }
+    }
+
+    suspend fun setAutoPlayVideos(enabled: Boolean) {
+        context.galleryDataStore.edit { prefs ->
+            prefs[KEY_AUTO_PLAY_VIDEOS] = enabled
+        }
+    }
+
+    suspend fun setStartVideosMuted(enabled: Boolean) {
+        context.galleryDataStore.edit { prefs ->
+            prefs[KEY_START_VIDEOS_MUTED] = enabled
+        }
+    }
+
+    suspend fun setLoopVideos(enabled: Boolean) {
+        context.galleryDataStore.edit { prefs ->
+            prefs[KEY_LOOP_VIDEOS] = enabled
+        }
+    }
+
+    suspend fun setShowViewerFilmstrip(enabled: Boolean) {
+        context.galleryDataStore.edit { prefs ->
+            prefs[KEY_SHOW_VIEWER_FILMSTRIP] = enabled
+        }
+    }
+
+    suspend fun setMaxViewerBrightness(enabled: Boolean) {
+        context.galleryDataStore.edit { prefs ->
+            prefs[KEY_MAX_VIEWER_BRIGHTNESS] = enabled
+        }
+    }
+
+    suspend fun setKeepScreenOnViewer(enabled: Boolean) {
+        context.galleryDataStore.edit { prefs ->
+            prefs[KEY_KEEP_SCREEN_ON_VIEWER] = enabled
+        }
+    }
+
+    suspend fun setSwipeDownToDismiss(enabled: Boolean) {
+        context.galleryDataStore.edit { prefs ->
+            prefs[KEY_SWIPE_DOWN_DISMISS] = enabled
+        }
+    }
+
+    suspend fun setPrefetchAdjacentMedia(enabled: Boolean) {
+        context.galleryDataStore.edit { prefs ->
+            prefs[KEY_PREFETCH_ADJACENT] = enabled
+        }
+    }
+
+    suspend fun setWifiOnlyHighRes(enabled: Boolean) {
+        context.galleryDataStore.edit { prefs ->
+            prefs[KEY_WIFI_ONLY_HIGH_RES] = enabled
+        }
+    }
+
     companion object {
         const val DEFAULT_CACHE_MB = 500
         const val DEFAULT_GRID_COLUMNS = 4
@@ -88,5 +184,18 @@ class PreferencesManager(private val context: Context) {
         private val KEY_GRID_COLUMNS = intPreferencesKey("grid_columns")
         private val KEY_BACKGROUND_SYNC = booleanPreferencesKey("background_sync_enabled")
         private val KEY_ALBUM_SORT_MODE = stringPreferencesKey("album_sort_mode")
+        private val KEY_DEFAULT_START_TAB = stringPreferencesKey("default_start_tab")
+        private val KEY_SHOW_DAY_LOCATIONS = booleanPreferencesKey("show_day_location_headers")
+        private val KEY_SHOW_ALBUM_SIDEBAR = booleanPreferencesKey("show_album_sidebar_default")
+        private val KEY_SHOW_CLOUD_BADGES = booleanPreferencesKey("show_cloud_badges")
+        private val KEY_AUTO_PLAY_VIDEOS = booleanPreferencesKey("auto_play_videos")
+        private val KEY_START_VIDEOS_MUTED = booleanPreferencesKey("start_videos_muted")
+        private val KEY_LOOP_VIDEOS = booleanPreferencesKey("loop_videos")
+        private val KEY_SHOW_VIEWER_FILMSTRIP = booleanPreferencesKey("show_viewer_filmstrip")
+        private val KEY_MAX_VIEWER_BRIGHTNESS = booleanPreferencesKey("max_viewer_brightness")
+        private val KEY_KEEP_SCREEN_ON_VIEWER = booleanPreferencesKey("keep_screen_on_viewer")
+        private val KEY_SWIPE_DOWN_DISMISS = booleanPreferencesKey("swipe_down_to_dismiss")
+        private val KEY_PREFETCH_ADJACENT = booleanPreferencesKey("prefetch_adjacent_media")
+        private val KEY_WIFI_ONLY_HIGH_RES = booleanPreferencesKey("wifi_only_high_res")
     }
 }

@@ -113,6 +113,10 @@ fun VideoPlayerPage(
     isUnmeteredWifi: Boolean,
     chromeVisible: Boolean,
     videoController: ActiveVideoController,
+    autoPlay: Boolean = true,
+    startMuted: Boolean = false,
+    loopVideo: Boolean = false,
+    swipeDownToDismiss: Boolean = true,
     onToggleChrome: () -> Unit,
     onVerticalDismissProgress: (Float) -> Unit,
     onSwipeUpForDetails: () -> Unit,
@@ -152,7 +156,7 @@ fun VideoPlayerPage(
     var isPlaying by remember(item.id) { mutableStateOf(false) }
     var isBuffering by remember(item.id) { mutableStateOf(true) }
     var isEnded by remember(item.id) { mutableStateOf(false) }
-    var isMuted by remember(item.id) { mutableStateOf(false) }
+    var isMuted by remember(item.id, startMuted) { mutableStateOf(startMuted) }
     var firstFrameRendered by remember(item.id) { mutableStateOf(false) }
     var playbackError by remember(item.id) { mutableStateOf<String?>(null) }
     var playerViewRef by remember(item.id) { mutableStateOf<PlayerView?>(null) }
@@ -165,7 +169,9 @@ fun VideoPlayerPage(
                 .build()
                 .apply {
                     setMediaItem(Media3Item.fromUri(item.localContentUri))
-                    playWhenReady = true
+                    repeatMode = if (loopVideo) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+                    volume = if (startMuted) 0f else 1f
+                    playWhenReady = autoPlay
                     prepare()
                 }
         } else {
@@ -177,7 +183,9 @@ fun VideoPlayerPage(
                 .apply {
                     val streamUrl = DriveConstants.buildFullMediaUrl(item.id)
                     setMediaItem(Media3Item.fromUri(streamUrl))
-                    playWhenReady = true
+                    repeatMode = if (loopVideo) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+                    volume = if (startMuted) 0f else 1f
+                    playWhenReady = autoPlay
                     prepare()
                 }
         }
@@ -298,11 +306,11 @@ fun VideoPlayerPage(
     Box(
         modifier = modifier
             .fillMaxSize()
-            .pointerInput(item.id) {
+            .pointerInput(item.id, swipeDownToDismiss) {
                 detectVerticalDragGestures(
                     onDragEnd = {
                         when {
-                            dismissOffsetY.value > 210f -> {
+                            swipeDownToDismiss && dismissOffsetY.value > 210f -> {
                                 onVerticalDismissProgress(0f)
                                 onDismiss()
                             }
@@ -335,7 +343,8 @@ fun VideoPlayerPage(
                     },
                     onVerticalDrag = { change, dragAmount ->
                         change.consume()
-                        val updated = dismissOffsetY.value + dragAmount
+                        val rawUpdated = dismissOffsetY.value + dragAmount
+                        val updated = if (!swipeDownToDismiss && rawUpdated > 0f) 0f else rawUpdated
                         coroutineScope.launch { dismissOffsetY.snapTo(updated) }
                         onVerticalDismissProgress((abs(updated) / 420f).coerceIn(0f, 1f))
                     }

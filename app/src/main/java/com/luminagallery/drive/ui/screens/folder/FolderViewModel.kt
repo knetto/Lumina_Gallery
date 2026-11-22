@@ -90,6 +90,7 @@ data class FolderUiState(
     val unfilteredItemCount: Int = 0,
     val gridEntries: List<FolderGridEntry> = emptyList(),
     val gridColumns: Int = 4,
+    val showCloudBadges: Boolean = true,
     val isRefreshing: Boolean = false,
     val hasCompletedInitialLoad: Boolean = false,
     val isOnline: Boolean = true,
@@ -226,7 +227,15 @@ class FolderViewModel(
         hasLoadedOnceFlow,
         networkMonitor.networkState
     ) { crumbs, prefs, refreshing, loaded, net ->
-        FolderMeta(crumbs, prefs.gridColumns, refreshing, loaded, net.isOnline, net.isUnmeteredWifi)
+        FolderMeta(
+            breadcrumbs = crumbs,
+            gridColumns = prefs.gridColumns,
+            showCloudBadges = prefs.showCloudBadges,
+            isRefreshing = refreshing,
+            hasLoadedOnce = loaded,
+            isOnline = net.isOnline,
+            isUnmeteredWifi = net.isUnmeteredWifi || !prefs.wifiOnlyHighRes
+        )
     }
 
     private val exportAndDialogFlow = combine(
@@ -269,6 +278,7 @@ class FolderViewModel(
             unfilteredItemCount = content.unfilteredCount,
             gridEntries = content.gridEntries,
             gridColumns = meta.gridColumns,
+            showCloudBadges = meta.showCloudBadges,
             isRefreshing = meta.isRefreshing,
             hasCompletedInitialLoad = meta.hasLoadedOnce ||
                 content.subfolders.isNotEmpty() ||
@@ -299,6 +309,12 @@ class FolderViewModel(
     )
 
     init {
+        viewModelScope.launch {
+            val defaultSidebar = runCatching {
+                preferencesManager.getCurrentPreferences().showAlbumSidebarDefault
+            }.getOrDefault(true)
+            showSidebarFlow.value = defaultSidebar
+        }
         if (!LocalMediaRepository.isLocalFolderId(initialFolderId)) {
             loadBreadcrumbs(initialFolderId)
             refreshFolder(silent = true)
@@ -643,6 +659,7 @@ class FolderViewModel(
     private data class FolderMeta(
         val breadcrumbs: List<BreadcrumbItem>,
         val gridColumns: Int,
+        val showCloudBadges: Boolean,
         val isRefreshing: Boolean,
         val hasLoadedOnce: Boolean,
         val isOnline: Boolean,

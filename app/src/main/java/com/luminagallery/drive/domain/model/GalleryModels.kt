@@ -337,5 +337,18 @@ data class UserPreferences(
     val dynamicColor: Boolean = true,
     val gridColumns: Int = 4,
     val backgroundSyncEnabled: Boolean = false,
-    val albumSortMode: AlbumSortMode = AlbumSortMode.CUSTOM
+    val albumSortMode: AlbumSortMode = AlbumSortMode.CUSTOM,
+    val defaultStartTab: MainTab = MainTab.ALBUMS,
+    val showDayLocationHeaders: Boolean = true,
+    val showAlbumSidebarDefault: Boolean = true,
+    val showCloudBadges: Boolean = true,
+    val autoPlayVideos: Boolean = true,
+    val startVideosMuted: Boolean = false,
+    val loopVideos: Boolean = false,
+    val showViewerFilmstrip: Boolean = true,
+    val maxViewerBrightness: Boolean = false,
+    val keepScreenOnViewer: Boolean = true,
+    val swipeDownToDismiss: Boolean = true,
+    val prefetchAdjacentMedia: Boolean = true,
+    val wifiOnlyHighRes: Boolean = true
 )

@@ -8,12 +8,14 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.luminagallery.drive.AppContainer
 import com.luminagallery.drive.data.local.LocalMediaRepository
+import com.luminagallery.drive.data.local.PreferencesManager
 import com.luminagallery.drive.data.remote.NetworkMonitor
 import com.luminagallery.drive.data.repository.GalleryExtrasRepository
 import com.luminagallery.drive.data.repository.GalleryRepository
 import com.luminagallery.drive.domain.model.MediaItem
 import com.luminagallery.drive.domain.model.MediaType
 import com.luminagallery.drive.domain.model.SpecialGalleryFilter
+import com.luminagallery.drive.domain.model.UserPreferences
 import com.luminagallery.drive.domain.usecase.ExportMediaUseCase
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -42,6 +44,7 @@ data class ViewerUiState(
     val favoriteItemIds: Set<String> = emptySet(),
     val isUnmeteredWifi: Boolean = true,
     val isOnline: Boolean = true,
+    val preferences: UserPreferences = UserPreferences(),
     val isExporting: Boolean = false,
     val activeDrivePath: String = "Google Drive",
     val activeExifOverride: MediaItem? = null,
@@ -57,6 +60,7 @@ class ViewerViewModel(
     private val repository: GalleryRepository,
     private val localMediaRepository: LocalMediaRepository,
     private val extrasRepository: GalleryExtrasRepository,
+    private val preferencesManager: PreferencesManager,
     private val exportMediaUseCase: ExportMediaUseCase,
     networkMonitor: NetworkMonitor
 ) : ViewModel() {
@@ -146,15 +150,17 @@ class ViewerViewModel(
         mediaSourceFlow,
         extrasRepository.favoriteItemIdsFlow,
         networkMonitor.networkState,
+        preferencesManager.preferencesFlow,
         overlayFlow
-    ) { items, favIds, net, overlay ->
+    ) { items, favIds, net, prefs, overlay ->
         val index = items.indexOfFirst { it.id == launchContext.initialItemId }.coerceAtLeast(0)
         ViewerUiState(
             items = items,
             initialPageIndex = index,
             favoriteItemIds = favIds,
-            isUnmeteredWifi = net.isUnmeteredWifi,
+            isUnmeteredWifi = net.isUnmeteredWifi || !prefs.wifiOnlyHighRes,
             isOnline = net.isOnline,
+            preferences = prefs,
             isExporting = overlay.isExporting,
             activeDrivePath = overlay.activeDrivePath,
             activeExifOverride = overlay.activeExifItem,
@@ -278,6 +284,7 @@ class ViewerViewModel(
             repository = container.galleryRepository,
             localMediaRepository = container.localMediaRepository,
             extrasRepository = container.galleryExtrasRepository,
+            preferencesManager = container.preferencesManager,
             exportMediaUseCase = container.exportMediaUseCase,
             networkMonitor = container.networkMonitor
         ) as T

@@ -1,7 +1,6 @@
 package com.luminagallery.drive.ui.screens.settings
 
 import android.content.Context
-import android.net.Uri
 import androidx.compose.runtime.Immutable
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -12,8 +11,11 @@ import com.luminagallery.drive.data.remote.NetworkMonitor
 import com.luminagallery.drive.data.remote.auth.CredentialStore
 import com.luminagallery.drive.data.remote.auth.ServiceAccountTokenManager
 import com.luminagallery.drive.data.repository.CoilCacheManager
+import com.luminagallery.drive.data.repository.GalleryExtrasRepository
 import com.luminagallery.drive.data.repository.GalleryRepository
 import com.luminagallery.drive.data.repository.sync.DriveSyncScheduler
+import com.luminagallery.drive.domain.model.AlbumSortMode
+import com.luminagallery.drive.domain.model.MainTab
 import com.luminagallery.drive.domain.model.NetworkState
 import com.luminagallery.drive.domain.model.ServiceAccountState
 import com.luminagallery.drive.domain.model.StorageStats
@@ -42,6 +44,8 @@ data class SettingsUiState(
     ),
     val syncStatus: SyncStatus = SyncStatus(),
     val networkState: NetworkState = NetworkState(),
+    val hiddenAlbumCount: Int = 0,
+    val ignoredCleanOutCount: Int = 0,
     val isClearingCache: Boolean = false,
     val snackbarMessage: String? = null
 )
@@ -53,6 +57,7 @@ class SettingsViewModel(
     private val preferencesManager: PreferencesManager,
     private val coilCacheManager: CoilCacheManager,
     private val repository: GalleryRepository,
+    private val extrasRepository: GalleryExtrasRepository,
     private val syncUseCase: SyncGalleryUseCase,
     networkMonitor: NetworkMonitor
 ) : ViewModel() {
@@ -74,13 +79,19 @@ class SettingsViewModel(
         )
     }
 
+    private val extrasCountsFlow = combine(
+        extrasRepository.hiddenAlbumIdsFlow,
+        extrasRepository.ignoredCleanOutIdsFlow
+    ) { hidden, ignored -> hidden.size to ignored.size }
+
     private val localStatusFlow = combine(
         repository.syncStatusFlow,
         networkMonitor.networkState,
+        extrasCountsFlow,
         isClearingCacheFlow,
         snackbarFlow
-    ) { sync, net, clearing, snack ->
-        SettingsLocalStatus(sync, net, clearing, snack)
+    ) { sync, net, (hiddenCount, ignoredCount), clearing, snack ->
+        SettingsLocalStatus(sync, net, hiddenCount, ignoredCount, clearing, snack)
     }
 
     val uiState: StateFlow<SettingsUiState> = combine(
@@ -95,6 +106,8 @@ class SettingsViewModel(
             storageStats = stats,
             syncStatus = local.syncStatus,
             networkState = local.networkState,
+            hiddenAlbumCount = local.hiddenAlbumCount,
+            ignoredCleanOutCount = local.ignoredCleanOutCount,
             isClearingCache = local.isClearingCache,
             snackbarMessage = local.snackbarMessage
         )
@@ -117,62 +130,31 @@ class SettingsViewModel(
         }
     }
 
-    fun updateMaxCacheSizeMb(sizeMb: Int) {
-        viewModelScope.launch {
-            preferencesManager.setMaxCacheSizeMb(sizeMb)
-            coilCacheManager.updateMaxCacheSizeMb(sizeMb)
-            snackbarFlow.value = "Thumbnail cache limit updated to $sizeMb MB"
-        }
-    }
-
-    fun clearThumbnailCache() {
-        if (isClearingCacheFlow.value) return
-        viewModelScope.launch {
-            isClearingCacheFlow.value = true
-            coilCacheManager.clearThumbnailCache()
-            isClearingCacheFlow.value = false
-            snackbarFlow.value = "Thumbnail cache cleared"
-        }
-    }
-
-    fun setThemeMode(mode: ThemeMode) {
-        viewModelScope.launch {
-            preferencesManager.setThemeMode(mode)
-        }
-    }
-
-    fun setDynamicColor(enabled: Boolean) {
-        viewModelScope.launch {
-            preferencesManager.setDynamicColor(enabled)
-        }
-    }
+    // --- Cloud & Sync ---
 
     fun setBackgroundSyncEnabled(enabled: Boolean) {
         viewModelScope.launch {
             preferencesManager.setBackgroundSyncEnabled(enabled)
             DriveSyncScheduler.setBackgroundSyncEnabled(appContext, enabled)
             snackbarFlow.value = if (enabled) {
-                "Background delta sync scheduled (Charging + Wi-Fi only)"
+                "Background sync scheduled (charging on Wi-Fi)"
             } else {
-                "Background sync disabled (zero wakeups)"
+                "Background sync turned off"
             }
+        }
+    }
+
+    fun setWifiOnlyHighRes(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesManager.setWifiOnlyHighRes(enabled)
         }
     }
 
     fun triggerDeltaSync() {
         viewModelScope.launch {
             syncUseCase.syncDeltaOrInitial(forceFullRescan = false)
-                .onSuccess { snackbarFlow.value = "Drive delta sync complete" }
-                .onFailure { err -> snackbarFlow.value = err.message ?: "Delta sync failed" }
-        }
-    }
-
-    fun rebuildMetadataIndex() {
-        viewModelScope.launch {
-            repository.resetMetadataCache()
-            syncUseCase.syncDeltaOrInitial(forceFullRescan = true)
-                .onSuccess { snackbarFlow.value = "Rebuilt local Drive folder index" }
-                .onFailure { err -> snackbarFlow.value = err.message ?: "Rebuild failed" }
+                .onSuccess { snackbarFlow.value = "Google Drive synced" }
+                .onFailure { err -> snackbarFlow.value = err.message ?: "Sync failed" }
         }
     }
 
@@ -200,29 +182,141 @@ class SettingsViewModel(
                 tokenManager.clearPlayServicesTokenBlocking()
             }
             credentialStore.clearGoogleSignInSession()
+            credentialStore.clearImportedCredentials()
             tokenManager.invalidate()
             snackbarFlow.value = "Signed out of Google Drive"
         }
     }
 
-    fun importCredentials(uri: Uri) {
+    // --- Display & Layout ---
+
+    fun setThemeMode(mode: ThemeMode) {
+        viewModelScope.launch { preferencesManager.setThemeMode(mode) }
+    }
+
+    fun setDynamicColor(enabled: Boolean) {
+        viewModelScope.launch { preferencesManager.setDynamicColor(enabled) }
+    }
+
+    fun setDefaultStartTab(tab: MainTab) {
+        viewModelScope.launch { preferencesManager.setDefaultStartTab(tab) }
+    }
+
+    fun setGridColumns(columns: Int) {
+        viewModelScope.launch { preferencesManager.setGridColumns(columns) }
+    }
+
+    fun setAlbumSortMode(mode: AlbumSortMode) {
+        viewModelScope.launch { preferencesManager.setAlbumSortMode(mode) }
+    }
+
+    fun setShowDayLocationHeaders(enabled: Boolean) {
+        viewModelScope.launch { preferencesManager.setShowDayLocationHeaders(enabled) }
+    }
+
+    fun setShowAlbumSidebarDefault(enabled: Boolean) {
+        viewModelScope.launch { preferencesManager.setShowAlbumSidebarDefault(enabled) }
+    }
+
+    fun setShowCloudBadges(enabled: Boolean) {
+        viewModelScope.launch { preferencesManager.setShowCloudBadges(enabled) }
+    }
+
+    // --- Viewer & Playback ---
+
+    fun setAutoPlayVideos(enabled: Boolean) {
+        viewModelScope.launch { preferencesManager.setAutoPlayVideos(enabled) }
+    }
+
+    fun setStartVideosMuted(enabled: Boolean) {
+        viewModelScope.launch { preferencesManager.setStartVideosMuted(enabled) }
+    }
+
+    fun setLoopVideos(enabled: Boolean) {
+        viewModelScope.launch { preferencesManager.setLoopVideos(enabled) }
+    }
+
+    fun setShowViewerFilmstrip(enabled: Boolean) {
+        viewModelScope.launch { preferencesManager.setShowViewerFilmstrip(enabled) }
+    }
+
+    fun setMaxViewerBrightness(enabled: Boolean) {
+        viewModelScope.launch { preferencesManager.setMaxViewerBrightness(enabled) }
+    }
+
+    fun setKeepScreenOnViewer(enabled: Boolean) {
+        viewModelScope.launch { preferencesManager.setKeepScreenOnViewer(enabled) }
+    }
+
+    fun setSwipeDownToDismiss(enabled: Boolean) {
+        viewModelScope.launch { preferencesManager.setSwipeDownToDismiss(enabled) }
+    }
+
+    fun setPrefetchAdjacentMedia(enabled: Boolean) {
+        viewModelScope.launch { preferencesManager.setPrefetchAdjacentMedia(enabled) }
+    }
+
+    // --- Storage & Maintenance ---
+
+    fun updateMaxCacheSizeMb(sizeMb: Int) {
         viewModelScope.launch {
-            credentialStore.importFromUri(uri)
-                .onSuccess { configured ->
-                    tokenManager.invalidate()
-                    snackbarFlow.value = "Updated Service Account: ${configured.clientEmail}"
-                }
-                .onFailure { err ->
-                    snackbarFlow.value = err.message ?: "Invalid credentials.json file"
-                }
+            preferencesManager.setMaxCacheSizeMb(sizeMb)
+            coilCacheManager.updateMaxCacheSizeMb(sizeMb)
+            snackbarFlow.value = "Thumbnail cache limit set to ${if (sizeMb >= 1024) String.format("%.1f GB", sizeMb / 1024f) else "$sizeMb MB"}"
         }
     }
 
-    fun clearImportedCredentials() {
+    fun clearThumbnailCache() {
+        if (isClearingCacheFlow.value) return
         viewModelScope.launch {
-            credentialStore.clearImportedCredentials()
-            tokenManager.invalidate()
-            snackbarFlow.value = "Removed stored credentials.json"
+            isClearingCacheFlow.value = true
+            coilCacheManager.clearThumbnailCache()
+            isClearingCacheFlow.value = false
+            snackbarFlow.value = "Thumbnail cache cleared"
+        }
+    }
+
+    fun rebuildMetadataIndex() {
+        viewModelScope.launch {
+            repository.resetMetadataCache()
+            syncUseCase.syncDeltaOrInitial(forceFullRescan = true)
+                .onSuccess { snackbarFlow.value = "Rebuilt Google Drive folder index" }
+                .onFailure { err -> snackbarFlow.value = err.message ?: "Rebuild failed" }
+        }
+    }
+
+    fun resetIgnoredCleanOut() {
+        viewModelScope.launch {
+            extrasRepository.clearIgnoredCleanOut()
+            snackbarFlow.value = "Restored dismissed Clean Out suggestions"
+        }
+    }
+
+    fun resetSettingsToDefaults() {
+        viewModelScope.launch {
+            val defaults = UserPreferences()
+            preferencesManager.setThemeMode(defaults.themeMode)
+            preferencesManager.setDynamicColor(defaults.dynamicColor)
+            preferencesManager.setDefaultStartTab(defaults.defaultStartTab)
+            preferencesManager.setGridColumns(defaults.gridColumns)
+            preferencesManager.setAlbumSortMode(defaults.albumSortMode)
+            preferencesManager.setShowDayLocationHeaders(defaults.showDayLocationHeaders)
+            preferencesManager.setShowAlbumSidebarDefault(defaults.showAlbumSidebarDefault)
+            preferencesManager.setShowCloudBadges(defaults.showCloudBadges)
+            preferencesManager.setAutoPlayVideos(defaults.autoPlayVideos)
+            preferencesManager.setStartVideosMuted(defaults.startVideosMuted)
+            preferencesManager.setLoopVideos(defaults.loopVideos)
+            preferencesManager.setShowViewerFilmstrip(defaults.showViewerFilmstrip)
+            preferencesManager.setMaxViewerBrightness(defaults.maxViewerBrightness)
+            preferencesManager.setKeepScreenOnViewer(defaults.keepScreenOnViewer)
+            preferencesManager.setSwipeDownToDismiss(defaults.swipeDownToDismiss)
+            preferencesManager.setPrefetchAdjacentMedia(defaults.prefetchAdjacentMedia)
+            preferencesManager.setWifiOnlyHighRes(defaults.wifiOnlyHighRes)
+            preferencesManager.setBackgroundSyncEnabled(defaults.backgroundSyncEnabled)
+            DriveSyncScheduler.setBackgroundSyncEnabled(appContext, false)
+            preferencesManager.setMaxCacheSizeMb(defaults.maxCacheSizeMb)
+            coilCacheManager.updateMaxCacheSizeMb(defaults.maxCacheSizeMb)
+            snackbarFlow.value = "Settings restored to defaults"
         }
     }
 
@@ -237,6 +331,8 @@ class SettingsViewModel(
     private data class SettingsLocalStatus(
         val syncStatus: SyncStatus,
         val networkState: NetworkState,
+        val hiddenAlbumCount: Int,
+        val ignoredCleanOutCount: Int,
         val isClearingCache: Boolean,
         val snackbarMessage: String?
     )
@@ -253,6 +349,7 @@ class SettingsViewModel(
             preferencesManager = container.preferencesManager,
             coilCacheManager = container.coilCacheManager,
             repository = container.galleryRepository,
+            extrasRepository = container.galleryExtrasRepository,
             syncUseCase = container.syncGalleryUseCase,
             networkMonitor = container.networkMonitor
         ) as T
