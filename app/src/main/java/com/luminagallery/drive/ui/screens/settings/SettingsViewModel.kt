@@ -317,6 +317,17 @@ class SettingsViewModel(
         }
     }
 
+    fun setExternalGallery(packageName: String, label: String) {
+        viewModelScope.launch {
+            preferencesManager.setExternalGallery(packageName, label)
+            snackbarFlow.value = if (packageName.isBlank()) {
+                "External gallery set to Ask every time"
+            } else {
+                "External gallery set to $label"
+            }
+        }
+    }
+
     fun resetSettingsToDefaults() {
         viewModelScope.launch {
             val defaults = UserPreferences()
@@ -337,6 +348,7 @@ class SettingsViewModel(
             preferencesManager.setSwipeDownToDismiss(defaults.swipeDownToDismiss)
             preferencesManager.setPrefetchAdjacentMedia(defaults.prefetchAdjacentMedia)
             preferencesManager.setWifiOnlyHighRes(defaults.wifiOnlyHighRes)
+            preferencesManager.setExternalGallery(defaults.externalGalleryPackage, defaults.externalGalleryLabel)
             preferencesManager.setBackgroundSyncEnabled(defaults.backgroundSyncEnabled)
             DriveSyncScheduler.setBackgroundSyncEnabled(appContext, false)
             preferencesManager.setMaxCacheSizeMb(defaults.maxCacheSizeMb)

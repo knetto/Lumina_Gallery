@@ -58,7 +58,9 @@ class PreferencesManager(private val context: Context) {
             keepScreenOnViewer = prefs[KEY_KEEP_SCREEN_ON_VIEWER] ?: true,
             swipeDownToDismiss = prefs[KEY_SWIPE_DOWN_DISMISS] ?: true,
             prefetchAdjacentMedia = prefs[KEY_PREFETCH_ADJACENT] ?: true,
-            wifiOnlyHighRes = prefs[KEY_WIFI_ONLY_HIGH_RES] ?: true
+            wifiOnlyHighRes = prefs[KEY_WIFI_ONLY_HIGH_RES] ?: true,
+            externalGalleryPackage = prefs[KEY_EXTERNAL_GALLERY_PACKAGE].orEmpty(),
+            externalGalleryLabel = prefs[KEY_EXTERNAL_GALLERY_LABEL].orEmpty()
         ).also { latestPreferences = it }
     }
 
@@ -178,6 +180,18 @@ class PreferencesManager(private val context: Context) {
         }
     }
 
+    suspend fun setExternalGallery(packageName: String, label: String) {
+        context.galleryDataStore.edit { prefs ->
+            if (packageName.isBlank()) {
+                prefs.remove(KEY_EXTERNAL_GALLERY_PACKAGE)
+                prefs.remove(KEY_EXTERNAL_GALLERY_LABEL)
+            } else {
+                prefs[KEY_EXTERNAL_GALLERY_PACKAGE] = packageName.trim()
+                prefs[KEY_EXTERNAL_GALLERY_LABEL] = label.trim()
+            }
+        }
+    }
+
     val recentSearchesFlow: Flow<List<String>> = context.galleryDataStore.data.map { prefs ->
         val raw = prefs[KEY_RECENT_SEARCHES].orEmpty()
         if (raw.isBlank()) emptyList() else raw.split("\n").map { it.trim() }.filter { it.isNotEmpty() }
@@ -235,6 +249,8 @@ class PreferencesManager(private val context: Context) {
         private val KEY_SWIPE_DOWN_DISMISS = booleanPreferencesKey("swipe_down_to_dismiss")
         private val KEY_PREFETCH_ADJACENT = booleanPreferencesKey("prefetch_adjacent_media")
         private val KEY_WIFI_ONLY_HIGH_RES = booleanPreferencesKey("wifi_only_high_res")
+        private val KEY_EXTERNAL_GALLERY_PACKAGE = stringPreferencesKey("external_gallery_package")
+        private val KEY_EXTERNAL_GALLERY_LABEL = stringPreferencesKey("external_gallery_label")
         private val KEY_RECENT_SEARCHES = stringPreferencesKey("recent_searches")
     }
 }

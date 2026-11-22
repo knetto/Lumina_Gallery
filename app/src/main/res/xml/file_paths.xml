@@ -3,4 +3,7 @@
     <cache-path
         name="shared_media"
         path="shared_media/" />
+    <files-path
+        name="offline_media"
+        path="offline_media/" />
 </paths>

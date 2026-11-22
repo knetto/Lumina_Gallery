@@ -57,6 +57,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.automirrored.rounded.VolumeOff
 import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.outlined.Delete
@@ -550,6 +551,63 @@ fun ViewerScreen(
                         shape = RoundedCornerShape(22.dp),
                         containerColor = Color(0xFF28282B)
                     ) {
+                        val openInLabel = if (prefs.externalGalleryPackage.isNotBlank()) {
+                            "Open in ${prefs.externalGalleryLabel.ifBlank { "other gallery" }}"
+                        } else {
+                            "Open in another gallery"
+                        }
+                        DropdownMenuItem(
+                            text = { Text(openInLabel) },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
+                                    contentDescription = null,
+                                    tint = Color.White.copy(alpha = 0.85f),
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            },
+                            onClick = {
+                                showOverflowMenu = false
+                                val targetPkg = prefs.externalGalleryPackage.ifBlank { null }
+                                val itemToOpen = currentItem
+                                val quickUri = appContainer.localFileOperationsManager
+                                    .getQuickLocalOrOfflineUri(itemToOpen)
+                                if (quickUri != null) {
+                                    appContainer.localFileOperationsManager.launchInExternalGallery(
+                                        activityContext = context,
+                                        uri = quickUri,
+                                        mimeType = itemToOpen.mimeType,
+                                        isVideo = itemToOpen.isVideo,
+                                        targetPackage = targetPkg
+                                    ).onFailure { err ->
+                                        viewModel.showMessage(err.localizedMessage ?: "No gallery app available")
+                                    }
+                                } else {
+                                    coroutineScope.launch {
+                                        isApplyingQuickAction = true
+                                        appContainer.exportMediaUseCase.prepareShareUris(listOf(itemToOpen))
+                                            .onSuccess { uris ->
+                                                val uri = uris.firstOrNull()
+                                                if (uri != null) {
+                                                    appContainer.localFileOperationsManager.launchInExternalGallery(
+                                                        activityContext = context,
+                                                        uri = uri,
+                                                        mimeType = itemToOpen.mimeType,
+                                                        isVideo = itemToOpen.isVideo,
+                                                        targetPackage = targetPkg
+                                                    ).onFailure { err ->
+                                                        viewModel.showMessage(err.localizedMessage ?: "No gallery app available")
+                                                    }
+                                                }
+                                            }
+                                            .onFailure { err ->
+                                                viewModel.showMessage(err.localizedMessage ?: "Unable to prepare file")
+                                            }
+                                        isApplyingQuickAction = false
+                                    }
+                                }
+                            }
+                        )
                         if (!currentItem.isVideo) {
                             DropdownMenuItem(
                                 text = { Text("Edit photo") },

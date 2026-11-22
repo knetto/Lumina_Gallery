@@ -350,5 +350,7 @@ data class UserPreferences(
     val keepScreenOnViewer: Boolean = true,
     val swipeDownToDismiss: Boolean = true,
     val prefetchAdjacentMedia: Boolean = true,
-    val wifiOnlyHighRes: Boolean = true
+    val wifiOnlyHighRes: Boolean = true,
+    val externalGalleryPackage: String = "",
+    val externalGalleryLabel: String = ""
 )

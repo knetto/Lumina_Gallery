@@ -1,10 +1,14 @@
 package com.luminagallery.drive.data.repository
 
 import android.app.WallpaperManager
+import android.content.ClipData
+import android.content.ComponentName
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.IntentSender
+import android.content.pm.PackageManager
+import android.content.pm.ResolveInfo
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.ImageDecoder
@@ -12,12 +16,27 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import androidx.core.content.FileProvider
 import com.luminagallery.drive.data.remote.DriveApiService
 import com.luminagallery.drive.domain.model.MediaItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
+
+data class InstalledGalleryApp(
+    val packageName: String,
+    val label: String,
+    val handlesImages: Boolean,
+    val handlesVideos: Boolean
+) {
+    val capabilitySummary: String
+        get() = when {
+            handlesImages && handlesVideos -> "Photos & videos"
+            handlesImages -> "Photos"
+            else -> "Videos"
+        }
+}
 
 enum class WallpaperTarget(val label: String, val flags: Int) {
     HOME("Home screen", WallpaperManager.FLAG_SYSTEM),
@@ -187,6 +206,183 @@ class LocalFileOperationsManager(
         }
         val chooser = Intent.createChooser(editIntent, "Edit with")
         chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        activityContext.startActivity(chooser)
+    }
+
+    /**
+     * Lists installed apps on the device capable of viewing photos and/or videos
+     * (Samsung Gallery, Google Photos, Xiaomi Gallery, third-party galleries, video players),
+     * excluding Lumina Gallery itself.
+     */
+    fun queryInstalledGalleryApps(): List<InstalledGalleryApp> {
+        val pm = context.packageManager
+        val selfPkg = context.packageName
+
+        fun query(intent: Intent): List<ResolveInfo> = runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                pm.queryIntentActivities(
+                    intent,
+                    PackageManager.ResolveInfoFlags.of(PackageManager.MATCH_DEFAULT_ONLY.toLong())
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                pm.queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY)
+            }
+        }.getOrDefault(emptyList())
+
+        val imageCandidates = buildList {
+            addAll(
+                query(
+                    Intent(Intent.ACTION_VIEW).setDataAndType(
+                        Uri.parse("content://media/external/images/media/1"),
+                        "image/jpeg"
+                    )
+                )
+            )
+            addAll(query(Intent(Intent.ACTION_VIEW).setType("image/*")))
+        }
+        val videoCandidates = buildList {
+            addAll(
+                query(
+                    Intent(Intent.ACTION_VIEW).setDataAndType(
+                        Uri.parse("content://media/external/video/media/1"),
+                        "video/mp4"
+                    )
+                )
+            )
+            addAll(query(Intent(Intent.ACTION_VIEW).setType("video/*")))
+        }
+
+        val imagePackages = imageCandidates
+            .mapNotNull { it.activityInfo?.packageName }
+            .filter { it != selfPkg }
+            .toSet()
+        val videoPackages = videoCandidates
+            .mapNotNull { it.activityInfo?.packageName }
+            .filter { it != selfPkg }
+            .toSet()
+
+        val allPackages = (imagePackages + videoPackages)
+        val preferredGalleryOrder = listOf(
+            "com.sec.android.gallery3d",           // Samsung Gallery
+            "com.google.android.apps.photos",      // Google Photos
+            "com.google.android.apps.photosgo",    // Gallery by Google
+            "com.miui.gallery",                    // Xiaomi Gallery
+            "com.oneplus.gallery",                 // OnePlus Photos
+            "com.coloros.gallery3d",               // OPPO/Realme Photos
+            "com.vivo.gallery",                    // vivo Albums
+            "com.android.gallery3d",               // AOSP Gallery
+            "org.fossify.gallery",                 // Fossify Gallery
+            "com.simplemobiletools.gallery.pro",   // Simple Gallery Pro
+            "deckers.thibault.aves"                // Aves Gallery
+        )
+
+        return allPackages.mapNotNull { pkg ->
+            val appInfo = runCatching { pm.getApplicationInfo(pkg, 0) }.getOrNull() ?: return@mapNotNull null
+            val label = runCatching { pm.getApplicationLabel(appInfo).toString().trim() }
+                .getOrNull()
+                ?.takeIf { it.isNotBlank() }
+                ?: pkg
+            InstalledGalleryApp(
+                packageName = pkg,
+                label = label,
+                handlesImages = pkg in imagePackages,
+                handlesVideos = pkg in videoPackages
+            )
+        }.sortedWith(
+            compareBy<InstalledGalleryApp>(
+                {
+                    val idx = preferredGalleryOrder.indexOf(it.packageName)
+                    if (idx >= 0) idx else preferredGalleryOrder.size
+                },
+                { !(it.handlesImages && it.handlesVideos) },
+                { !it.handlesImages },
+                { it.label.lowercase() }
+            )
+        )
+    }
+
+    /**
+     * Returns an immediately usable URI for local MediaStore files or offline-pinned Drive files
+     * (0ms, zero network), or `null` if a cloud-only Drive item needs to be staged first.
+     */
+    fun getQuickLocalOrOfflineUri(item: MediaItem): Uri? {
+        if (item.isLocal && !item.localContentUri.isNullOrBlank()) {
+            return Uri.parse(item.localContentUri)
+        }
+        val offlinePath = offlineMediaManager.getOfflineFilePath(item.id)
+        if (!offlinePath.isNullOrBlank()) {
+            val file = File(offlinePath)
+            if (file.exists() && file.length() > 0L) {
+                return runCatching {
+                    FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+                }.getOrNull()
+            }
+        }
+        return null
+    }
+
+    /**
+     * Opens a photo or video in the user's configured external gallery app (or opens Android's
+     * app chooser excluding Lumina Gallery when set to "Ask every time" or if the chosen app
+     * cannot handle that media type).
+     */
+    fun launchInExternalGallery(
+        activityContext: Context,
+        uri: Uri,
+        mimeType: String,
+        isVideo: Boolean,
+        targetPackage: String?
+    ): Result<Unit> = runCatching {
+        val pm = context.packageManager
+        val fallbackMime = if (isVideo) "video/*" else "image/*"
+        val resolvedMime = mimeType.ifBlank { fallbackMime }
+
+        val needsNewTask = activityContext !is android.app.Activity
+
+        fun buildViewIntent(mime: String, pkg: String?): Intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, mime)
+            clipData = ClipData.newRawUri(null, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            if (needsNewTask) {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            if (!pkg.isNullOrBlank()) {
+                setPackage(pkg)
+            }
+        }
+
+        if (!targetPackage.isNullOrBlank()) {
+            val directExact = buildViewIntent(resolvedMime, targetPackage)
+            val directIntent = when {
+                directExact.resolveActivity(pm) != null -> directExact
+                else -> {
+                    val directWild = buildViewIntent(fallbackMime, targetPackage)
+                    if (directWild.resolveActivity(pm) != null) directWild else null
+                }
+            }
+            if (directIntent != null) {
+                runCatching {
+                    context.grantUriPermission(targetPackage, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                activityContext.startActivity(directIntent)
+                return@runCatching
+            }
+        }
+
+        val baseIntent = buildViewIntent(resolvedMime, null)
+        val chooser = Intent.createChooser(baseIntent, "Open in another gallery").apply {
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            if (needsNewTask) {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                putExtra(
+                    Intent.EXTRA_EXCLUDE_COMPONENTS,
+                    arrayOf(ComponentName(context.packageName, "com.luminagallery.drive.MainActivity"))
+                )
+            }
+        }
         activityContext.startActivity(chooser)
     }
 

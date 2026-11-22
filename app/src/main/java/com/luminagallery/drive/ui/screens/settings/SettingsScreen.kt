@@ -21,16 +21,19 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.CloudDone
 import androidx.compose.material.icons.rounded.CloudOff
@@ -65,6 +68,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
@@ -74,11 +78,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.graphics.drawable.toBitmap
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.android.gms.auth.api.identity.Identity
 import com.luminagallery.drive.BuildConfig
 import com.luminagallery.drive.LocalAppContainer
 import com.luminagallery.drive.R
+import com.luminagallery.drive.data.repository.InstalledGalleryApp
 import com.luminagallery.drive.domain.model.AlbumSortMode
 import com.luminagallery.drive.domain.model.MainTab
 import com.luminagallery.drive.domain.model.ServiceAccountState
@@ -91,7 +97,8 @@ private enum class SettingsPickerSheet {
     START_TAB,
     GRID_DENSITY,
     ALBUM_SORT,
-    CACHE_LIMIT
+    CACHE_LIMIT,
+    EXTERNAL_GALLERY
 }
 
 private val OneUiGroupShape = RoundedCornerShape(26.dp)
@@ -420,6 +427,14 @@ fun SettingsScreen(
                         checked = prefs.prefetchAdjacentMedia,
                         onCheckedChange = viewModel::setPrefetchAdjacentMedia
                     )
+
+                    OneUiDivider()
+
+                    OneUiValueRow(
+                        title = "External gallery app",
+                        value = prefs.externalGalleryLabel.ifBlank { "Ask every time" },
+                        onClick = { activePicker = SettingsPickerSheet.EXTERNAL_GALLERY }
+                    )
                 }
             }
 
@@ -623,6 +638,21 @@ fun SettingsScreen(
                         activePicker = null
                     }
                 )
+
+                SettingsPickerSheet.EXTERNAL_GALLERY -> {
+                    val installedApps = remember {
+                        appContainer.localFileOperationsManager.queryInstalledGalleryApps()
+                    }
+                    ExternalGalleryPickerSheetContent(
+                        installedApps = installedApps,
+                        selectedPackage = prefs.externalGalleryPackage,
+                        onSelect = { pkg, label ->
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            viewModel.setExternalGallery(pkg, label)
+                            activePicker = null
+                        }
+                    )
+                }
             }
         }
     }
@@ -1173,4 +1203,186 @@ private fun formatMbLabel(mb: Int): String =
 private fun nearestCachePreset(mb: Int): Int {
     val presets = listOf(250, 500, 750, 1024, 1536, 2048)
     return presets.minByOrNull { kotlin.math.abs(it - mb) } ?: 500
+}
+
+@Composable
+private fun ExternalGalleryPickerSheetContent(
+    installedApps: List<InstalledGalleryApp>,
+    selectedPackage: String,
+    onSelect: (packageName: String, label: String) -> Unit
+) {
+    val context = LocalContext.current
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .navigationBarsPadding()
+            .padding(bottom = 20.dp)
+    ) {
+        Text(
+            text = "External gallery app",
+            style = MaterialTheme.typography.titleMedium.copy(
+                fontSize = 19.sp,
+                fontWeight = FontWeight.SemiBold
+            ),
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.padding(horizontal = 24.dp, vertical = 6.dp)
+        )
+        Text(
+            text = "Choose which app opens when tapping \"Open in…\" inside the viewer's ⋮ menu",
+            style = MaterialTheme.typography.bodySmall.copy(fontSize = 13.sp),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 24.dp, end = 24.dp, bottom = 12.dp)
+        )
+
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 420.dp)
+        ) {
+            item(key = "ask_every_time") {
+                val isSelected = selectedPackage.isBlank()
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onSelect("", "") }
+                        .padding(horizontal = 24.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(MaterialTheme.colorScheme.surfaceContainerHighest),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Ask every time",
+                            style = MaterialTheme.typography.bodyLarge.copy(
+                                fontSize = 16.sp,
+                                fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
+                            ),
+                            color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = "Show the Android app chooser each time",
+                            style = MaterialTheme.typography.bodySmall.copy(fontSize = 13.sp),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    if (isSelected) {
+                        Icon(
+                            imageVector = Icons.Rounded.Check,
+                            contentDescription = "Selected",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    } else {
+                        Spacer(Modifier.width(22.dp))
+                    }
+                }
+                if (installedApps.isNotEmpty()) {
+                    HorizontalDivider(
+                        modifier = Modifier.padding(horizontal = 24.dp),
+                        thickness = 0.5.dp,
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)
+                    )
+                }
+            }
+
+            itemsIndexed(
+                items = installedApps,
+                key = { _, app -> app.packageName }
+            ) { idx, app ->
+                val isSelected = app.packageName == selectedPackage
+                val appIconBitmap = remember(app.packageName) {
+                    runCatching {
+                        context.packageManager.getApplicationIcon(app.packageName)
+                            .toBitmap(width = 96, height = 96)
+                            .asImageBitmap()
+                    }.getOrNull()
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onSelect(app.packageName, app.label) }
+                        .padding(horizontal = 24.dp, vertical = 13.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    if (appIconBitmap != null) {
+                        Image(
+                            bitmap = appIconBitmap,
+                            contentDescription = null,
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                        )
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(MaterialTheme.colorScheme.surfaceContainerHighest),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = app.label,
+                            style = MaterialTheme.typography.bodyLarge.copy(
+                                fontSize = 16.sp,
+                                fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
+                            ),
+                            color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = app.capabilitySummary,
+                            style = MaterialTheme.typography.bodySmall.copy(fontSize = 13.sp),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    if (isSelected) {
+                        Icon(
+                            imageVector = Icons.Rounded.Check,
+                            contentDescription = "Selected",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    } else {
+                        Spacer(Modifier.width(22.dp))
+                    }
+                }
+                if (idx < installedApps.lastIndex) {
+                    HorizontalDivider(
+                        modifier = Modifier.padding(horizontal = 24.dp),
+                        thickness = 0.5.dp,
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)
+                    )
+                }
+            }
+        }
+    }
 }
