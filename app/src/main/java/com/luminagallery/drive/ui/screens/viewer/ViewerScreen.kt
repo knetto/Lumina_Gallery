@@ -100,6 +100,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -287,6 +288,7 @@ fun ViewerScreen(
     )
 
     val currentItem = items.getOrNull(pagerState.currentPage) ?: items.first()
+    val settledItem = items.getOrNull(pagerState.settledPage) ?: currentItem
     val isCurrentOffline = currentItem.id in offlineIds
 
     val renameWriteLauncher = rememberLauncherForActivityResult(
@@ -308,19 +310,25 @@ fun ViewerScreen(
         }
     }
 
-    // Notify parent grid of active item & detect Samsung / Xiaomi / Pixel / iPhone Motion Photos
+    // Reset zoom/motion immediately when page changes, and detect Motion Photos once settled
     LaunchedEffect(currentItem.id) {
         isCurrentPageZoomed = false
         isPlayingMotionPhoto = false
         currentMotionInfo = null
         onActiveItemChanged(currentItem.id)
-        if (!currentItem.isVideo) {
-            val offlinePath = appContainer.offlineMediaManager.getOfflineFilePath(currentItem.id)
-            currentMotionInfo = appContainer.motionPhotoDetector.detect(
-                item = currentItem,
+    }
+
+    LaunchedEffect(settledItem.id) {
+        if (!settledItem.isVideo) {
+            val offlinePath = appContainer.offlineMediaManager.getOfflineFilePath(settledItem.id)
+            val detected = appContainer.motionPhotoDetector.detect(
+                item = settledItem,
                 siblingItems = items,
                 offlineFilePath = offlinePath
             )
+            if (settledItem.id == currentItem.id) {
+                currentMotionInfo = detected
+            }
         }
     }
 
@@ -341,6 +349,8 @@ fun ViewerScreen(
                     }
                     val request = ImageRequest.Builder(context)
                         .data(prefetchUrl)
+                        .size(VIEWER_MAX_DECODE_PX)
+                        .precision(Precision.INEXACT)
                         .memoryCacheKey(DriveConstants.fullResMemoryKey(neighbor.id))
                         .memoryCachePolicy(CachePolicy.ENABLED)
                         .diskCachePolicy(CachePolicy.DISABLED)
@@ -377,7 +387,7 @@ fun ViewerScreen(
 
         HorizontalPager(
             state = pagerState,
-            key = { index -> items[index].id },
+            key = { index -> items.getOrNull(index)?.id ?: "page_$index" },
             userScrollEnabled = !isCurrentPageZoomed,
             beyondViewportPageCount = 1,
             modifier = Modifier
@@ -385,10 +395,13 @@ fun ViewerScreen(
                 .navigationBarsPadding()
                 .padding(bottom = bottomDockClearance)
         ) { page ->
-            val pageItem = items[page]
+            val pageItem = items.getOrNull(page) ?: return@HorizontalPager
             val isActivePage = page == pagerState.currentPage
+            val isSettledPage = page == pagerState.settledPage
 
-            val sharedModifier = if (isActivePage) {
+            // Attach sharedElement ONLY on the settled page so Compose never detaches/reattaches
+            // shared transition nodes mid-drag while the user's finger is swiping the pager!
+            val sharedModifier = if (isSettledPage) {
                 with(sharedTransitionScope) {
                     Modifier.sharedElement(
                         sharedContentState = rememberSharedContentState(key = "media_${pageItem.id}"),
@@ -495,7 +508,8 @@ fun ViewerScreen(
                     )
                 }
 
-                if (currentMotionInfo != null && !currentItem.isVideo) {
+                val activeMotionBadge = currentMotionInfo
+                if (activeMotionBadge != null && !currentItem.isVideo) {
                     Surface(
                         shape = RoundedCornerShape(50),
                         color = if (isPlayingMotionPhoto) MaterialTheme.colorScheme.primary else Color.Black.copy(alpha = 0.56f),
@@ -517,7 +531,7 @@ fun ViewerScreen(
                                 modifier = Modifier.size(15.dp)
                             )
                             Text(
-                                text = if (isPlayingMotionPhoto) "Playing" else currentMotionInfo!!.kind.badgeLabel,
+                                text = if (isPlayingMotionPhoto) "Playing" else activeMotionBadge.kind.badgeLabel,
                                 color = Color.White,
                                 fontSize = 11.5.sp,
                                 fontWeight = FontWeight.SemiBold
@@ -1309,7 +1323,9 @@ private fun SamsungFilmstripScrubber(
     val context = LocalContext.current
     val imageLoader = LocalGalleryImageLoader.current
     val density = LocalDensity.current
-    val listState = rememberLazyListState(initialFirstVisibleItemIndex = currentIndex)
+    val listState = rememberLazyListState(
+        initialFirstVisibleItemIndex = currentIndex.coerceIn(0, (items.size - 1).coerceAtLeast(0))
+    )
 
     BoxWithConstraints(
         modifier = modifier,
@@ -1584,6 +1600,8 @@ private fun ZoomablePhotoPage(
         if (!offlinePath.isNullOrBlank() && File(offlinePath).exists()) {
             ImageRequest.Builder(context)
                 .data(File(offlinePath))
+                .size(VIEWER_MAX_DECODE_PX)
+                .precision(Precision.INEXACT)
                 .placeholderMemoryCacheKey(DriveConstants.stableThumbMemoryKey(item.id))
                 .memoryCacheKey(DriveConstants.fullResMemoryKey(item.id))
                 .crossfade(false)
@@ -1591,6 +1609,8 @@ private fun ZoomablePhotoPage(
         } else if (item.isLocal && !item.localContentUri.isNullOrBlank()) {
             ImageRequest.Builder(context)
                 .data(item.localContentUri)
+                .size(VIEWER_MAX_DECODE_PX)
+                .precision(Precision.INEXACT)
                 .placeholderMemoryCacheKey(DriveConstants.stableThumbMemoryKey(item.id))
                 .memoryCacheKey(DriveConstants.fullResMemoryKey(item.id))
                 .crossfade(false)
@@ -1603,6 +1623,8 @@ private fun ZoomablePhotoPage(
             }
             ImageRequest.Builder(context)
                 .data(fullUrl)
+                .size(VIEWER_MAX_DECODE_PX)
+                .precision(Precision.INEXACT)
                 .placeholderMemoryCacheKey(DriveConstants.stableThumbMemoryKey(item.id))
                 .memoryCacheKey(DriveConstants.fullResMemoryKey(item.id))
                 .memoryCachePolicy(CachePolicy.ENABLED)
@@ -1611,6 +1633,9 @@ private fun ZoomablePhotoPage(
                 .build()
         }
     }
+
+    val latestMotionInfo by rememberUpdatedState(motionPhotoInfo)
+    val latestSwipeDown by rememberUpdatedState(swipeDownToDismiss)
 
     fun clampOffset(x: Float, y: Float, scale: Float): Offset {
         val maxX = ((scale - 1f) * containerSize.width / 2f).coerceAtLeast(0f)
@@ -1622,14 +1647,14 @@ private fun ZoomablePhotoPage(
     val dismissScale = 1f - (dismissFraction * 0.22f)
 
     Box(
-        modifier = modifier
+        modifier = Modifier
             .fillMaxSize()
             .onSizeChanged { containerSize = it }
-            .pointerInput(item.id, motionPhotoInfo) {
+            .pointerInput(item.id) {
                 detectTapGestures(
                     onTap = { onTap() },
                     onLongPress = {
-                        if (motionPhotoInfo != null && scaleAnim.value <= 1.05f) {
+                        if (latestMotionInfo != null && scaleAnim.value <= 1.05f) {
                             onMotionPlayStateChanged(true)
                         }
                     },
@@ -1662,7 +1687,7 @@ private fun ZoomablePhotoPage(
                     }
                 )
             }
-            .pointerInput(item.id, swipeDownToDismiss) {
+            .pointerInput(item.id) {
                 awaitEachGesture {
                     awaitFirstDown(requireUnconsumed = false)
                     var isVerticalDismissDrag = false
@@ -1729,7 +1754,7 @@ private fun ZoomablePhotoPage(
                                 }
                                 if (isVerticalDismissDrag) {
                                     val rawY = dismissOffsetY.value + pan.y
-                                    val newY = if (!swipeDownToDismiss && rawY > 0f) 0f else rawY
+                                    val newY = if (!latestSwipeDown && rawY > 0f) 0f else rawY
                                     coroutineScope.launch {
                                         dismissOffsetY.snapTo(newY)
                                     }
@@ -1744,7 +1769,7 @@ private fun ZoomablePhotoPage(
                         val dismissThresholdPx = (containerSize.height * 0.16f).coerceAtLeast(210f)
                         val swipeUpThresholdPx = 150f
                         when {
-                            swipeDownToDismiss && dismissOffsetY.value > dismissThresholdPx -> {
+                            latestSwipeDown && dismissOffsetY.value > dismissThresholdPx -> {
                                 onVerticalDismissProgress(0f)
                                 onDismiss()
                             }
@@ -1785,7 +1810,7 @@ private fun ZoomablePhotoPage(
             imageLoader = imageLoader,
             contentDescription = item.name,
             contentScale = ContentScale.Fit,
-            modifier = Modifier
+            modifier = modifier
                 .fillMaxSize()
                 .graphicsLayer {
                     val effectiveScale = scaleAnim.value * dismissScale
@@ -1813,6 +1838,9 @@ private fun ZoomablePhotoPage(
                 update = { pv ->
                     if (pv.player !== motionPlayer) pv.player = motionPlayer
                 },
+                onRelease = { pv ->
+                    pv.player = null
+                },
                 modifier = Modifier
                     .fillMaxSize()
                     .graphicsLayer {
@@ -1822,3 +1850,5 @@ private fun ZoomablePhotoPage(
         }
     }
 }
+
+private const val VIEWER_MAX_DECODE_PX = 3200

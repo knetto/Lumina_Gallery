@@ -68,9 +68,11 @@ import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
+import coil3.size.Precision
 import com.luminagallery.drive.LocalAppContainer
 import com.luminagallery.drive.LocalGalleryImageLoader
 import com.luminagallery.drive.data.remote.DriveConstants
+import com.luminagallery.drive.data.repository.LocalThumbnailRequest
 import com.luminagallery.drive.domain.model.MediaItem
 import com.luminagallery.drive.ui.components.GlassSurface
 import kotlinx.coroutines.Dispatchers
@@ -154,7 +156,9 @@ fun VideoPlayerPage(
     val thumbnailRequest = remember(item.isLocal, item.localContentUri, item.id, item.thumbnailLink, isUnmeteredWifi) {
         if (item.isLocal && !item.localContentUri.isNullOrBlank()) {
             ImageRequest.Builder(context)
-                .data(item.localContentUri)
+                .data(LocalThumbnailRequest(item.localContentUri, isVideo = true))
+                .size(1080)
+                .precision(Precision.INEXACT)
                 .memoryCacheKey(DriveConstants.stableThumbMemoryKey(item.id))
                 .build()
         } else {
@@ -440,6 +444,10 @@ fun VideoPlayerPage(
                     if (view.player !== exoPlayer) {
                         view.player = exoPlayer
                     }
+                },
+                onRelease = { view ->
+                    view.player = null
+                    if (playerViewRef === view) playerViewRef = null
                 },
                 modifier = Modifier.fillMaxSize()
             )

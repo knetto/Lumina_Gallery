@@ -152,7 +152,8 @@ class ViewerViewModel(
         networkMonitor.networkState,
         preferencesManager.preferencesFlow,
         overlayFlow
-    ) { items, favIds, net, prefs, overlay ->
+    ) { rawItems, favIds, net, prefs, overlay ->
+        val items = rawItems.distinctBy { it.id }
         val index = items.indexOfFirst { it.id == launchContext.initialItemId }.coerceAtLeast(0)
         ViewerUiState(
             items = items,
