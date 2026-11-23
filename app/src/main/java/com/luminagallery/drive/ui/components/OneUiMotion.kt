@@ -9,6 +9,7 @@ import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.Transition
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -34,6 +35,7 @@ import androidx.compose.runtime.Stable
 import androidx.compose.runtime.State
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -283,7 +285,7 @@ class AlbumTransitionOriginTracker {
     private val originByKey = HashMap<String, TransformOrigin>(32)
     private val boundsByKey = HashMap<String, Rect>(128)
     private val albumCoverByKey = HashMap<String, AlbumCoverMorphInfo>(64)
-    private val morphEnabledByEntryId = HashMap<String, Boolean>(16)
+    private val morphEnabledByEntryId = mutableStateMapOf<String, Boolean>()
 
     private var activeMorphOwnerEntryId: String? = null
 
@@ -416,12 +418,20 @@ val LocalAlbumTransitionOrigin = staticCompositionLocalOf { AlbumTransitionOrigi
 
 /**
  * Animates 0f (settled / Visible) -> 1f (off-stage) in lock-step with the page slide.
+ * Uses `snap()` when background dimming is off (e.g. morph open/close) so this helper NEVER
+ * keeps NavHost's outer Transition alive past the morph animation's exact duration!
  */
 @Composable
-private fun AnimatedVisibilityScope.rememberPageDimFraction(): State<Float> =
+private fun AnimatedVisibilityScope.rememberPageDimFraction(
+    tracker: AlbumTransitionOriginTracker
+): State<Float> =
     transition.animateFloat(
         transitionSpec = {
-            tween(durationMillis = OneUiMotion.PAGE_SLIDE_MS, easing = OneUiMotion.PageSlideEasing)
+            if (tracker.dimBackgroundPage) {
+                tween(durationMillis = OneUiMotion.PAGE_SLIDE_MS, easing = OneUiMotion.PageSlideEasing)
+            } else {
+                snap()
+            }
         },
         label = "hyperOsPageDim"
     ) { state -> if (state == EnterExitState.Visible) 0f else 1f }
@@ -478,9 +488,13 @@ fun AnimatedVisibilityScope.HyperOsRectMorphFrame(
     val maxShadowPx = with(density) { maxShadowElevation.toPx() }
 
     // 0f = full screen (Visible), 1f = fully collapsed inside the target tile/card (PreEnter / PostExit)
+    // Uses `snap()` when morph is disabled for this entry (e.g. an album returning behind a closing
+    // photo) so it never extends NavHost's transition duration or blocks back-to-back close animations!
     val morphProgressState = transition.animateFloat(
         transitionSpec = {
-            if (targetState == EnterExitState.Visible) {
+            if (!originTracker.isMorphEnabled(entryId)) {
+                snap()
+            } else if (targetState == EnterExitState.Visible) {
                 tween(durationMillis = OneUiMotion.MORPH_OPEN_MS, easing = OneUiMotion.MorphOpenEasing)
             } else {
                 tween(durationMillis = OneUiMotion.MORPH_CLOSE_MS, easing = OneUiMotion.MorphCloseEasing)
@@ -538,7 +552,7 @@ fun AnimatedVisibilityScope.HyperOsRectMorphFrame(
         }
     }
 
-    val pageDim = rememberPageDimFraction()
+    val pageDim = rememberPageDimFraction(originTracker)
     val frameSizeRef = remember { floatArrayOf(0f, 0f) }
 
     Box(
@@ -779,7 +793,7 @@ fun AnimatedVisibilityScope.HyperOsTransitionFrame(
     content: @Composable () -> Unit
 ) {
     val tracker = LocalAlbumTransitionOrigin.current
-    val pageDim = rememberPageDimFraction()
+    val pageDim = rememberPageDimFraction(tracker)
     val animTransition = transition
     Box(
         modifier = Modifier

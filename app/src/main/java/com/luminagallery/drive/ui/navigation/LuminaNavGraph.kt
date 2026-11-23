@@ -17,10 +17,13 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.IntOffset
@@ -29,7 +32,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavDestination
 import androidx.navigation.NavDestination.Companion.hasRoute
-import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
@@ -153,10 +155,8 @@ private fun NavDestination.isMorphRoute(): Boolean =
  * that compose after it. On release it pops, and the full, smooth close animation plays.
  */
 @Composable
-private fun PopOnReleaseBackHandler(navController: NavHostController) {
-    BackHandler {
-        navController.popBackStack()
-    }
+private fun PopOnReleaseBackHandler(onBack: () -> Unit) {
+    BackHandler(onBack = onBack)
 }
 
 @OptIn(ExperimentalSharedTransitionApi::class)
@@ -173,7 +173,41 @@ fun LuminaNavGraph(
     val originTracker = remember { AlbumTransitionOriginTracker() }
     var activeViewerItemId by remember { mutableStateOf<String?>(null) }
 
+    // Track active NavHost transitions so back-to-back closes (e.g. close photo then immediately
+    // close album) play BOTH animations cleanly one after the other instead of NavHost cancelling
+    // the second route's exit transition mid-flight!
+    val visibleEntries by navController.visibleEntries.collectAsStateWithLifecycle()
+    var pendingBackPops by remember { mutableIntStateOf(0) }
+
+    fun safePopBackStack() {
+        if (navController.previousBackStackEntry == null) {
+            pendingBackPops = 0
+            return
+        }
+        val inFlight = navController.visibleEntries.value.size > 1
+        if (inFlight) {
+            if (pendingBackPops < 2) {
+                pendingBackPops += 1
+            }
+        } else {
+            navController.popBackStack()
+        }
+    }
+
+    LaunchedEffect(visibleEntries.size, pendingBackPops) {
+        if (visibleEntries.size <= 1 && pendingBackPops > 0) {
+            withFrameNanos { }
+            if (navController.visibleEntries.value.size <= 1 && navController.previousBackStackEntry != null) {
+                pendingBackPops -= 1
+                navController.popBackStack()
+            } else if (navController.previousBackStackEntry == null) {
+                pendingBackPops = 0
+            }
+        }
+    }
+
     fun prewarmFolderAndNavigate(folderId: String, folderName: String) {
+        pendingBackPops = 0
         val prefs = container.preferencesManager.latestPreferences
         val highRes = container.networkMonitor.networkState.value.isUnmeteredWifi || !prefs.wifiOnlyHighRes
         val cachedItems = if (LocalMediaRepository.isLocalFolderId(folderId)) {
@@ -296,13 +330,13 @@ fun LuminaNavGraph(
                     val filter = runCatching { SpecialGalleryFilter.valueOf(route.filterName) }
                         .getOrDefault(SpecialGalleryFilter.VIDEOS)
 
-                    PopOnReleaseBackHandler(navController)
+                    PopOnReleaseBackHandler(::safePopBackStack)
                     HyperOsTransitionFrame {
                         SpecialCollectionScreen(
                             filter = filter,
                             sharedTransitionScope = this@SharedTransitionLayout,
                             animatedVisibilityScope = this@composable,
-                            onNavigateBack = { navController.popBackStack() },
+                            onNavigateBack = { safePopBackStack() },
                             onOpenViewer = { activeFilter, itemId ->
                                 activeViewerItemId = itemId
                                 navController.navigate(
@@ -318,12 +352,12 @@ fun LuminaNavGraph(
                 }
 
                 composable<LocationsRoute> {
-                    PopOnReleaseBackHandler(navController)
+                    PopOnReleaseBackHandler(::safePopBackStack)
                     HyperOsTransitionFrame {
                         LocationsScreen(
                             sharedTransitionScope = this@SharedTransitionLayout,
                             animatedVisibilityScope = this@composable,
-                            onNavigateBack = { navController.popBackStack() },
+                            onNavigateBack = { safePopBackStack() },
                             onOpenPhoto = { item ->
                                 activeViewerItemId = item.id
                                 navController.navigate(
@@ -341,11 +375,11 @@ fun LuminaNavGraph(
                     val cleanOutViewModel: CleanOutViewModel = viewModel(
                         factory = CleanOutViewModel.Factory(container)
                     )
-                    PopOnReleaseBackHandler(navController)
+                    PopOnReleaseBackHandler(::safePopBackStack)
                     HyperOsTransitionFrame {
                         CleanOutScreen(
                             viewModel = cleanOutViewModel,
-                            onNavigateBack = { navController.popBackStack() }
+                            onNavigateBack = { safePopBackStack() }
                         )
                     }
                 }
@@ -372,7 +406,7 @@ fun LuminaNavGraph(
                             container = container
                         )
                     )
-                    PopOnReleaseBackHandler(navController)
+                    PopOnReleaseBackHandler(::safePopBackStack)
                     HyperOsRectMorphFrame(
                         entryId = backStackEntry.id,
                         targetKey = route.collectionId,
@@ -386,7 +420,7 @@ fun LuminaNavGraph(
                     ) {
                         CollectionScreen(
                             viewModel = collectionViewModel,
-                            onNavigateBack = { navController.popBackStack() },
+                            onNavigateBack = { safePopBackStack() },
                             onNavigateHome = {
                                 navController.popBackStack(route = HomeRoute, inclusive = false)
                             },
@@ -439,7 +473,7 @@ fun LuminaNavGraph(
                         .getStateFlow<String?>(KEY_LAST_VIEWED_ITEM_ID, null)
                         .collectAsStateWithLifecycle()
 
-                    PopOnReleaseBackHandler(navController)
+                    PopOnReleaseBackHandler(::safePopBackStack)
                     HyperOsRectMorphFrame(
                         entryId = backStackEntry.id,
                         targetKey = activeFolderId.folderId.ifBlank { route.folderId },
@@ -459,7 +493,7 @@ fun LuminaNavGraph(
                             },
                             sharedTransitionScope = this@SharedTransitionLayout,
                             animatedVisibilityScope = this@composable,
-                            onNavigateBack = { navController.popBackStack() },
+                            onNavigateBack = { safePopBackStack() },
                             onNavigateHome = {
                                 navController.popBackStack(route = HomeRoute, inclusive = false)
                             },
@@ -499,13 +533,13 @@ fun LuminaNavGraph(
                     val searchViewModel: SearchViewModel = viewModel(
                         factory = SearchViewModel.Factory(container)
                     )
-                    PopOnReleaseBackHandler(navController)
+                    PopOnReleaseBackHandler(::safePopBackStack)
                     HyperOsTransitionFrame {
                         SearchScreen(
                             viewModel = searchViewModel,
                             sharedTransitionScope = this@SharedTransitionLayout,
                             animatedVisibilityScope = this@composable,
-                            onNavigateBack = { navController.popBackStack() },
+                            onNavigateBack = { safePopBackStack() },
                             onOpenViewer = { itemId, query, mediaType, fromMs, toMs ->
                                 activeViewerItemId = itemId
                                 navController.navigate(
@@ -579,7 +613,7 @@ fun LuminaNavGraph(
                         )
                     )
                     val targetPhotoKey = "media_${activeViewerItemId ?: route.initialItemId}"
-                    PopOnReleaseBackHandler(navController)
+                    PopOnReleaseBackHandler(::safePopBackStack)
                     HyperOsRectMorphFrame(
                         entryId = backStackEntry.id,
                         targetKey = targetPhotoKey,
@@ -616,22 +650,22 @@ fun LuminaNavGraph(
                                     )
                                 )
                             },
-                            onDismiss = { navController.popBackStack() }
+                            onDismiss = { safePopBackStack() }
                         )
                     }
                 }
 
                 composable<EditorRoute> { backStackEntry ->
                     val route = backStackEntry.toRoute<EditorRoute>()
-                    PopOnReleaseBackHandler(navController)
+                    PopOnReleaseBackHandler(::safePopBackStack)
                     HyperOsTransitionFrame {
                         PhotoEditorScreen(
                             itemId = route.itemId,
                             sourceUri = route.sourceUri,
                             displayName = route.displayName,
                             isLocal = route.isLocal,
-                            onSavedAndClose = { navController.popBackStack() },
-                            onDismiss = { navController.popBackStack() }
+                            onSavedAndClose = { safePopBackStack() },
+                            onDismiss = { safePopBackStack() }
                         )
                     }
                 }
@@ -641,11 +675,11 @@ fun LuminaNavGraph(
                     val ids = remember(route.itemIdsCsv) {
                         route.itemIdsCsv.split(",").filter { it.isNotBlank() }
                     }
-                    PopOnReleaseBackHandler(navController)
+                    PopOnReleaseBackHandler(::safePopBackStack)
                     HyperOsTransitionFrame {
                         CompareScreen(
                             itemIds = ids,
-                            onNavigateBack = { navController.popBackStack() }
+                            onNavigateBack = { safePopBackStack() }
                         )
                     }
                 }
@@ -657,11 +691,11 @@ fun LuminaNavGraph(
                             container = container
                         )
                     )
-                    PopOnReleaseBackHandler(navController)
+                    PopOnReleaseBackHandler(::safePopBackStack)
                     HyperOsTransitionFrame {
                         SettingsScreen(
                             viewModel = settingsViewModel,
-                            onNavigateBack = { navController.popBackStack() }
+                            onNavigateBack = { safePopBackStack() }
                         )
                     }
                 }
