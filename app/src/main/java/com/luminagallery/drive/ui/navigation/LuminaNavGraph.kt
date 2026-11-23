@@ -2,7 +2,7 @@ package com.luminagallery.drive.ui.navigation
 
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
-import androidx.compose.animation.core.FastOutLinearInEasing
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -18,7 +18,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -34,6 +36,7 @@ import com.luminagallery.drive.data.local.LocalMediaRepository
 import com.luminagallery.drive.domain.model.MediaType
 import com.luminagallery.drive.domain.model.SpecialGalleryFilter
 import com.luminagallery.drive.ui.components.AlbumTransitionOriginTracker
+import com.luminagallery.drive.ui.components.HyperOsTransitionFrame
 import com.luminagallery.drive.ui.components.LocalAlbumTransitionOrigin
 import com.luminagallery.drive.ui.components.OneUiMotion
 import com.luminagallery.drive.ui.components.prefetchAlbumThumbnails
@@ -118,8 +121,9 @@ data class CompareRoute(
 )
 
 private const val KEY_LAST_VIEWED_ITEM_ID = "last_viewed_item_id"
-private val OneUiNavEasing = OneUiMotion.DecelerateEasing
-private val OneUiAlbumEasing = OneUiMotion.AlbumExpandEasing
+private val FluidOpenEasing = OneUiMotion.FluidEasing
+private val HyperOsBackEasing = OneUiMotion.HyperOsBackEasing
+private val BackFadeCommitEasing = OneUiMotion.BackFadeCommitEasing
 
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
@@ -133,6 +137,7 @@ fun LuminaNavGraph(
     val imageLoader = LocalGalleryImageLoader.current
     val appContext = LocalContext.current.applicationContext
     val originTracker = remember { AlbumTransitionOriginTracker() }
+    var activeViewerItemId by remember { mutableStateOf<String?>(null) }
 
     fun prewarmFolderAndNavigate(folderId: String, folderName: String) {
         val prefs = container.preferencesManager.latestPreferences
@@ -164,15 +169,13 @@ fun LuminaNavGraph(
                 navController = navController,
                 startDestination = HomeRoute,
                 enterTransition = {
-                    slideInHorizontally(tween(280, easing = OneUiNavEasing)) { it } +
-                        fadeIn(tween(140, easing = LinearOutSlowInEasing))
+                    // Apple iOS / Xiaomi HyperOS crisp full-width slide-in
+                    slideInHorizontally(tween(300, easing = FluidOpenEasing)) { it }
                 },
                 exitTransition = {
                     when {
                         targetState.destination.hasRoute<ViewerRoute>() -> {
-                            // Keep parent grid completely solid underneath so no black gap ever appears
-                            scaleOut(tween(240, easing = OneUiAlbumEasing), targetScale = 0.96f) +
-                                fadeOut(tween(220), targetAlpha = 0.85f)
+                            scaleOut(tween(260, easing = FluidOpenEasing), targetScale = 0.96f)
                         }
                         targetState.destination.hasRoute<FolderRoute>() ||
                             targetState.destination.hasRoute<CollectionRoute>() -> {
@@ -184,49 +187,41 @@ fun LuminaNavGraph(
                                 }
                             }.getOrNull()
                             scaleOut(
-                                animationSpec = tween(260, easing = OneUiAlbumEasing),
-                                targetScale = 1.05f,
+                                animationSpec = tween(280, easing = FluidOpenEasing),
+                                targetScale = 1.04f,
                                 transformOrigin = originTracker.originFor(key)
-                            ) + fadeOut(tween(200), targetAlpha = 0.72f)
+                            )
                         }
                         else -> {
-                            slideOutHorizontally(tween(280, easing = OneUiNavEasing)) { -it / 5 } +
-                                fadeOut(tween(240), targetAlpha = 0.78f)
+                            // Subtle iOS/HyperOS underlying parallax push-back (stays 100% solid!)
+                            slideOutHorizontally(tween(300, easing = FluidOpenEasing)) { -it / 4 } +
+                                scaleOut(tween(300, easing = FluidOpenEasing), targetScale = 0.96f)
                         }
                     }
                 },
                 popEnterTransition = {
                     when {
                         initialState.destination.hasRoute<ViewerRoute>() -> {
-                            // Underlying grid is IMMEDIATELY solid during predictive back swipe (zero black block!)
-                            scaleIn(tween(240, easing = OneUiAlbumEasing), initialScale = 0.96f) +
-                                fadeIn(tween(120), initialAlpha = 0.92f)
+                            // Underlying grid stays 100% solid while smoothly settling from 0.95 -> 1.0
+                            scaleIn(tween(270, easing = HyperOsBackEasing), initialScale = 0.95f)
                         }
                         initialState.destination.hasRoute<FolderRoute>() ||
                             initialState.destination.hasRoute<CollectionRoute>() -> {
-                            val key = runCatching {
-                                if (initialState.destination.hasRoute<FolderRoute>()) {
-                                    initialState.toRoute<FolderRoute>().folderId
-                                } else {
-                                    initialState.toRoute<CollectionRoute>().collectionId
-                                }
-                            }.getOrNull()
-                            scaleIn(
-                                animationSpec = tween(250, easing = OneUiAlbumEasing),
-                                initialScale = 1.05f,
-                                transformOrigin = originTracker.originFor(key)
-                            ) + fadeIn(tween(120), initialAlpha = 0.90f)
+                            // Underlying Home/Albums stays 100% solid with smooth HyperOS depth settle
+                            scaleIn(tween(280, easing = HyperOsBackEasing), initialScale = 0.95f)
                         }
                         else -> {
-                            // Crisp One UI / HyperOS parallax reveal on back swipe — stays solid underneath!
-                            slideInHorizontally(tween(260, easing = OneUiNavEasing)) { -it / 5 } +
-                                fadeIn(tween(120), initialAlpha = 0.88f)
+                            // Linear 1:1 finger-tracked iOS/HyperOS parallax reveal underneath!
+                            slideInHorizontally(tween(300, easing = LinearEasing)) { -it / 4 } +
+                                scaleIn(tween(300, easing = LinearEasing), initialScale = 0.96f)
                         }
                     }
                 },
                 popExitTransition = {
-                    // Full 1:1 edge-to-edge slide-out for buttery predictive back swipe tracking!
-                    slideOutHorizontally(tween(260, easing = OneUiNavEasing)) { it }
+                    // 1:1 linear finger-tracked iOS / Xiaomi HyperOS floating rounded card slide-out!
+                    // (No aggressive ease-out double-easing jump, no premature ghosting!)
+                    slideOutHorizontally(tween(300, easing = LinearEasing)) { it } +
+                        scaleOut(tween(300, easing = LinearEasing), targetScale = 0.94f)
                 }
             ) {
                 composable<HomeRoute> { backStackEntry ->
@@ -237,358 +232,387 @@ fun LuminaNavGraph(
                         .getStateFlow<String?>(KEY_LAST_VIEWED_ITEM_ID, null)
                         .collectAsStateWithLifecycle()
 
-                    HomeScreen(
-                        viewModel = homeViewModel,
-                        lastViewedItemId = lastViewedItemId,
-                        onConsumedLastViewedItemId = {
-                            backStackEntry.savedStateHandle[KEY_LAST_VIEWED_ITEM_ID] = null
-                        },
-                        sharedTransitionScope = this@SharedTransitionLayout,
-                        animatedVisibilityScope = this,
-                        onOpenFolder = { folderId, folderName ->
-                            prewarmFolderAndNavigate(folderId, folderName)
-                        },
-                    onOpenCollection = { collectionId, collectionName ->
-                        navController.navigate(CollectionRoute(collectionId, collectionName))
-                    },
-                    onOpenPictureViewer = { itemId ->
-                        navController.navigate(
-                            ViewerRoute(
-                                folderId = LocalMediaRepository.LOCAL_BUCKET_ALL,
-                                initialItemId = itemId
-                            )
-                        )
-                    },
-                    onOpenSearch = {
-                        navController.navigate(SearchRoute)
-                    },
-                    onOpenSettings = {
-                        navController.navigate(SettingsRoute)
-                    },
-                    onOpenSpecialFilter = { filter ->
-                        navController.navigate(SpecialCollectionRoute(filter.name))
-                    },
-                    onOpenLocations = {
-                        navController.navigate(LocationsRoute)
-                    },
-                    onOpenCleanOut = {
-                        navController.navigate(CleanOutRoute)
-                    },
-                    onOpenCompare = { ids ->
-                        navController.navigate(CompareRoute(ids.joinToString(",")))
-                    }
-                )
-            }
-
-            composable<SpecialCollectionRoute> { backStackEntry ->
-                val route = backStackEntry.toRoute<SpecialCollectionRoute>()
-                val filter = runCatching { SpecialGalleryFilter.valueOf(route.filterName) }
-                    .getOrDefault(SpecialGalleryFilter.VIDEOS)
-
-                SpecialCollectionScreen(
-                    filter = filter,
-                    sharedTransitionScope = this@SharedTransitionLayout,
-                    animatedVisibilityScope = this,
-                    onNavigateBack = { navController.popBackStack() },
-                    onOpenViewer = { activeFilter, itemId ->
-                        navController.navigate(
-                            ViewerRoute(
-                                folderId = "",
-                                initialItemId = itemId,
-                                specialFilterName = activeFilter.name
-                            )
+                    HyperOsTransitionFrame(enableExitRounding = false) {
+                        HomeScreen(
+                            viewModel = homeViewModel,
+                            lastViewedItemId = lastViewedItemId,
+                            onConsumedLastViewedItemId = {
+                                backStackEntry.savedStateHandle[KEY_LAST_VIEWED_ITEM_ID] = null
+                            },
+                            sharedTransitionScope = this@SharedTransitionLayout,
+                            animatedVisibilityScope = this@composable,
+                            onOpenFolder = { folderId, folderName ->
+                                prewarmFolderAndNavigate(folderId, folderName)
+                            },
+                            onOpenCollection = { collectionId, collectionName ->
+                                navController.navigate(CollectionRoute(collectionId, collectionName))
+                            },
+                            onOpenPictureViewer = { itemId ->
+                                activeViewerItemId = itemId
+                                navController.navigate(
+                                    ViewerRoute(
+                                        folderId = LocalMediaRepository.LOCAL_BUCKET_ALL,
+                                        initialItemId = itemId
+                                    )
+                                )
+                            },
+                            onOpenSearch = {
+                                navController.navigate(SearchRoute)
+                            },
+                            onOpenSettings = {
+                                navController.navigate(SettingsRoute)
+                            },
+                            onOpenSpecialFilter = { filter ->
+                                navController.navigate(SpecialCollectionRoute(filter.name))
+                            },
+                            onOpenLocations = {
+                                navController.navigate(LocationsRoute)
+                            },
+                            onOpenCleanOut = {
+                                navController.navigate(CleanOutRoute)
+                            },
+                            onOpenCompare = { ids ->
+                                navController.navigate(CompareRoute(ids.joinToString(",")))
+                            }
                         )
                     }
-                )
-            }
-
-            composable<LocationsRoute> {
-                LocationsScreen(
-                    sharedTransitionScope = this@SharedTransitionLayout,
-                    animatedVisibilityScope = this,
-                    onNavigateBack = { navController.popBackStack() },
-                    onOpenPhoto = { item ->
-                        navController.navigate(
-                            ViewerRoute(
-                                folderId = LocalMediaRepository.LOCAL_BUCKET_ALL,
-                                initialItemId = item.id
-                            )
-                        )
-                    }
-                )
-            }
-
-            composable<CleanOutRoute> {
-                val cleanOutViewModel: CleanOutViewModel = viewModel(
-                    factory = CleanOutViewModel.Factory(container)
-                )
-                CleanOutScreen(
-                    viewModel = cleanOutViewModel,
-                    onNavigateBack = { navController.popBackStack() }
-                )
-            }
-
-            // Samsung One UI 7/8 Spatial Zoom-Bloom out of the tapped Collection card!
-            composable<CollectionRoute>(
-                enterTransition = {
-                    val key = runCatching { targetState.toRoute<CollectionRoute>().collectionId }.getOrNull()
-                    scaleIn(
-                        animationSpec = tween(280, easing = OneUiAlbumEasing),
-                        initialScale = 0.85f,
-                        transformOrigin = originTracker.originFor(key)
-                    ) + fadeIn(tween(130, easing = LinearOutSlowInEasing))
-                },
-                popExitTransition = {
-                    // Clean zero-delay dissolve + gentle zoom-back so predictive back never shows a floating black block!
-                    val key = runCatching { initialState.toRoute<CollectionRoute>().collectionId }.getOrNull()
-                    scaleOut(
-                        animationSpec = tween(240, easing = OneUiAlbumEasing),
-                        targetScale = 0.88f,
-                        transformOrigin = originTracker.originFor(key)
-                    ) + fadeOut(tween(180, easing = LinearOutSlowInEasing))
                 }
-            ) { backStackEntry ->
-                val route = backStackEntry.toRoute<CollectionRoute>()
-                val collectionViewModel: CollectionViewModel = viewModel(
-                    key = "collection_${route.collectionId}",
-                    factory = CollectionViewModel.Factory(
-                        collectionId = route.collectionId,
-                        collectionName = route.collectionName,
-                        container = container
+
+                composable<SpecialCollectionRoute> { backStackEntry ->
+                    val route = backStackEntry.toRoute<SpecialCollectionRoute>()
+                    val filter = runCatching { SpecialGalleryFilter.valueOf(route.filterName) }
+                        .getOrDefault(SpecialGalleryFilter.VIDEOS)
+
+                    HyperOsTransitionFrame {
+                        SpecialCollectionScreen(
+                            filter = filter,
+                            sharedTransitionScope = this@SharedTransitionLayout,
+                            animatedVisibilityScope = this@composable,
+                            onNavigateBack = { navController.popBackStack() },
+                            onOpenViewer = { activeFilter, itemId ->
+                                activeViewerItemId = itemId
+                                navController.navigate(
+                                    ViewerRoute(
+                                        folderId = "",
+                                        initialItemId = itemId,
+                                        specialFilterName = activeFilter.name
+                                    )
+                                )
+                            }
+                        )
+                    }
+                }
+
+                composable<LocationsRoute> {
+                    HyperOsTransitionFrame {
+                        LocationsScreen(
+                            sharedTransitionScope = this@SharedTransitionLayout,
+                            animatedVisibilityScope = this@composable,
+                            onNavigateBack = { navController.popBackStack() },
+                            onOpenPhoto = { item ->
+                                activeViewerItemId = item.id
+                                navController.navigate(
+                                    ViewerRoute(
+                                        folderId = LocalMediaRepository.LOCAL_BUCKET_ALL,
+                                        initialItemId = item.id
+                                    )
+                                )
+                            }
+                        )
+                    }
+                }
+
+                composable<CleanOutRoute> {
+                    val cleanOutViewModel: CleanOutViewModel = viewModel(
+                        factory = CleanOutViewModel.Factory(container)
                     )
-                )
-                CollectionScreen(
-                    viewModel = collectionViewModel,
-                    onNavigateBack = { navController.popBackStack() },
-                    onNavigateHome = {
-                        navController.popBackStack(route = HomeRoute, inclusive = false)
-                    },
-                    onOpenAlbum = { folderId, folderName ->
-                        prewarmFolderAndNavigate(folderId, folderName)
-                    },
-                    onOpenSubCollection = { subId, subName ->
-                        navController.navigate(CollectionRoute(subId, subName))
-                    },
-                    onOpenBreadcrumbCollection = { ancestorId, ancestorName ->
-                        val popped = navController.popBackStack(
-                            route = CollectionRoute(ancestorId, ancestorName),
-                            inclusive = false
+                    HyperOsTransitionFrame {
+                        CleanOutScreen(
+                            viewModel = cleanOutViewModel,
+                            onNavigateBack = { navController.popBackStack() }
                         )
-                        if (!popped) {
-                            navController.navigate(CollectionRoute(ancestorId, ancestorName))
-                        }
                     }
-                )
-            }
-
-            // Samsung One UI 7/8 Spatial Zoom-Bloom out of the tapped Album / Folder card!
-            composable<FolderRoute>(
-                enterTransition = {
-                    val key = runCatching { targetState.toRoute<FolderRoute>().folderId }.getOrNull()
-                    scaleIn(
-                        animationSpec = tween(280, easing = OneUiAlbumEasing),
-                        initialScale = 0.85f,
-                        transformOrigin = originTracker.originFor(key)
-                    ) + fadeIn(tween(130, easing = LinearOutSlowInEasing))
-                },
-                popExitTransition = {
-                    // Clean zero-delay dissolve + gentle zoom-back so predictive back never shows a floating black block!
-                    val key = runCatching { initialState.toRoute<FolderRoute>().folderId }.getOrNull()
-                    scaleOut(
-                        animationSpec = tween(240, easing = OneUiAlbumEasing),
-                        targetScale = 0.88f,
-                        transformOrigin = originTracker.originFor(key)
-                    ) + fadeOut(tween(180, easing = LinearOutSlowInEasing))
                 }
-            ) { backStackEntry ->
-                val route = backStackEntry.toRoute<FolderRoute>()
-                val folderViewModel: FolderViewModel = viewModel(
-                    key = "folder_${route.folderId}",
-                    factory = FolderViewModel.Factory(
-                        folderId = route.folderId,
-                        folderName = route.folderName,
-                        container = container
+
+                // Xiaomi HyperOS / Apple Photos fluid zoom-bloom & rounded-card return for Collections
+                composable<CollectionRoute>(
+                    enterTransition = {
+                        val key = runCatching { targetState.toRoute<CollectionRoute>().collectionId }.getOrNull()
+                        scaleIn(
+                            animationSpec = tween(280, easing = FluidOpenEasing),
+                            initialScale = 0.84f,
+                            transformOrigin = originTracker.originFor(key)
+                        ) + fadeIn(tween(140, easing = LinearOutSlowInEasing))
+                    },
+                    popExitTransition = {
+                        val key = runCatching { initialState.toRoute<CollectionRoute>().collectionId }.getOrNull()
+                        scaleOut(
+                            animationSpec = tween(280, easing = HyperOsBackEasing),
+                            targetScale = 0.78f,
+                            transformOrigin = originTracker.originFor(key)
+                        ) + slideOutHorizontally(tween(280, easing = HyperOsBackEasing)) { it / 12 } +
+                            fadeOut(tween(280, easing = BackFadeCommitEasing))
+                    }
+                ) { backStackEntry ->
+                    val route = backStackEntry.toRoute<CollectionRoute>()
+                    val collectionViewModel: CollectionViewModel = viewModel(
+                        key = "collection_${route.collectionId}",
+                        factory = CollectionViewModel.Factory(
+                            collectionId = route.collectionId,
+                            collectionName = route.collectionName,
+                            container = container
+                        )
                     )
-                )
-
-                val lastViewedItemId by backStackEntry.savedStateHandle
-                    .getStateFlow<String?>(KEY_LAST_VIEWED_ITEM_ID, null)
-                    .collectAsStateWithLifecycle()
-
-                FolderScreen(
-                    viewModel = folderViewModel,
-                    lastViewedItemId = lastViewedItemId,
-                    onConsumedLastViewedItemId = {
-                        backStackEntry.savedStateHandle[KEY_LAST_VIEWED_ITEM_ID] = null
-                    },
-                    sharedTransitionScope = this@SharedTransitionLayout,
-                    animatedVisibilityScope = this,
-                    onNavigateBack = { navController.popBackStack() },
-                    onNavigateHome = {
-                        navController.popBackStack(route = HomeRoute, inclusive = false)
-                    },
-                    onOpenSubfolder = { subId, subName ->
-                        prewarmFolderAndNavigate(subId, subName)
-                    },
-                    onOpenBreadcrumb = { ancestorId, ancestorName ->
-                        val popped = navController.popBackStack(
-                            route = FolderRoute(ancestorId, ancestorName),
-                            inclusive = false
+                    HyperOsTransitionFrame {
+                        CollectionScreen(
+                            viewModel = collectionViewModel,
+                            onNavigateBack = { navController.popBackStack() },
+                            onNavigateHome = {
+                                navController.popBackStack(route = HomeRoute, inclusive = false)
+                            },
+                            onOpenAlbum = { folderId, folderName ->
+                                prewarmFolderAndNavigate(folderId, folderName)
+                            },
+                            onOpenSubCollection = { subId, subName ->
+                                navController.navigate(CollectionRoute(subId, subName))
+                            },
+                            onOpenBreadcrumbCollection = { ancestorId, ancestorName ->
+                                val popped = navController.popBackStack(
+                                    route = CollectionRoute(ancestorId, ancestorName),
+                                    inclusive = false
+                                )
+                                if (!popped) {
+                                    navController.navigate(CollectionRoute(ancestorId, ancestorName))
+                                }
+                            }
                         )
-                        if (!popped) {
-                            navController.navigate(FolderRoute(ancestorId, ancestorName))
-                        }
-                    },
-                    onOpenViewer = { folderId, itemId, isFlattened ->
-                        navController.navigate(
-                            ViewerRoute(
-                                folderId = folderId,
-                                initialItemId = itemId,
-                                isFlattened = isFlattened
-                            )
-                        )
-                    },
-                    onOpenSearch = {
-                        navController.navigate(SearchRoute)
-                    },
-                    onOpenCompare = { ids ->
-                        navController.navigate(CompareRoute(ids.joinToString(",")))
                     }
-                )
-            }
+                }
 
-            composable<SearchRoute> {
-                val searchViewModel: SearchViewModel = viewModel(
-                    factory = SearchViewModel.Factory(container)
-                )
-                SearchScreen(
-                    viewModel = searchViewModel,
-                    sharedTransitionScope = this@SharedTransitionLayout,
-                    animatedVisibilityScope = this,
-                    onNavigateBack = { navController.popBackStack() },
-                    onOpenViewer = { itemId, query, mediaType, fromMs, toMs ->
-                        navController.navigate(
-                            ViewerRoute(
-                                folderId = "",
-                                initialItemId = itemId,
-                                isSearchMode = true,
-                                searchQuery = query,
-                                mediaTypeName = mediaType?.name,
-                                fromEpochMs = fromMs,
-                                toEpochMs = toMs
-                            )
-                        )
+                // Xiaomi HyperOS / Apple Photos fluid zoom-bloom & rounded-card return for Albums
+                composable<FolderRoute>(
+                    enterTransition = {
+                        val key = runCatching { targetState.toRoute<FolderRoute>().folderId }.getOrNull()
+                        scaleIn(
+                            animationSpec = tween(280, easing = FluidOpenEasing),
+                            initialScale = 0.84f,
+                            transformOrigin = originTracker.originFor(key)
+                        ) + fadeIn(tween(140, easing = LinearOutSlowInEasing))
                     },
-                    onOpenCompare = { ids ->
-                        navController.navigate(CompareRoute(ids.joinToString(",")))
+                    popExitTransition = {
+                        val key = runCatching { initialState.toRoute<FolderRoute>().folderId }.getOrNull()
+                        scaleOut(
+                            animationSpec = tween(280, easing = HyperOsBackEasing),
+                            targetScale = 0.78f,
+                            transformOrigin = originTracker.originFor(key)
+                        ) + slideOutHorizontally(tween(280, easing = HyperOsBackEasing)) { it / 12 } +
+                            fadeOut(tween(280, easing = BackFadeCommitEasing))
                     }
-                )
-            }
-
-            // Silky 120Hz origin-tracked zoom-bloom for ViewerRoute — 100% predictive-back-safe (no black tile holes!)
-            composable<ViewerRoute>(
-                enterTransition = {
-                    val key = runCatching { "media_${targetState.toRoute<ViewerRoute>().initialItemId}" }.getOrNull()
-                    scaleIn(
-                        animationSpec = tween(240, easing = OneUiAlbumEasing),
-                        initialScale = 0.86f,
-                        transformOrigin = originTracker.originFor(key)
-                    ) + fadeIn(tween(150, easing = LinearOutSlowInEasing))
-                },
-                exitTransition = { fadeOut(tween(150)) },
-                popEnterTransition = { fadeIn(tween(140), initialAlpha = 0.90f) },
-                popExitTransition = {
-                    val key = runCatching { "media_${initialState.toRoute<ViewerRoute>().initialItemId}" }.getOrNull()
-                    scaleOut(
-                        animationSpec = tween(220, easing = OneUiAlbumEasing),
-                        targetScale = 0.88f,
-                        transformOrigin = originTracker.originFor(key)
-                    ) + fadeOut(tween(170, easing = LinearOutSlowInEasing))
-                }
-            ) { backStackEntry ->
-                val route = backStackEntry.toRoute<ViewerRoute>()
-                val mediaType = route.mediaTypeName?.let {
-                    runCatching { MediaType.valueOf(it) }.getOrNull()
-                }
-                val specialFilter = route.specialFilterName?.let {
-                    runCatching { SpecialGalleryFilter.valueOf(it) }.getOrNull()
-                }
-                val viewerViewModel: ViewerViewModel = viewModel(
-                    key = "viewer_${route.folderId}_${route.initialItemId}_${route.isFlattened}_${route.isSearchMode}_${route.specialFilterName}",
-                    factory = ViewerViewModel.Factory(
-                        launchContext = ViewerLaunchContext(
+                ) { backStackEntry ->
+                    val route = backStackEntry.toRoute<FolderRoute>()
+                    val folderViewModel: FolderViewModel = viewModel(
+                        key = "folder_${route.folderId}",
+                        factory = FolderViewModel.Factory(
                             folderId = route.folderId,
-                            initialItemId = route.initialItemId,
-                            isFlattened = route.isFlattened,
-                            isSearchMode = route.isSearchMode,
-                            searchQuery = route.searchQuery,
-                            mediaTypeFilter = mediaType,
-                            fromEpochMs = route.fromEpochMs,
-                            toEpochMs = route.toEpochMs,
-                            specialFilter = specialFilter
-                        ),
-                        container = container
-                    )
-                )
-                ViewerScreen(
-                    viewModel = viewerViewModel,
-                    sharedTransitionScope = this@SharedTransitionLayout,
-                    animatedVisibilityScope = this,
-                    onActiveItemChanged = { activeId ->
-                        navController.previousBackStackEntry
-                            ?.savedStateHandle
-                            ?.set(KEY_LAST_VIEWED_ITEM_ID, activeId)
-                    },
-                    onOpenEditor = { itemId, sourceUri, displayName, isLocal ->
-                        navController.navigate(
-                            EditorRoute(
-                                itemId = itemId,
-                                sourceUri = sourceUri,
-                                displayName = displayName,
-                                isLocal = isLocal
-                            )
+                            folderName = route.folderName,
+                            container = container
                         )
-                    },
-                    onDismiss = { navController.popBackStack() }
-                )
-            }
-
-            composable<EditorRoute> { backStackEntry ->
-                val route = backStackEntry.toRoute<EditorRoute>()
-                PhotoEditorScreen(
-                    itemId = route.itemId,
-                    sourceUri = route.sourceUri,
-                    displayName = route.displayName,
-                    isLocal = route.isLocal,
-                    onSavedAndClose = { navController.popBackStack() },
-                    onDismiss = { navController.popBackStack() }
-                )
-            }
-
-            composable<CompareRoute> { backStackEntry ->
-                val route = backStackEntry.toRoute<CompareRoute>()
-                val ids = remember(route.itemIdsCsv) {
-                    route.itemIdsCsv.split(",").filter { it.isNotBlank() }
-                }
-                CompareScreen(
-                    itemIds = ids,
-                    onNavigateBack = { navController.popBackStack() }
-                )
-            }
-
-            composable<SettingsRoute> {
-                val settingsViewModel: SettingsViewModel = viewModel(
-                    factory = SettingsViewModel.Factory(
-                        appContext = appContext,
-                        container = container
                     )
-                )
-                SettingsScreen(
-                    viewModel = settingsViewModel,
-                    onNavigateBack = { navController.popBackStack() }
-                )
+
+                    val lastViewedItemId by backStackEntry.savedStateHandle
+                        .getStateFlow<String?>(KEY_LAST_VIEWED_ITEM_ID, null)
+                        .collectAsStateWithLifecycle()
+
+                    HyperOsTransitionFrame {
+                        FolderScreen(
+                            viewModel = folderViewModel,
+                            lastViewedItemId = lastViewedItemId,
+                            onConsumedLastViewedItemId = {
+                                backStackEntry.savedStateHandle[KEY_LAST_VIEWED_ITEM_ID] = null
+                            },
+                            sharedTransitionScope = this@SharedTransitionLayout,
+                            animatedVisibilityScope = this@composable,
+                            onNavigateBack = { navController.popBackStack() },
+                            onNavigateHome = {
+                                navController.popBackStack(route = HomeRoute, inclusive = false)
+                            },
+                            onOpenSubfolder = { subId, subName ->
+                                prewarmFolderAndNavigate(subId, subName)
+                            },
+                            onOpenBreadcrumb = { ancestorId, ancestorName ->
+                                val popped = navController.popBackStack(
+                                    route = FolderRoute(ancestorId, ancestorName),
+                                    inclusive = false
+                                )
+                                if (!popped) {
+                                    navController.navigate(FolderRoute(ancestorId, ancestorName))
+                                }
+                            },
+                            onOpenViewer = { folderId, itemId, isFlattened ->
+                                activeViewerItemId = itemId
+                                navController.navigate(
+                                    ViewerRoute(
+                                        folderId = folderId,
+                                        initialItemId = itemId,
+                                        isFlattened = isFlattened
+                                    )
+                                )
+                            },
+                            onOpenSearch = {
+                                navController.navigate(SearchRoute)
+                            },
+                            onOpenCompare = { ids ->
+                                navController.navigate(CompareRoute(ids.joinToString(",")))
+                            }
+                        )
+                    }
+                }
+
+                composable<SearchRoute> {
+                    val searchViewModel: SearchViewModel = viewModel(
+                        factory = SearchViewModel.Factory(container)
+                    )
+                    HyperOsTransitionFrame {
+                        SearchScreen(
+                            viewModel = searchViewModel,
+                            sharedTransitionScope = this@SharedTransitionLayout,
+                            animatedVisibilityScope = this@composable,
+                            onNavigateBack = { navController.popBackStack() },
+                            onOpenViewer = { itemId, query, mediaType, fromMs, toMs ->
+                                activeViewerItemId = itemId
+                                navController.navigate(
+                                    ViewerRoute(
+                                        folderId = "",
+                                        initialItemId = itemId,
+                                        isSearchMode = true,
+                                        searchQuery = query,
+                                        mediaTypeName = mediaType?.name,
+                                        fromEpochMs = fromMs,
+                                        toEpochMs = toMs
+                                    )
+                                )
+                            },
+                            onOpenCompare = { ids ->
+                                navController.navigate(CompareRoute(ids.joinToString(",")))
+                            }
+                        )
+                    }
+                }
+
+                // Xiaomi HyperOS / Apple Photos rounded-card zoom-back for full-screen Viewer
+                composable<ViewerRoute>(
+                    enterTransition = {
+                        val key = runCatching { "media_${targetState.toRoute<ViewerRoute>().initialItemId}" }.getOrNull()
+                        scaleIn(
+                            animationSpec = tween(250, easing = FluidOpenEasing),
+                            initialScale = 0.84f,
+                            transformOrigin = originTracker.originFor(key)
+                        ) + fadeIn(tween(140, easing = LinearOutSlowInEasing))
+                    },
+                    exitTransition = { fadeOut(tween(150)) },
+                    popEnterTransition = { scaleIn(tween(240, easing = HyperOsBackEasing), initialScale = 0.96f) },
+                    popExitTransition = {
+                        val activeKey = activeViewerItemId?.let { "media_$it" }
+                            ?: runCatching { "media_${initialState.toRoute<ViewerRoute>().initialItemId}" }.getOrNull()
+                        scaleOut(
+                            animationSpec = tween(270, easing = HyperOsBackEasing),
+                            targetScale = 0.76f,
+                            transformOrigin = originTracker.originForOrCenter(activeKey)
+                        ) + fadeOut(tween(270, easing = BackFadeCommitEasing))
+                    }
+                ) { backStackEntry ->
+                    val route = backStackEntry.toRoute<ViewerRoute>()
+                    val mediaType = route.mediaTypeName?.let {
+                        runCatching { MediaType.valueOf(it) }.getOrNull()
+                    }
+                    val specialFilter = route.specialFilterName?.let {
+                        runCatching { SpecialGalleryFilter.valueOf(it) }.getOrNull()
+                    }
+                    val viewerViewModel: ViewerViewModel = viewModel(
+                        key = "viewer_${route.folderId}_${route.initialItemId}_${route.isFlattened}_${route.isSearchMode}_${route.specialFilterName}",
+                        factory = ViewerViewModel.Factory(
+                            launchContext = ViewerLaunchContext(
+                                folderId = route.folderId,
+                                initialItemId = route.initialItemId,
+                                isFlattened = route.isFlattened,
+                                isSearchMode = route.isSearchMode,
+                                searchQuery = route.searchQuery,
+                                mediaTypeFilter = mediaType,
+                                fromEpochMs = route.fromEpochMs,
+                                toEpochMs = route.toEpochMs,
+                                specialFilter = specialFilter
+                            ),
+                            container = container
+                        )
+                    )
+                    HyperOsTransitionFrame {
+                        ViewerScreen(
+                            viewModel = viewerViewModel,
+                            sharedTransitionScope = this@SharedTransitionLayout,
+                            animatedVisibilityScope = this@composable,
+                            onActiveItemChanged = { activeId ->
+                                activeViewerItemId = activeId
+                                navController.previousBackStackEntry
+                                    ?.savedStateHandle
+                                    ?.set(KEY_LAST_VIEWED_ITEM_ID, activeId)
+                            },
+                            onOpenEditor = { itemId, sourceUri, displayName, isLocal ->
+                                navController.navigate(
+                                    EditorRoute(
+                                        itemId = itemId,
+                                        sourceUri = sourceUri,
+                                        displayName = displayName,
+                                        isLocal = isLocal
+                                    )
+                                )
+                            },
+                            onDismiss = { navController.popBackStack() }
+                        )
+                    }
+                }
+
+                composable<EditorRoute> { backStackEntry ->
+                    val route = backStackEntry.toRoute<EditorRoute>()
+                    HyperOsTransitionFrame {
+                        PhotoEditorScreen(
+                            itemId = route.itemId,
+                            sourceUri = route.sourceUri,
+                            displayName = route.displayName,
+                            isLocal = route.isLocal,
+                            onSavedAndClose = { navController.popBackStack() },
+                            onDismiss = { navController.popBackStack() }
+                        )
+                    }
+                }
+
+                composable<CompareRoute> { backStackEntry ->
+                    val route = backStackEntry.toRoute<CompareRoute>()
+                    val ids = remember(route.itemIdsCsv) {
+                        route.itemIdsCsv.split(",").filter { it.isNotBlank() }
+                    }
+                    HyperOsTransitionFrame {
+                        CompareScreen(
+                            itemIds = ids,
+                            onNavigateBack = { navController.popBackStack() }
+                        )
+                    }
+                }
+
+                composable<SettingsRoute> {
+                    val settingsViewModel: SettingsViewModel = viewModel(
+                        factory = SettingsViewModel.Factory(
+                            appContext = appContext,
+                            container = container
+                        )
+                    )
+                    HyperOsTransitionFrame {
+                        SettingsScreen(
+                            viewModel = settingsViewModel,
+                            onNavigateBack = { navController.popBackStack() }
+                        )
+                    }
+                }
             }
-        }
     }
 
         if (!externalViewUri.isNullOrBlank()) {
