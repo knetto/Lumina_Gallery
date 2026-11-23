@@ -36,7 +36,6 @@ import androidx.compose.material.icons.rounded.ViewColumn
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -73,6 +72,9 @@ import com.luminagallery.drive.LocalGalleryImageLoader
 import com.luminagallery.drive.data.remote.DriveConstants
 import com.luminagallery.drive.domain.model.MediaItem
 import com.luminagallery.drive.ui.components.FormatUtils
+import com.luminagallery.drive.ui.components.HyperOsTrashConfirmSheet
+import com.luminagallery.drive.ui.components.LuminaSnackbarHost
+import com.luminagallery.drive.ui.components.TrashConfirmMode
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -109,6 +111,7 @@ fun CompareScreen(
     val individualScale = remember { mutableStateMapOf<String, Float>() }
     val individualOffset = remember { mutableStateMapOf<String, Offset>() }
 
+    var confirmTrashItem by remember { mutableStateOf<MediaItem?>(null) }
     var pendingTrashItem by remember { mutableStateOf<MediaItem?>(null) }
 
     val trashLauncher = rememberLauncherForActivityResult(
@@ -363,13 +366,7 @@ fun CompareScreen(
                                     modifier = Modifier
                                         .size(32.dp)
                                         .clip(CircleShape)
-                                        .clickable {
-                                            val sender = container.localMediaRepository.buildTrashIntentSender(listOf(item))
-                                            if (sender != null) {
-                                                pendingTrashItem = item
-                                                trashLauncher.launch(IntentSenderRequest.Builder(sender).build())
-                                            }
-                                        },
+                                        .clickable { confirmTrashItem = item },
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Icon(
@@ -448,11 +445,50 @@ fun CompareScreen(
             }
         }
 
-        SnackbarHost(
+        LuminaSnackbarHost(
             hostState = snackbarHostState,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .navigationBarsPadding()
+        )
+    }
+
+    confirmTrashItem?.let { target ->
+        HyperOsTrashConfirmSheet(
+            items = listOf(target),
+            mode = TrashConfirmMode.MOVE_TO_TRASH,
+            canSkipSystemPrompt = container.localMediaRepository.canManageMediaDirectly(),
+            supportsSkipPromptSetting = container.localMediaRepository.supportsManageMediaPermission(),
+            onOpenManageMediaSettings = {
+                container.localMediaRepository.buildManageMediaSettingsIntent()?.let { intent ->
+                    runCatching { context.startActivity(intent) }
+                }
+            },
+            onConfirm = {
+                confirmTrashItem = null
+                val launchFallback: () -> Unit = {
+                    val sender = container.localMediaRepository.buildTrashIntentSender(listOf(target))
+                    if (sender != null) {
+                        pendingTrashItem = target
+                        trashLauncher.launch(IntentSenderRequest.Builder(sender).build())
+                    }
+                }
+                if (container.localMediaRepository.canManageMediaDirectly()) {
+                    scope.launch {
+                        container.localMediaRepository.trashLocalItemsDirectly(listOf(target), toTrash = true)
+                            .onSuccess {
+                                container.localMediaRepository.notifyPermissionChanged()
+                                items = items.filterNot { it.id == target.id }
+                                snackbarHostState.showSnackbar("Moved ${target.name} to trash")
+                                if (items.size < 2) onNavigateBack()
+                            }
+                            .onFailure { launchFallback() }
+                    }
+                } else {
+                    launchFallback()
+                }
+            },
+            onDismiss = { confirmTrashItem = null }
         )
     }
 }

@@ -3,7 +3,9 @@ package com.luminagallery.drive.data.local
 import android.Manifest
 import android.content.ContentResolver
 import android.content.ContentUris
+import android.content.ContentValues
 import android.content.Context
+import android.content.Intent
 import android.content.IntentSender
 import android.content.pm.PackageManager
 import android.database.ContentObserver
@@ -15,6 +17,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
+import android.provider.Settings
 import androidx.core.content.ContextCompat
 import androidx.exifinterface.media.ExifInterface
 import com.luminagallery.drive.domain.model.CleanOutCategory
@@ -583,6 +586,71 @@ class LocalMediaRepository(private val context: Context) {
 
             groups
         }
+
+    fun supportsManageMediaPermission(): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+
+    fun canManageMediaDirectly(): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && MediaStore.canManageMedia(context)
+
+    fun buildManageMediaSettingsIntent(): Intent? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return null
+        return Intent(
+            Settings.ACTION_REQUEST_MANAGE_MEDIA,
+            Uri.parse("package:${context.packageName}")
+        )
+    }
+
+    /**
+     * Moves local items to/from MediaStore Trash directly without showing Android's system dialog
+     * when the user has granted Android 12+ Media Management permission (`MANAGE_MEDIA`).
+     */
+    suspend fun trashLocalItemsDirectly(
+        items: List<MediaItem>,
+        toTrash: Boolean = true
+    ): Result<Int> = withContext(Dispatchers.IO) {
+        runCatching {
+            require(Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                "Trash requires Android 11 or newer"
+            }
+            var count = 0
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.IS_TRASHED, if (toTrash) 1 else 0)
+            }
+            for (item in items) {
+                if (!item.isLocal || item.localContentUri.isNullOrBlank()) continue
+                val uri = Uri.parse(item.localContentUri)
+                val updated = context.contentResolver.update(uri, values, null, null)
+                if (updated > 0) count++
+            }
+            if (count == 0) {
+                throw IllegalStateException("Android did not allow direct media trash")
+            }
+            count
+        }
+    }
+
+    /**
+     * Permanently deletes local items directly without Android's system dialog when `MANAGE_MEDIA`
+     * is granted.
+     */
+    suspend fun deleteLocalItemsPermanentlyDirectly(
+        items: List<MediaItem>
+    ): Result<Int> = withContext(Dispatchers.IO) {
+        runCatching {
+            var count = 0
+            for (item in items) {
+                if (!item.isLocal || item.localContentUri.isNullOrBlank()) continue
+                val uri = Uri.parse(item.localContentUri)
+                val deleted = context.contentResolver.delete(uri, null, null)
+                if (deleted > 0) count++
+            }
+            if (count == 0) {
+                throw IllegalStateException("Android did not allow direct permanent delete")
+            }
+            count
+        }
+    }
 
     fun buildTrashIntentSender(items: List<MediaItem>, toTrash: Boolean = true): IntentSender? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null

@@ -552,6 +552,26 @@ class HomeViewModel(
     fun requestTrashSelectedPictures() {
         val selected = uiState.value.localPictures.filter { it.id in selectedPictureIdsFlow.value }
         if (selected.isEmpty()) return
+        if (localMediaRepository.canManageMediaDirectly()) {
+            viewModelScope.launch {
+                localMediaRepository.trashLocalItemsDirectly(selected, toTrash = true)
+                    .onSuccess { count ->
+                        selectedPictureIdsFlow.value = emptySet()
+                        forcePictureSelectionFlow.value = false
+                        localMediaRepository.notifyPermissionChanged()
+                        snackbarFlow.value = if (count == 1) "Moved to trash" else "Moved $count items to trash"
+                    }
+                    .onFailure {
+                        val sender = localMediaRepository.buildTrashIntentSender(selected)
+                        if (sender != null) {
+                            pendingTrashFlow.value = sender
+                        } else {
+                            snackbarFlow.value = "Move to Trash requires Android 11 or newer"
+                        }
+                    }
+            }
+            return
+        }
         val sender = localMediaRepository.buildTrashIntentSender(selected)
         if (sender != null) {
             pendingTrashFlow.value = sender
@@ -566,7 +586,7 @@ class HomeViewModel(
             selectedPictureIdsFlow.value = emptySet()
             forcePictureSelectionFlow.value = false
             localMediaRepository.notifyPermissionChanged()
-            snackbarFlow.value = "Moved to Trash"
+            snackbarFlow.value = "Moved to trash"
         }
     }
 

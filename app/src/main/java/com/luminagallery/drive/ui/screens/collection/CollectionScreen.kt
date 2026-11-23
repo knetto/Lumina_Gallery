@@ -38,7 +38,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -62,6 +61,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.luminagallery.drive.domain.model.AlbumGridItem
 import com.luminagallery.drive.ui.components.AlbumSelectionActionBar
 import com.luminagallery.drive.ui.components.DraggableAlbumGrid
+import com.luminagallery.drive.ui.components.LuminaSnackbarHost
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -99,7 +99,7 @@ fun CollectionScreen(
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
-        snackbarHost = { SnackbarHost(snackbarHostState) },
+        snackbarHost = { LuminaSnackbarHost(snackbarHostState) },
         topBar = {
             Column {
                 TopAppBar(

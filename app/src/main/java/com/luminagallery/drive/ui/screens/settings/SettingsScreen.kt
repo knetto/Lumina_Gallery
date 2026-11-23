@@ -48,7 +48,6 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -57,8 +56,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -79,6 +80,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.graphics.drawable.toBitmap
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.android.gms.auth.api.identity.Identity
 import com.luminagallery.drive.BuildConfig
@@ -93,6 +97,7 @@ import com.luminagallery.drive.domain.model.ServiceAccountState
 import com.luminagallery.drive.domain.model.ThemeMode
 import com.luminagallery.drive.ui.components.BiometricLockHelper
 import com.luminagallery.drive.ui.components.FormatUtils
+import com.luminagallery.drive.ui.components.LuminaSnackbarHost
 import java.util.Locale
 
 private enum class SettingsPickerSheet {
@@ -116,10 +121,20 @@ fun SettingsScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val updateState by viewModel.updateState.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val appContainer = LocalAppContainer.current
     val haptic = LocalHapticFeedback.current
     val snackbarHostState = remember { SnackbarHostState() }
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
+
+    var resumeTick by remember { mutableIntStateOf(0) }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) resumeTick++
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     var activePicker by remember { mutableStateOf<SettingsPickerSheet?>(null) }
     var showCloudProfileDialog by remember { mutableStateOf(false) }
@@ -207,7 +222,7 @@ fun SettingsScreen(
     Scaffold(
         modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         containerColor = MaterialTheme.colorScheme.background,
-        snackbarHost = { SnackbarHost(snackbarHostState) },
+        snackbarHost = { LuminaSnackbarHost(snackbarHostState) },
         topBar = {
             LargeTopAppBar(
                 title = {
@@ -370,6 +385,28 @@ fun SettingsScreen(
                         checked = prefs.stripLocationOnShare,
                         onCheckedChange = viewModel::setStripLocationOnShare
                     )
+
+                    if (appContainer.localMediaRepository.supportsManageMediaPermission()) {
+                        OneUiDivider()
+                        val hasDirectMediaAccess = remember(resumeTick) {
+                            appContainer.localMediaRepository.canManageMediaDirectly()
+                        }
+                        OneUiActionRow(
+                            title = "Instant trash & rename (no Android popup)",
+                            subtitle = if (hasDirectMediaAccess) {
+                                "Active · uses Lumina's HyperOS trash confirmation only"
+                            } else {
+                                "Grant Media Management once to skip Android's extra system popup"
+                            },
+                            subtitleAccent = !hasDirectMediaAccess,
+                            showChevron = true,
+                            onClick = {
+                                appContainer.localMediaRepository.buildManageMediaSettingsIntent()?.let { intent ->
+                                    runCatching { context.startActivity(intent) }
+                                }
+                            }
+                        )
+                    }
                 }
             }
 

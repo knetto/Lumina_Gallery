@@ -72,6 +72,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -99,13 +100,17 @@ import com.luminagallery.drive.domain.model.MediaType
 import com.luminagallery.drive.domain.model.SpecialGalleryFilter
 import com.luminagallery.drive.ui.components.FastScrollThumb
 import com.luminagallery.drive.ui.components.FormatUtils
+import com.luminagallery.drive.ui.components.HyperOsTrashConfirmSheet
+import com.luminagallery.drive.ui.components.LuminaSnackbarHost
 import com.luminagallery.drive.ui.components.MapPhotoCluster
 import com.luminagallery.drive.ui.components.MediaGridItem
 import com.luminagallery.drive.ui.components.OneUiMotion
 import com.luminagallery.drive.ui.components.SamsungPhotoMap
+import com.luminagallery.drive.ui.components.TrashConfirmMode
 import com.luminagallery.drive.ui.components.oneUiClickable
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 
 /**
  * Unified Samsung Gallery ≡ Menu destination for:
@@ -124,6 +129,8 @@ fun SpecialCollectionScreen(
     onOpenViewer: (filter: SpecialGalleryFilter, itemId: String) -> Unit
 ) {
     val container = LocalAppContainer.current
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val gridState = rememberLazyGridState()
     val snackbarHostState = remember { SnackbarHostState() }
     val networkState by container.networkMonitor.networkState.collectAsStateWithLifecycle()
@@ -167,6 +174,7 @@ fun SpecialCollectionScreen(
     var selectedTrashIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var pendingSender by remember { mutableStateOf<IntentSender?>(null) }
     var pendingMessage by remember { mutableStateOf<String?>(null) }
+    var pendingTrashAction by remember { mutableStateOf<Pair<TrashConfirmMode, List<MediaItem>>?>(null) }
 
     val intentSenderLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
@@ -191,7 +199,7 @@ fun SpecialCollectionScreen(
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
-        snackbarHost = { SnackbarHost(snackbarHostState) },
+        snackbarHost = { LuminaSnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 title = {
@@ -251,8 +259,7 @@ fun SpecialCollectionScreen(
 
                             FilledTonalButton(
                                 onClick = {
-                                    pendingSender = container.localMediaRepository
-                                        .buildTrashIntentSender(targets, toTrash = false)
+                                    pendingTrashAction = TrashConfirmMode.RESTORE_FROM_TRASH to targets
                                 },
                                 shape = RoundedCornerShape(14.dp),
                                 modifier = Modifier.weight(1f)
@@ -264,8 +271,7 @@ fun SpecialCollectionScreen(
 
                             FilledTonalButton(
                                 onClick = {
-                                    pendingSender = container.localMediaRepository
-                                        .buildPermanentDeleteIntentSender(targets)
+                                    pendingTrashAction = TrashConfirmMode.DELETE_PERMANENTLY to targets
                                 },
                                 shape = RoundedCornerShape(14.dp),
                                 colors = ButtonDefaults.filledTonalButtonColors(
@@ -333,6 +339,71 @@ fun SpecialCollectionScreen(
                 }
             }
         }
+    }
+
+    pendingTrashAction?.let { (mode, targets) ->
+        HyperOsTrashConfirmSheet(
+            items = targets,
+            mode = mode,
+            canSkipSystemPrompt = container.localMediaRepository.canManageMediaDirectly(),
+            supportsSkipPromptSetting = container.localMediaRepository.supportsManageMediaPermission(),
+            onOpenManageMediaSettings = {
+                container.localMediaRepository.buildManageMediaSettingsIntent()?.let { intent ->
+                    runCatching { context.startActivity(intent) }
+                }
+            },
+            onConfirm = {
+                pendingTrashAction = null
+                val launchFallback: () -> Unit = {
+                    val sender = when (mode) {
+                        TrashConfirmMode.RESTORE_FROM_TRASH ->
+                            container.localMediaRepository.buildTrashIntentSender(targets, toTrash = false)
+                        TrashConfirmMode.DELETE_PERMANENTLY ->
+                            container.localMediaRepository.buildPermanentDeleteIntentSender(targets)
+                        TrashConfirmMode.MOVE_TO_TRASH ->
+                            container.localMediaRepository.buildTrashIntentSender(targets, toTrash = true)
+                    }
+                    if (sender != null) {
+                        pendingSender = sender
+                    } else {
+                        pendingMessage = if (mode == TrashConfirmMode.RESTORE_FROM_TRASH) {
+                            "Restore requires Android 11 or newer"
+                        } else {
+                            "Permanent delete requires Android 11 or newer"
+                        }
+                    }
+                }
+                if (container.localMediaRepository.canManageMediaDirectly()) {
+                    scope.launch {
+                        val result = when (mode) {
+                            TrashConfirmMode.RESTORE_FROM_TRASH ->
+                                container.localMediaRepository.trashLocalItemsDirectly(targets, toTrash = false)
+                            TrashConfirmMode.DELETE_PERMANENTLY ->
+                                container.localMediaRepository.deleteLocalItemsPermanentlyDirectly(targets)
+                            TrashConfirmMode.MOVE_TO_TRASH ->
+                                container.localMediaRepository.trashLocalItemsDirectly(targets, toTrash = true)
+                        }
+                        result.onSuccess { count ->
+                            selectedTrashIds = emptySet()
+                            container.localMediaRepository.notifyPermissionChanged()
+                            pendingMessage = when (mode) {
+                                TrashConfirmMode.RESTORE_FROM_TRASH ->
+                                    if (count == 1) "Restored item" else "Restored $count items"
+                                TrashConfirmMode.DELETE_PERMANENTLY ->
+                                    if (count == 1) "Permanently deleted" else "Permanently deleted $count items"
+                                TrashConfirmMode.MOVE_TO_TRASH ->
+                                    if (count == 1) "Moved to trash" else "Moved $count items to trash"
+                            }
+                        }.onFailure {
+                            launchFallback()
+                        }
+                    }
+                } else {
+                    launchFallback()
+                }
+            },
+            onDismiss = { pendingTrashAction = null }
+        )
     }
 }
 

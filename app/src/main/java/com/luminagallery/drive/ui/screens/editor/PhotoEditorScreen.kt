@@ -125,6 +125,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.luminagallery.drive.LocalAppContainer
+import com.luminagallery.drive.ui.components.LuminaSnackbarHost
 import com.luminagallery.drive.ui.components.OneUiMotion
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -1633,7 +1634,7 @@ fun PhotoEditorScreen(
             }
         }
 
-        SnackbarHost(
+        LuminaSnackbarHost(
             hostState = snackbarHostState,
             modifier = Modifier
                 .align(Alignment.BottomCenter)

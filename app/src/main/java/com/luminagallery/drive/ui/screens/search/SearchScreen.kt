@@ -72,6 +72,7 @@ import com.luminagallery.drive.ui.components.CollagePdfBottomSheet
 import com.luminagallery.drive.ui.components.ExifMetadataBottomSheet
 import com.luminagallery.drive.ui.components.FastScrollThumb
 import com.luminagallery.drive.ui.components.FormatUtils
+import com.luminagallery.drive.ui.components.LuminaSnackbarHost
 import com.luminagallery.drive.ui.components.MediaGridItem
 import com.luminagallery.drive.ui.components.MultiSelectActionBar
 import com.luminagallery.drive.ui.components.PinchZoomGridContainer
@@ -117,7 +118,7 @@ fun SearchScreen(
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
-        snackbarHost = { SnackbarHost(snackbarHostState) },
+        snackbarHost = { LuminaSnackbarHost(snackbarHostState) },
         topBar = {
             Column(
                 modifier = Modifier

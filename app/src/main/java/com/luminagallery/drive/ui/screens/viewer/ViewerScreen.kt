@@ -170,9 +170,12 @@ import com.luminagallery.drive.data.repository.WallpaperTarget
 import com.luminagallery.drive.domain.model.MediaItem
 import com.luminagallery.drive.ui.components.ExifMetadataBottomSheet
 import com.luminagallery.drive.ui.components.FormatUtils
+import com.luminagallery.drive.ui.components.HyperOsTrashConfirmSheet
 import com.luminagallery.drive.ui.components.LocalAlbumTransitionOrigin
+import com.luminagallery.drive.ui.components.LuminaSnackbarHost
 import com.luminagallery.drive.ui.components.MoveCopyToAlbumSheet
 import com.luminagallery.drive.ui.components.OneUiMotion
+import com.luminagallery.drive.ui.components.TrashConfirmMode
 import com.luminagallery.drive.ui.components.oneUiClickable
 import com.luminagallery.drive.ui.components.topViewerScrim
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -222,6 +225,7 @@ fun ViewerScreen(
     var isPlayingMotionPhoto by remember { mutableStateOf(false) }
     var isApplyingQuickAction by remember { mutableStateOf(false) }
     var extractedTextResult by remember { mutableStateOf<ExtractedPhotoText?>(null) }
+    var trashConfirmItem by remember { mutableStateOf<MediaItem?>(null) }
 
     val prefs = uiState.preferences
 
@@ -1029,7 +1033,7 @@ fun ViewerScreen(
 
                         if (currentItem.isLocal) {
                             IconButton(
-                                onClick = { viewModel.requestTrashLocalItem(currentItem) },
+                                onClick = { trashConfirmItem = currentItem },
                                 enabled = !uiState.isExporting
                             ) {
                                 Icon(
@@ -1057,12 +1061,31 @@ fun ViewerScreen(
             }
         }
 
-        SnackbarHost(
+        LuminaSnackbarHost(
             hostState = snackbarHostState,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .navigationBarsPadding()
                 .padding(bottom = 132.dp)
+        )
+    }
+
+    trashConfirmItem?.let { itemToTrash ->
+        HyperOsTrashConfirmSheet(
+            items = listOf(itemToTrash),
+            mode = TrashConfirmMode.MOVE_TO_TRASH,
+            canSkipSystemPrompt = appContainer.localMediaRepository.canManageMediaDirectly(),
+            supportsSkipPromptSetting = appContainer.localMediaRepository.supportsManageMediaPermission(),
+            onOpenManageMediaSettings = {
+                appContainer.localMediaRepository.buildManageMediaSettingsIntent()?.let { intent ->
+                    runCatching { context.startActivity(intent) }
+                }
+            },
+            onConfirm = {
+                trashConfirmItem = null
+                viewModel.requestTrashLocalItem(itemToTrash)
+            },
+            onDismiss = { trashConfirmItem = null }
         )
     }
 

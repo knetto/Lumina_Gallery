@@ -278,6 +278,24 @@ class ViewerViewModel(
 
     fun requestTrashLocalItem(item: MediaItem) {
         if (!item.isLocal) return
+        if (localMediaRepository.canManageMediaDirectly()) {
+            viewModelScope.launch {
+                localMediaRepository.trashLocalItemsDirectly(listOf(item), toTrash = true)
+                    .onSuccess {
+                        localMediaRepository.notifyPermissionChanged()
+                        snackbarFlow.value = "Moved to trash"
+                    }
+                    .onFailure {
+                        val sender = localMediaRepository.buildTrashIntentSender(listOf(item))
+                        if (sender != null) {
+                            pendingTrashFlow.value = sender
+                        } else {
+                            snackbarFlow.value = "Trash requires Android 11 or newer"
+                        }
+                    }
+            }
+            return
+        }
         val sender = localMediaRepository.buildTrashIntentSender(listOf(item))
         if (sender != null) {
             pendingTrashFlow.value = sender
@@ -290,7 +308,7 @@ class ViewerViewModel(
         pendingTrashFlow.value = null
         if (approved) {
             localMediaRepository.notifyPermissionChanged()
-            snackbarFlow.value = "Moved to Trash"
+            snackbarFlow.value = "Moved to trash"
         }
     }
 

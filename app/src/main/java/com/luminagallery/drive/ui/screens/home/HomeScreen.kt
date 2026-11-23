@@ -131,6 +131,8 @@ import com.luminagallery.drive.ui.components.DraggableAlbumGrid
 import com.luminagallery.drive.ui.components.ExifMetadataBottomSheet
 import com.luminagallery.drive.ui.components.FastScrollThumb
 import com.luminagallery.drive.ui.components.FormatUtils
+import com.luminagallery.drive.ui.components.HyperOsTrashConfirmSheet
+import com.luminagallery.drive.ui.components.LuminaSnackbarHost
 import com.luminagallery.drive.ui.components.MediaGridItem
 import com.luminagallery.drive.ui.components.MoveCopyToAlbumSheet
 import com.luminagallery.drive.ui.components.MultiSelectActionBar
@@ -140,6 +142,7 @@ import com.luminagallery.drive.ui.components.PinchZoomGridContainer
 import com.luminagallery.drive.ui.components.SamsungMenuBottomSheet
 import com.luminagallery.drive.ui.components.SecureWindowEffect
 import com.luminagallery.drive.ui.components.SetupCredentialsCard
+import com.luminagallery.drive.ui.components.TrashConfirmMode
 import com.luminagallery.drive.ui.components.photoGridDragSelect
 import com.luminagallery.drive.ui.screens.stories.StoriesTabContent
 
@@ -179,6 +182,7 @@ fun HomeScreen(
     var showAlbumsFilterDialog by remember { mutableStateOf(false) }
     var showHideAlbumsSheet by remember { mutableStateOf(false) }
     var showCollagePdfSheet by remember { mutableStateOf(false) }
+    var showTrashConfirmPictures by remember { mutableStateOf(false) }
     var showCreateCollectionDialog by remember { mutableStateOf(false) }
     var pendingGroupPair by remember { mutableStateOf<Pair<AlbumGridItem, AlbumGridItem>?>(null) }
     var showGroupSelectedDialog by remember { mutableStateOf(false) }
@@ -333,7 +337,7 @@ fun HomeScreen(
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         snackbarHost = {
-            SnackbarHost(hostState = snackbarHostState)
+            LuminaSnackbarHost(hostState = snackbarHostState)
         },
         bottomBar = {
             AnimatedVisibility(
@@ -779,7 +783,7 @@ fun HomeScreen(
                 exportProgressText = null,
                 onShare = viewModel::shareSelectedPictures,
                 onSaveToDevice = null,
-                onDeleteLocal = viewModel::requestTrashSelectedPictures,
+                onDeleteLocal = { if (selectedPictures.isNotEmpty()) showTrashConfirmPictures = true },
                 onCompare = if (comparablePictureIds.size in 2..4) {
                     {
                         viewModel.clearPictureSelection()
@@ -940,6 +944,30 @@ fun HomeScreen(
                 TextButton(onClick = { showAlbumsFilterDialog = false }) { Text("Done") }
             }
         )
+    }
+
+    if (showTrashConfirmPictures) {
+        val itemsToTrash = remember(uiState.localPictures, uiState.selectedPictureIds) {
+            uiState.localPictures.filter { it.id in uiState.selectedPictureIds }
+        }
+        if (itemsToTrash.isNotEmpty()) {
+            HyperOsTrashConfirmSheet(
+                items = itemsToTrash,
+                mode = TrashConfirmMode.MOVE_TO_TRASH,
+                canSkipSystemPrompt = appContainer.localMediaRepository.canManageMediaDirectly(),
+                supportsSkipPromptSetting = appContainer.localMediaRepository.supportsManageMediaPermission(),
+                onOpenManageMediaSettings = {
+                    appContainer.localMediaRepository.buildManageMediaSettingsIntent()?.let { intent ->
+                        runCatching { context.startActivity(intent) }
+                    }
+                },
+                onConfirm = {
+                    showTrashConfirmPictures = false
+                    viewModel.requestTrashSelectedPictures()
+                },
+                onDismiss = { showTrashConfirmPictures = false }
+            )
+        }
     }
 
     if (showCollagePdfSheet) {

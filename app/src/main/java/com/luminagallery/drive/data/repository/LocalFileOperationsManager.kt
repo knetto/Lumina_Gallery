@@ -58,6 +58,9 @@ class LocalFileOperationsManager(
 ) {
     fun buildWritePermissionSender(items: List<MediaItem>): IntentSender? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && MediaStore.canManageMedia(context)) {
+            return null
+        }
         val uris = items.mapNotNull { item ->
             if (item.isLocal && !item.localContentUri.isNullOrBlank()) {
                 Uri.parse(item.localContentUri)

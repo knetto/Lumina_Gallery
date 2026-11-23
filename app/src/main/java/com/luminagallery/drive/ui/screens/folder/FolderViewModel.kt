@@ -579,6 +579,26 @@ class FolderViewModel(
         if (!uiState.value.isLocalAlbum) return
         val selected = uiState.value.mediaItems.filter { it.id in selectedIdsFlow.value }
         if (selected.isEmpty()) return
+        if (localMediaRepository.canManageMediaDirectly()) {
+            viewModelScope.launch {
+                localMediaRepository.trashLocalItemsDirectly(selected, toTrash = true)
+                    .onSuccess { count ->
+                        selectedIdsFlow.value = emptySet()
+                        forceSelectionFlow.value = false
+                        localMediaRepository.notifyPermissionChanged()
+                        snackbarFlow.value = if (count == 1) "Moved to trash" else "Moved $count items to trash"
+                    }
+                    .onFailure {
+                        val sender = localMediaRepository.buildTrashIntentSender(selected)
+                        if (sender != null) {
+                            pendingTrashFlow.value = sender
+                        } else {
+                            snackbarFlow.value = "Trash requires Android 11 or newer"
+                        }
+                    }
+            }
+            return
+        }
         val sender = localMediaRepository.buildTrashIntentSender(selected)
         if (sender != null) {
             pendingTrashFlow.value = sender
@@ -593,7 +613,7 @@ class FolderViewModel(
             selectedIdsFlow.value = emptySet()
             forceSelectionFlow.value = false
             localMediaRepository.notifyPermissionChanged()
-            snackbarFlow.value = "Moved to Trash"
+            snackbarFlow.value = "Moved to trash"
         }
     }
 

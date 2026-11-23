@@ -129,6 +129,8 @@ import com.luminagallery.drive.ui.components.FastScrollThumb
 import com.luminagallery.drive.ui.components.FolderCard
 import com.luminagallery.drive.ui.components.FolderCoverArtwork
 import com.luminagallery.drive.ui.components.FormatUtils
+import com.luminagallery.drive.ui.components.HyperOsTrashConfirmSheet
+import com.luminagallery.drive.ui.components.LuminaSnackbarHost
 import com.luminagallery.drive.ui.components.MediaGridItem
 import com.luminagallery.drive.ui.components.MediaGridShimmer
 import com.luminagallery.drive.ui.components.MoveCopyToAlbumSheet
@@ -139,6 +141,7 @@ import com.luminagallery.drive.data.local.LocalMediaRepository
 import com.luminagallery.drive.ui.components.OneUiMotion
 import com.luminagallery.drive.ui.components.PinchZoomGridContainer
 import com.luminagallery.drive.ui.components.SecureWindowEffect
+import com.luminagallery.drive.ui.components.TrashConfirmMode
 import com.luminagallery.drive.ui.components.oneUiClickable
 import com.luminagallery.drive.ui.components.photoGridDragSelect
 import com.luminagallery.drive.ui.components.prefetchAlbumThumbnails
@@ -185,6 +188,7 @@ fun FolderScreen(
     var showSlideshow by remember { mutableStateOf(false) }
     var showMoveCopySheet by remember { mutableStateOf(false) }
     var showCollagePdfSheet by remember { mutableStateOf(false) }
+    var showTrashConfirmLocal by remember { mutableStateOf(false) }
     var showRenameAlbumDialog by remember { mutableStateOf(false) }
     var pendingAlbumRenameName by remember { mutableStateOf<String?>(null) }
 
@@ -302,7 +306,7 @@ fun FolderScreen(
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
-        snackbarHost = { SnackbarHost(snackbarHostState) },
+        snackbarHost = { LuminaSnackbarHost(snackbarHostState) },
         topBar = {
             Column {
                 TopAppBar(
@@ -891,7 +895,9 @@ fun FolderScreen(
                 exportProgressText = uiState.exportProgressText,
                 onShare = viewModel::shareSelected,
                 onSaveToDevice = if (uiState.isLocalAlbum) null else viewModel::saveSelectedToDevice,
-                onDeleteLocal = if (uiState.isLocalAlbum) viewModel::requestTrashSelectedLocal else null,
+                onDeleteLocal = if (uiState.isLocalAlbum && selectedMediaItems.isNotEmpty()) {
+                    { showTrashConfirmLocal = true }
+                } else null,
                 onCompare = if (comparableIds.size in 2..4) {
                     {
                         viewModel.clearSelection()
@@ -924,6 +930,30 @@ fun FolderScreen(
                     viewModel.clearSelection()
                     viewModel.showMessage(msg)
                 }
+            )
+        }
+    }
+
+    if (showTrashConfirmLocal && uiState.isLocalAlbum) {
+        val itemsToTrash = remember(uiState.mediaItems, uiState.selectedIds) {
+            uiState.mediaItems.filter { it.id in uiState.selectedIds }
+        }
+        if (itemsToTrash.isNotEmpty()) {
+            HyperOsTrashConfirmSheet(
+                items = itemsToTrash,
+                mode = TrashConfirmMode.MOVE_TO_TRASH,
+                canSkipSystemPrompt = appContainer.localMediaRepository.canManageMediaDirectly(),
+                supportsSkipPromptSetting = appContainer.localMediaRepository.supportsManageMediaPermission(),
+                onOpenManageMediaSettings = {
+                    appContainer.localMediaRepository.buildManageMediaSettingsIntent()?.let { intent ->
+                        runCatching { context.startActivity(intent) }
+                    }
+                },
+                onConfirm = {
+                    showTrashConfirmLocal = false
+                    viewModel.requestTrashSelectedLocal()
+                },
+                onDismiss = { showTrashConfirmLocal = false }
             )
         }
     }

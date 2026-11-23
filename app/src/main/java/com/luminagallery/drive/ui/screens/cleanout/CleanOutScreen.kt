@@ -86,6 +86,7 @@ import androidx.lifecycle.viewModelScope
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import com.luminagallery.drive.AppContainer
+import com.luminagallery.drive.LocalAppContainer
 import com.luminagallery.drive.LocalGalleryImageLoader
 import com.luminagallery.drive.data.local.LocalMediaRepository
 import com.luminagallery.drive.data.repository.CoilCacheManager
@@ -95,6 +96,9 @@ import com.luminagallery.drive.domain.model.CleanOutGroup
 import com.luminagallery.drive.domain.model.DuplicateCluster
 import com.luminagallery.drive.domain.model.MediaItem
 import com.luminagallery.drive.ui.components.FormatUtils
+import com.luminagallery.drive.ui.components.HyperOsTrashConfirmSheet
+import com.luminagallery.drive.ui.components.LuminaSnackbarHost
+import com.luminagallery.drive.ui.components.TrashConfirmMode
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -178,6 +182,29 @@ class CleanOutViewModel(
 
     fun requestTrashItems(items: List<MediaItem>) {
         if (items.isEmpty()) return
+        if (localMediaRepository.canManageMediaDirectly()) {
+            viewModelScope.launch {
+                localMediaRepository.trashLocalItemsDirectly(items, toTrash = true)
+                    .onSuccess { count ->
+                        localMediaRepository.notifyPermissionChanged()
+                        _uiState.update {
+                            it.copy(
+                                snackbarMessage = if (count == 1) "Moved to trash" else "Moved $count items to trash"
+                            )
+                        }
+                        runSmartScan()
+                    }
+                    .onFailure {
+                        val sender = localMediaRepository.buildTrashIntentSender(items, toTrash = true)
+                        if (sender != null) {
+                            _uiState.update { it.copy(pendingTrashSender = sender) }
+                        } else {
+                            _uiState.update { it.copy(snackbarMessage = "Trash requires Android 11 or newer") }
+                        }
+                    }
+            }
+            return
+        }
         val sender = localMediaRepository.buildTrashIntentSender(items, toTrash = true)
         if (sender != null) {
             _uiState.update { it.copy(pendingTrashSender = sender) }
@@ -190,7 +217,7 @@ class CleanOutViewModel(
         _uiState.update { it.copy(pendingTrashSender = null) }
         if (approved) {
             localMediaRepository.notifyPermissionChanged()
-            _uiState.update { it.copy(snackbarMessage = "Moved selected items to Trash") }
+            _uiState.update { it.copy(snackbarMessage = "Moved selected items to trash") }
             runSmartScan()
         }
     }
@@ -216,8 +243,11 @@ fun CleanOutScreen(
     onNavigateBack: () -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val container = LocalAppContainer.current
+    val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
     var reviewingCategory by remember { mutableStateOf<CleanOutCategory?>(null) }
+    var pendingCleanOutTrash by remember { mutableStateOf<List<MediaItem>?>(null) }
 
     val activeReviewGroup = remember(uiState.groups, reviewingCategory) {
         reviewingCategory?.let { cat -> uiState.groups.firstOrNull { it.category == cat } }
@@ -251,7 +281,7 @@ fun CleanOutScreen(
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
-        snackbarHost = { SnackbarHost(snackbarHostState) },
+        snackbarHost = { LuminaSnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 title = {
@@ -451,7 +481,29 @@ fun CleanOutScreen(
                     label = "Ignored ${chosen.size} item(s)"
                 )
             },
-            onMoveToTrash = { chosen -> viewModel.requestTrashItems(chosen) }
+            onMoveToTrash = { chosen -> pendingCleanOutTrash = chosen }
+        )
+    }
+
+    pendingCleanOutTrash?.let { chosen ->
+        HyperOsTrashConfirmSheet(
+            items = chosen,
+            mode = TrashConfirmMode.MOVE_TO_TRASH,
+            canSkipSystemPrompt = container.localMediaRepository.canManageMediaDirectly(),
+            supportsSkipPromptSetting = container.localMediaRepository.supportsManageMediaPermission(),
+            onOpenManageMediaSettings = {
+                container.localMediaRepository.buildManageMediaSettingsIntent()?.let { intent ->
+                    runCatching { context.startActivity(intent) }
+                }
+            },
+            onConfirm = {
+                pendingCleanOutTrash = null
+                if (container.localMediaRepository.canManageMediaDirectly()) {
+                    reviewingCategory = null
+                }
+                viewModel.requestTrashItems(chosen)
+            },
+            onDismiss = { pendingCleanOutTrash = null }
         )
     }
 }
