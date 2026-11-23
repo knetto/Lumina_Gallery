@@ -1,6 +1,9 @@
 package com.luminagallery.drive
 
 import androidx.compose.ui.geometry.Rect
+import com.google.android.gms.common.api.CommonStatusCodes
+import com.luminagallery.drive.data.remote.DriveScopes
+import com.luminagallery.drive.data.remote.auth.GoogleAuthHelper
 import com.luminagallery.drive.data.repository.CloudAlbumCollection
 import com.luminagallery.drive.data.repository.CloudAlbumLayout
 import com.luminagallery.drive.data.repository.CloudAlbumViewPref
@@ -377,5 +380,36 @@ class GalleryCoreLogicTest {
         assertEquals("WiFi Pass 1234", OcrIndexerManager.normalizeSearchText("  WiFi\n\tPass   1234  "))
         assertTrue(MediaExportManager.SENSITIVE_EXIF_TAGS.contains("GPSLatitude"))
         assertTrue(MediaExportManager.SENSITIVE_EXIF_TAGS.contains("GPSLongitude"))
+    }
+
+    @Test
+    fun googleAuthHelper_classifiesScopesAndApiErrorsCleanly() {
+        assertTrue(
+            GoogleAuthHelper.hasGrantedAppDataScope(
+                listOf(DriveScopes.DRIVE_READONLY, DriveScopes.DRIVE_APPDATA)
+            )
+        )
+        assertFalse(GoogleAuthHelper.hasGrantedAppDataScope(listOf(DriveScopes.DRIVE_READONLY)))
+        assertFalse(GoogleAuthHelper.hasGrantedAppDataScope(emptyList()))
+
+        val devErr = GoogleAuthHelper.formatAuthErrorFromParts(
+            statusCode = CommonStatusCodes.DEVELOPER_ERROR,
+            rawMessage = "10: "
+        )
+        assertTrue(devErr.contains("com.luminagallery.drive"))
+        assertTrue(devErr.contains("B3:74:4C:48"))
+
+        val scopeUpgradeErr = GoogleAuthHelper.formatAuthErrorFromParts(
+            statusCode = 28444,
+            rawMessage = "28444: Developer console is not set up correctly.",
+            appDataUpgradeOnly = true
+        )
+        assertTrue(scopeUpgradeErr.contains("drive.appdata"))
+
+        val apiErr17 = GoogleAuthHelper.formatAuthErrorFromParts(
+            statusCode = CommonStatusCodes.API_NOT_CONNECTED,
+            rawMessage = "17: API unavailable"
+        )
+        assertTrue(apiErr17.contains("17"))
     }
 }

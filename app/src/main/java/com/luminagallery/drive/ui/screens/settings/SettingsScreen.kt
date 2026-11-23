@@ -84,10 +84,10 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.google.android.gms.auth.api.identity.Identity
 import com.luminagallery.drive.BuildConfig
 import com.luminagallery.drive.LocalAppContainer
 import com.luminagallery.drive.R
+import com.luminagallery.drive.data.remote.auth.GoogleAuthHelper
 import com.luminagallery.drive.data.repository.AppUpdateState
 import com.luminagallery.drive.data.repository.InstalledGalleryApp
 import com.luminagallery.drive.domain.model.AlbumSortMode
@@ -154,58 +154,113 @@ fun SettingsScreen(
         if (uri != null) viewModel.importLocalProfileBackup(uri)
     }
 
+    var activeGoogleAuthIsReadOnlyFallback by remember { mutableStateOf(false) }
+    var activeGoogleAuthIsAppDataUpgrade by remember { mutableStateOf(false) }
+
+    lateinit var launchGoogleAuthRequest: (readOnlyFallback: Boolean, appDataUpgradeOnly: Boolean) -> Unit
+
     val googleAuthLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
     ) { activityResult ->
+        val wasReadOnlyFallback = activeGoogleAuthIsReadOnlyFallback
+        val wasAppDataUpgrade = activeGoogleAuthIsAppDataUpgrade
+        if (GoogleAuthHelper.isExplicitUserCancel(
+                error = null,
+                resultCode = activityResult.resultCode,
+                hasIntentData = activityResult.data != null
+            )
+        ) {
+            viewModel.showMessage("Google sign-in cancelled")
+            return@rememberLauncherForActivityResult
+        }
         runCatching {
-            val authResult = Identity.getAuthorizationClient(context)
+            val authResult = GoogleAuthHelper.getAuthorizationClient(context)
                 .getAuthorizationResultFromIntent(activityResult.data)
             val token = authResult.accessToken
             if (!token.isNullOrBlank()) {
                 val granted = authResult.grantedScopes
-                val hasAppData = granted.isEmpty() ||
-                    com.luminagallery.drive.data.remote.DriveScopes.DRIVE_APPDATA in granted
+                val hasAppData = !wasReadOnlyFallback && (
+                    granted.isEmpty() || GoogleAuthHelper.hasGrantedAppDataScope(granted)
+                )
                 viewModel.onGoogleSignInSuccess(
                     accessToken = token,
                     fallbackEmail = authResult.toGoogleSignInAccount()?.email,
                     grantedAppDataScope = hasAppData
                 )
+            } else if (!wasReadOnlyFallback && !wasAppDataUpgrade) {
+                launchGoogleAuthRequest(true, false)
             } else {
                 viewModel.showMessage("Google sign-in cancelled")
             }
         }.onFailure { err ->
-            viewModel.showMessage(err.localizedMessage ?: "Google Sign-In failed")
+            if (!wasReadOnlyFallback && !wasAppDataUpgrade &&
+                GoogleAuthHelper.shouldFallbackToReadOnly(err, afterConsentScreen = true)
+            ) {
+                launchGoogleAuthRequest(true, false)
+            } else {
+                viewModel.showMessage(
+                    GoogleAuthHelper.formatAuthError(err, appDataUpgradeOnly = wasAppDataUpgrade)
+                )
+            }
         }
     }
 
-    fun startGoogleSignIn() {
-        val request = appContainer.tokenManager.buildGoogleAuthorizationRequest()
-        Identity.getAuthorizationClient(context)
+    launchGoogleAuthRequest = { readOnlyFallback, appDataUpgradeOnly ->
+        activeGoogleAuthIsReadOnlyFallback = readOnlyFallback
+        activeGoogleAuthIsAppDataUpgrade = appDataUpgradeOnly
+        val request = if (readOnlyFallback) {
+            appContainer.tokenManager.buildReadOnlyAuthorizationRequest()
+        } else {
+            appContainer.tokenManager.buildGoogleAuthorizationRequest()
+        }
+        GoogleAuthHelper.getAuthorizationClient(context)
             .authorize(request)
             .addOnSuccessListener { result ->
                 if (result.hasResolution()) {
-                    result.pendingIntent?.let { pi ->
+                    val pendingIntent = result.pendingIntent
+                    if (pendingIntent != null) {
                         googleAuthLauncher.launch(
-                            IntentSenderRequest.Builder(pi.intentSender).build()
+                            IntentSenderRequest.Builder(pendingIntent.intentSender).build()
                         )
+                    } else if (!readOnlyFallback && !appDataUpgradeOnly) {
+                        launchGoogleAuthRequest(true, false)
+                    } else {
+                        viewModel.showMessage("Missing Google consent prompt intent")
                     }
                 } else {
                     val token = result.accessToken
                     if (!token.isNullOrBlank()) {
                         val granted = result.grantedScopes
-                        val hasAppData = granted.isEmpty() ||
-                            com.luminagallery.drive.data.remote.DriveScopes.DRIVE_APPDATA in granted
+                        val hasAppData = !readOnlyFallback && (
+                            granted.isEmpty() || GoogleAuthHelper.hasGrantedAppDataScope(granted)
+                        )
                         viewModel.onGoogleSignInSuccess(
                             accessToken = token,
                             fallbackEmail = result.toGoogleSignInAccount()?.email,
                             grantedAppDataScope = hasAppData
                         )
+                    } else if (!readOnlyFallback && !appDataUpgradeOnly) {
+                        launchGoogleAuthRequest(true, false)
+                    } else {
+                        viewModel.showMessage("Google returned an empty access token")
                     }
                 }
             }
             .addOnFailureListener { err ->
-                viewModel.showMessage(err.localizedMessage ?: "Google Sign-In failed")
+                if (!readOnlyFallback && !appDataUpgradeOnly &&
+                    GoogleAuthHelper.shouldFallbackToReadOnly(err, afterConsentScreen = false)
+                ) {
+                    launchGoogleAuthRequest(true, false)
+                } else {
+                    viewModel.showMessage(
+                        GoogleAuthHelper.formatAuthError(err, appDataUpgradeOnly = appDataUpgradeOnly)
+                    )
+                }
             }
+    }
+
+    fun startGoogleSignIn(appDataUpgradeOnly: Boolean = false) {
+        launchGoogleAuthRequest(false, appDataUpgradeOnly)
     }
 
     LaunchedEffect(uiState.snackbarMessage) {
@@ -261,7 +316,7 @@ fun SettingsScreen(
                 OneUiSettingsSection(title = "Cloud sync") {
                     OneUiAccountRow(
                         account = configuredAccount,
-                        onSignInClick = ::startGoogleSignIn,
+                        onSignInClick = { startGoogleSignIn(appDataUpgradeOnly = false) },
                         onCopyEmail = { email ->
                             val clipboard = context.getSystemService(
                                 Context.CLIPBOARD_SERVICE
@@ -325,7 +380,7 @@ fun SettingsScreen(
                         } else null,
                         onClick = {
                             if (isGoogleAccount && cloudSync.needsScopeReconsent) {
-                                startGoogleSignIn()
+                                startGoogleSignIn(appDataUpgradeOnly = true)
                             } else {
                                 showCloudProfileDialog = true
                             }

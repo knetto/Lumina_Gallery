@@ -115,8 +115,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.google.android.gms.auth.api.identity.Identity
 import com.luminagallery.drive.LocalAppContainer
+import com.luminagallery.drive.data.remote.auth.GoogleAuthHelper
 import com.luminagallery.drive.domain.model.AlbumGridItem
 import com.luminagallery.drive.domain.model.AlbumSortMode
 import com.luminagallery.drive.domain.model.AlbumsTabFilter
@@ -242,37 +242,64 @@ fun HomeScreen(
         }
     }
 
+    var activeGoogleAuthIsReadOnlyFallback by remember { mutableStateOf(false) }
+
+    lateinit var launchGoogleAuthRequest: (readOnlyFallback: Boolean) -> Unit
+
     val googleAuthLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
     ) { activityResult ->
-        isSigningInWithGoogle = false
+        val wasReadOnlyFallback = activeGoogleAuthIsReadOnlyFallback
+        if (GoogleAuthHelper.isExplicitUserCancel(
+                error = null,
+                resultCode = activityResult.resultCode,
+                hasIntentData = activityResult.data != null
+            )
+        ) {
+            isSigningInWithGoogle = false
+            viewModel.onGoogleSignInError("Google sign-in was cancelled.")
+            return@rememberLauncherForActivityResult
+        }
         runCatching {
-            val authResult = Identity.getAuthorizationClient(context)
+            val authResult = GoogleAuthHelper.getAuthorizationClient(context)
                 .getAuthorizationResultFromIntent(activityResult.data)
             val token = authResult.accessToken
             if (!token.isNullOrBlank()) {
+                isSigningInWithGoogle = false
                 val granted = authResult.grantedScopes
-                val hasAppData = granted.isEmpty() ||
-                    com.luminagallery.drive.data.remote.DriveScopes.DRIVE_APPDATA in granted
+                val hasAppData = !wasReadOnlyFallback && (
+                    granted.isEmpty() || GoogleAuthHelper.hasGrantedAppDataScope(granted)
+                )
                 viewModel.onGoogleSignInSuccess(
                     accessToken = token,
                     fallbackEmail = authResult.toGoogleSignInAccount()?.email,
                     grantedAppDataScope = hasAppData
                 )
+            } else if (!wasReadOnlyFallback) {
+                launchGoogleAuthRequest(true)
             } else {
+                isSigningInWithGoogle = false
                 viewModel.onGoogleSignInError("Google sign-in was cancelled.")
             }
         }.onFailure { err ->
-            viewModel.onGoogleSignInError(
-                err.localizedMessage ?: "Google Drive authorization failed."
-            )
+            if (!wasReadOnlyFallback && GoogleAuthHelper.shouldFallbackToReadOnly(err, afterConsentScreen = true)) {
+                launchGoogleAuthRequest(true)
+            } else {
+                isSigningInWithGoogle = false
+                viewModel.onGoogleSignInError(GoogleAuthHelper.formatAuthError(err))
+            }
         }
     }
 
-    fun startGoogleSignIn() {
+    launchGoogleAuthRequest = { readOnlyFallback ->
+        activeGoogleAuthIsReadOnlyFallback = readOnlyFallback
         isSigningInWithGoogle = true
-        val request = appContainer.tokenManager.buildGoogleAuthorizationRequest()
-        Identity.getAuthorizationClient(context)
+        val request = if (readOnlyFallback) {
+            appContainer.tokenManager.buildReadOnlyAuthorizationRequest()
+        } else {
+            appContainer.tokenManager.buildGoogleAuthorizationRequest()
+        }
+        GoogleAuthHelper.getAuthorizationClient(context)
             .authorize(request)
             .addOnSuccessListener { result ->
                 if (result.hasResolution()) {
@@ -281,6 +308,8 @@ fun HomeScreen(
                         googleAuthLauncher.launch(
                             IntentSenderRequest.Builder(pendingIntent.intentSender).build()
                         )
+                    } else if (!readOnlyFallback) {
+                        launchGoogleAuthRequest(true)
                     } else {
                         isSigningInWithGoogle = false
                         viewModel.onGoogleSignInError("Missing Google consent prompt intent.")
@@ -290,24 +319,33 @@ fun HomeScreen(
                     val token = result.accessToken
                     if (!token.isNullOrBlank()) {
                         val granted = result.grantedScopes
-                        val hasAppData = granted.isEmpty() ||
-                            com.luminagallery.drive.data.remote.DriveScopes.DRIVE_APPDATA in granted
+                        val hasAppData = !readOnlyFallback && (
+                            granted.isEmpty() || GoogleAuthHelper.hasGrantedAppDataScope(granted)
+                        )
                         viewModel.onGoogleSignInSuccess(
                             accessToken = token,
                             fallbackEmail = result.toGoogleSignInAccount()?.email,
                             grantedAppDataScope = hasAppData
                         )
+                    } else if (!readOnlyFallback) {
+                        launchGoogleAuthRequest(true)
                     } else {
                         viewModel.onGoogleSignInError("Empty access token returned.")
                     }
                 }
             }
             .addOnFailureListener { err ->
-                isSigningInWithGoogle = false
-                viewModel.onGoogleSignInError(
-                    err.localizedMessage ?: "Google Sign-In failed."
-                )
+                if (!readOnlyFallback && GoogleAuthHelper.shouldFallbackToReadOnly(err, afterConsentScreen = false)) {
+                    launchGoogleAuthRequest(true)
+                } else {
+                    isSigningInWithGoogle = false
+                    viewModel.onGoogleSignInError(GoogleAuthHelper.formatAuthError(err))
+                }
             }
+    }
+
+    fun startGoogleSignIn() {
+        launchGoogleAuthRequest(false)
     }
 
     val credentialsPickerLauncher = rememberLauncherForActivityResult(

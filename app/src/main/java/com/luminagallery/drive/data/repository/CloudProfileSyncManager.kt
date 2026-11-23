@@ -1442,7 +1442,11 @@ class CloudProfileSyncManager(
         if (code == 403 && (isScopeDeniedErrorBody(errorBody) || (errorBody.isBlank() && !tokenManager.hasAppDataScope))) {
             throw InsufficientAppDataScopeException()
         }
-        throw IOException("$fallbackMessage (HTTP $code)")
+        val apiMsg = runCatching {
+            JSONObject(errorBody).optJSONObject("error")?.optString("message")?.takeIf { it.isNotBlank() }
+        }.getOrNull()
+        val detail = if (apiMsg != null) "$fallbackMessage (HTTP $code: $apiMsg)" else "$fallbackMessage (HTTP $code)"
+        throw IOException(detail)
     }
 
     private fun findRemoteProfileFileId(): String? {

@@ -40,9 +40,12 @@
 -dontwarn retrofit2.KotlinExtensions
 -dontwarn retrofit2.KotlinExtensions$*
 
-# Google Auth Library (Service Account JWT / OAuth2)
+# Google Auth Library (Service Account JWT / OAuth2) & Play Services Identity
 -keep class com.google.auth.** { *; }
 -keep class com.google.api.client.** { *; }
+-keep class com.google.android.gms.auth.api.identity.** { *; }
+-keep class com.google.android.gms.common.api.Scope { *; }
+-keep class com.google.android.gms.common.api.ApiException { *; }
 -dontwarn com.google.auth.**
 -dontwarn com.google.api.client.**
 -dontwarn org.apache.http.**

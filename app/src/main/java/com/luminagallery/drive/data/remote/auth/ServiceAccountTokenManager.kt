@@ -49,7 +49,7 @@ class ServiceAccountTokenManager(
             )
             .build()
 
-    private fun buildReadOnlyFallbackRequest(): AuthorizationRequest =
+    fun buildReadOnlyAuthorizationRequest(): AuthorizationRequest =
         AuthorizationRequest.builder()
             .setRequestedScopes(listOf(Scope(DriveScopes.DRIVE_READONLY)))
             .build()
@@ -121,51 +121,60 @@ class ServiceAccountTokenManager(
             cachedOAuthToken = null
         }
 
-        val result = try {
+        val primaryAttempt = runCatching {
             Tasks.await(
                 client.authorize(buildGoogleAuthorizationRequest()),
                 PLAY_SERVICES_TIMEOUT_SEC,
                 TimeUnit.SECONDS
             )
-        } catch (e: Exception) {
-            throw DriveAuthException(
-                "Unable to refresh Google Drive authorization: ${e.message}",
-                e
-            )
         }
 
-        if (result.hasResolution()) {
-            // Backward-compatibility for existing sessions that consented to DRIVE_READONLY before
-            // DRIVE_APPDATA was added: fall back silently so Drive photos keep working uninterrupted
-            // until the user taps Sign in once to grant account backup access.
-            val fallbackResult = runCatching {
-                Tasks.await(
-                    client.authorize(buildReadOnlyFallbackRequest()),
-                    PLAY_SERVICES_TIMEOUT_SEC,
-                    TimeUnit.SECONDS
-                )
-            }.getOrNull()
-
-            val fallbackToken = fallbackResult?.takeIf { !it.hasResolution() }?.accessToken
-            if (!fallbackToken.isNullOrBlank()) {
-                cachedOAuthToken = fallbackToken
+        val primaryResult = primaryAttempt.getOrNull()
+        if (primaryResult != null && !primaryResult.hasResolution()) {
+            val freshToken = primaryResult.accessToken
+            if (!freshToken.isNullOrBlank()) {
+                cachedOAuthToken = freshToken
                 cachedOAuthFetchedAtMs = System.currentTimeMillis()
-                hasAppDataScope = false
-                return fallbackToken
+                hasAppDataScope = primaryResult.grantedScopes.isEmpty() ||
+                    GoogleAuthHelper.hasGrantedAppDataScope(primaryResult.grantedScopes)
+                return freshToken
             }
+        }
 
+        // Fallback to DRIVE_READONLY whenever DRIVE_APPDATA either needs consent OR fails with an
+        // ApiException (e.g., drive.appdata not yet added to Google Cloud OAuth Consent Screen),
+        // so browsing & streaming Drive photos continues working uninterrupted.
+        val fallbackAttempt = runCatching {
+            Tasks.await(
+                client.authorize(buildReadOnlyAuthorizationRequest()),
+                PLAY_SERVICES_TIMEOUT_SEC,
+                TimeUnit.SECONDS
+            )
+        }
+        val fallbackResult = fallbackAttempt.getOrNull()
+        val fallbackToken = fallbackResult?.takeIf { !it.hasResolution() }?.accessToken
+        if (!fallbackToken.isNullOrBlank()) {
+            cachedOAuthToken = fallbackToken
+            cachedOAuthFetchedAtMs = System.currentTimeMillis()
+            hasAppDataScope = false
+            return fallbackToken
+        }
+
+        if (primaryResult?.hasResolution() == true || fallbackResult?.hasResolution() == true) {
             throw DriveAuthException(
                 "Google Drive access needs one-time re-consent. Open Settings and tap Sign in with Google."
             )
         }
 
-        val freshToken = result.accessToken
-            ?: throw DriveAuthException("Google Play Services returned an empty Drive access token.")
+        val rootError = fallbackAttempt.exceptionOrNull() ?: primaryAttempt.exceptionOrNull()
+        if (rootError != null) {
+            throw DriveAuthException(
+                "Unable to refresh Google Drive authorization: ${GoogleAuthHelper.formatAuthError(rootError)}",
+                rootError
+            )
+        }
 
-        cachedOAuthToken = freshToken
-        cachedOAuthFetchedAtMs = System.currentTimeMillis()
-        hasAppDataScope = true
-        return freshToken
+        throw DriveAuthException("Google Play Services returned an empty Drive access token.")
     }
 
     private fun getServiceAccountTokenLocked(forceRefresh: Boolean): String {
