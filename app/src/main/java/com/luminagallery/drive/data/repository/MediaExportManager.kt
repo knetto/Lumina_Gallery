@@ -36,7 +36,7 @@ class MediaExportManager(
 
     suspend fun prepareShareUris(
         items: List<MediaItem>,
-        stripLocation: Boolean = false,
+        stripLocation: Boolean = true,
         onProgress: (completed: Int, total: Int) -> Unit = { _, _ -> }
     ): Result<List<Uri>> = withContext(Dispatchers.IO) {
         runCatching {
@@ -88,6 +88,34 @@ class MediaExportManager(
         } ?: throw IOException("Unable to read ${item.name} for privacy share")
         stripExifFromFile(targetFile, item.mimeType)
         return targetFile
+    }
+
+    /**
+     * Creates a temporary EXIF/GPS-stripped copy of an arbitrary external content URI for sharing.
+     * Videos and RAW files are passed through untouched.
+     */
+    suspend fun prepareCleanShareUri(
+        srcUri: Uri,
+        displayName: String,
+        mimeType: String
+    ): Result<Uri> = withContext(Dispatchers.IO) {
+        runCatching {
+            val isImage = mimeType.startsWith("image/", ignoreCase = true)
+            val isRaw = mimeType.contains("raw", ignoreCase = true) ||
+                mimeType.contains("dng", ignoreCase = true)
+            if (!isImage || isRaw) return@runCatching srcUri
+            pruneStaleShareFiles()
+            val ext = displayName.substringAfterLast('.', "jpg").lowercase()
+            val safeName = sanitizeFilename("clean_ext_${System.currentTimeMillis()}.$ext")
+            val targetFile = File(shareDir, safeName)
+            context.contentResolver.openInputStream(srcUri)?.use { input ->
+                FileOutputStream(targetFile).use { output ->
+                    input.copyTo(output, BUFFER_SIZE)
+                }
+            } ?: throw IOException("Unable to read $displayName for sharing")
+            stripExifFromFile(targetFile, mimeType)
+            FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", targetFile)
+        }
     }
 
     /**

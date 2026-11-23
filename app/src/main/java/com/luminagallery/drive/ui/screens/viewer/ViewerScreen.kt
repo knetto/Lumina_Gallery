@@ -705,7 +705,10 @@ fun ViewerScreen(
                                 } else {
                                     coroutineScope.launch {
                                         isApplyingQuickAction = true
-                                        appContainer.exportMediaUseCase.prepareShareUris(listOf(itemToOpen))
+                                        appContainer.exportMediaUseCase.prepareShareUris(
+                                            items = listOf(itemToOpen),
+                                            stripLocation = false
+                                        )
                                             .onSuccess { uris ->
                                                 val uri = uris.firstOrNull()
                                                 if (uri != null) {
@@ -730,27 +733,6 @@ fun ViewerScreen(
                         )
                         if (!currentItem.isVideo) {
                             DropdownMenuItem(
-                                text = { Text("Share without location / EXIF") },
-                                onClick = {
-                                    showOverflowMenu = false
-                                    val target = currentItem
-                                    coroutineScope.launch {
-                                        isApplyingQuickAction = true
-                                        appContainer.exportMediaUseCase.prepareShareUris(
-                                            items = listOf(target),
-                                            stripLocationOverride = true
-                                        ).onSuccess { uris ->
-                                            if (uris.isNotEmpty()) {
-                                                FormatUtils.launchShareSheet(context, uris, target.mimeType)
-                                            }
-                                        }.onFailure { err ->
-                                            viewModel.showMessage(err.localizedMessage ?: "Unable to prepare clean copy")
-                                        }
-                                        isApplyingQuickAction = false
-                                    }
-                                }
-                            )
-                            DropdownMenuItem(
                                 text = { Text("Edit photo") },
                                 onClick = {
                                     showOverflowMenu = false
@@ -768,7 +750,10 @@ fun ViewerScreen(
                                     showOverflowMenu = false
                                     coroutineScope.launch {
                                         isApplyingQuickAction = true
-                                        appContainer.exportMediaUseCase.prepareShareUris(listOf(currentItem))
+                                        appContainer.exportMediaUseCase.prepareShareUris(
+                                            items = listOf(currentItem),
+                                            stripLocation = false
+                                        )
                                             .onSuccess { uris ->
                                                 uris.firstOrNull()?.let { uri ->
                                                     appContainer.localFileOperationsManager.launchExternalEditor(

@@ -39,16 +39,19 @@ class ManageRootsUseCase(
 }
 
 class ExportMediaUseCase(
-    private val exportManager: MediaExportManager,
-    private val preferencesManager: com.luminagallery.drive.data.local.PreferencesManager
+    private val exportManager: MediaExportManager
 ) {
+    /**
+     * Prepares URIs for sharing (always strips GPS/camera EXIF from shared photo copies by default).
+     * Pass `stripLocation = false` only for non-share intents such as opening in an external editor/gallery.
+     */
     suspend fun prepareShareUris(
         items: List<MediaItem>,
-        stripLocationOverride: Boolean? = null,
+        stripLocation: Boolean = true,
         onProgress: (Int, Int) -> Unit = { _, _ -> }
     ): Result<List<Uri>> = exportManager.prepareShareUris(
         items = items,
-        stripLocation = stripLocationOverride ?: preferencesManager.latestPreferences.stripLocationOnShare,
+        stripLocation = stripLocation,
         onProgress = onProgress
     )
 

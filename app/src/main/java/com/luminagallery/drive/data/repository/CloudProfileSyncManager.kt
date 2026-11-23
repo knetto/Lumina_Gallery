@@ -130,7 +130,7 @@ data class CloudPreferencesPayload(
     val prefetchAdjacentMedia: Boolean = true,
     val wifiOnlyHighRes: Boolean = true,
     val autoCheckUpdates: Boolean = true,
-    val stripLocationOnShare: Boolean = false,
+    val stripLocationOnShare: Boolean = true,
     val lockHiddenAlbums: Boolean = false
 )
 

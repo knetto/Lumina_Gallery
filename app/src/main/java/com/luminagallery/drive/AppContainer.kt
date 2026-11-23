@@ -135,7 +135,7 @@ class AppContainer(context: Context) {
 
     val syncGalleryUseCase: SyncGalleryUseCase = SyncGalleryUseCase(galleryRepository)
     val manageRootsUseCase: ManageRootsUseCase = ManageRootsUseCase(galleryRepository)
-    val exportMediaUseCase: ExportMediaUseCase = ExportMediaUseCase(mediaExportManager, preferencesManager)
+    val exportMediaUseCase: ExportMediaUseCase = ExportMediaUseCase(mediaExportManager)
 
     val cloudProfileSyncManager: CloudProfileSyncManager = CloudProfileSyncManager(
         database = database,

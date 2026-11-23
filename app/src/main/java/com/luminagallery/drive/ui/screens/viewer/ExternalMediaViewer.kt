@@ -221,7 +221,12 @@ fun ExternalMediaViewerOverlay(
                 }
                 IconButton(
                     onClick = {
-                        FormatUtils.launchShareSheet(context, listOf(parsedUri), mimeType)
+                        scope.launch {
+                            val cleanUri = container.mediaExportManager
+                                .prepareCleanShareUri(parsedUri, displayName, mimeType)
+                                .getOrDefault(parsedUri)
+                            FormatUtils.launchShareSheet(context, listOf(cleanUri), mimeType)
+                        }
                     }
                 ) {
                     Icon(Icons.Outlined.Share, contentDescription = "Share", tint = Color.White)

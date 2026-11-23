@@ -432,15 +432,6 @@ fun SettingsScreen(
                         }
                     )
 
-                    OneUiDivider()
-
-                    OneUiToggleRow(
-                        title = "Remove location when sharing",
-                        subtitle = "Strip GPS coordinates and camera EXIF metadata from shared photo copies (originals stay untouched)",
-                        checked = prefs.stripLocationOnShare,
-                        onCheckedChange = viewModel::setStripLocationOnShare
-                    )
-
                     if (appContainer.localMediaRepository.supportsManageMediaPermission()) {
                         OneUiDivider()
                         val hasDirectMediaAccess = remember(resumeTick) {

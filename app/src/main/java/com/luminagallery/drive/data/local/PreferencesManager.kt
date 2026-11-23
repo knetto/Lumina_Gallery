@@ -63,7 +63,7 @@ class PreferencesManager(private val context: Context) {
             externalGalleryPackage = prefs[KEY_EXTERNAL_GALLERY_PACKAGE].orEmpty(),
             externalGalleryLabel = prefs[KEY_EXTERNAL_GALLERY_LABEL].orEmpty(),
             autoCheckUpdates = prefs[KEY_AUTO_CHECK_UPDATES] ?: true,
-            stripLocationOnShare = prefs[KEY_STRIP_LOCATION_ON_SHARE] ?: false,
+            stripLocationOnShare = true,
             lockHiddenAlbums = prefs[KEY_LOCK_HIDDEN_ALBUMS] ?: false
         ).also { latestPreferences = it }
     }
@@ -296,7 +296,7 @@ class PreferencesManager(private val context: Context) {
             prefs[KEY_PREFETCH_ADJACENT] = synced.prefetchAdjacentMedia
             prefs[KEY_WIFI_ONLY_HIGH_RES] = synced.wifiOnlyHighRes
             prefs[KEY_AUTO_CHECK_UPDATES] = synced.autoCheckUpdates
-            prefs[KEY_STRIP_LOCATION_ON_SHARE] = synced.stripLocationOnShare
+            prefs[KEY_STRIP_LOCATION_ON_SHARE] = true
             prefs[KEY_LOCK_HIDDEN_ALBUMS] = synced.lockHiddenAlbums
         }
     }

@@ -306,17 +306,6 @@ class SettingsViewModel(
         }
     }
 
-    fun setStripLocationOnShare(enabled: Boolean) {
-        viewModelScope.launch {
-            preferencesManager.setStripLocationOnShare(enabled)
-            snackbarFlow.value = if (enabled) {
-                "GPS & camera metadata will be stripped when sharing photos"
-            } else {
-                "Original photo metadata kept when sharing"
-            }
-        }
-    }
-
     fun setLockHiddenAlbums(enabled: Boolean) {
         viewModelScope.launch {
             preferencesManager.setLockHiddenAlbums(enabled)
@@ -505,7 +494,6 @@ class SettingsViewModel(
             preferencesManager.setWifiOnlyHighRes(defaults.wifiOnlyHighRes)
             preferencesManager.setExternalGallery(defaults.externalGalleryPackage, defaults.externalGalleryLabel)
             preferencesManager.setAutoCheckUpdates(defaults.autoCheckUpdates)
-            preferencesManager.setStripLocationOnShare(defaults.stripLocationOnShare)
             preferencesManager.setLockHiddenAlbums(defaults.lockHiddenAlbums)
             preferencesManager.setBackgroundSyncEnabled(defaults.backgroundSyncEnabled)
             DriveSyncScheduler.setBackgroundSyncEnabled(appContext, false)

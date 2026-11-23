@@ -355,6 +355,6 @@ data class UserPreferences(
     val externalGalleryPackage: String = "",
     val externalGalleryLabel: String = "",
     val autoCheckUpdates: Boolean = true,
-    val stripLocationOnShare: Boolean = false,
+    val stripLocationOnShare: Boolean = true,
     val lockHiddenAlbums: Boolean = false
 )
