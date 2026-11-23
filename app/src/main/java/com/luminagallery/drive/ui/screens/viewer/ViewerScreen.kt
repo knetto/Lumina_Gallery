@@ -11,6 +11,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn as MediaOptIn
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.AnimatedVisibilityScope
+import androidx.compose.animation.EnterExitState
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.animation.core.Animatable
@@ -40,10 +41,12 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -97,6 +100,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -109,6 +113,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -154,6 +159,7 @@ import com.luminagallery.drive.data.repository.WallpaperTarget
 import com.luminagallery.drive.domain.model.MediaItem
 import com.luminagallery.drive.ui.components.ExifMetadataBottomSheet
 import com.luminagallery.drive.ui.components.FormatUtils
+import com.luminagallery.drive.ui.components.LocalAlbumTransitionOrigin
 import com.luminagallery.drive.ui.components.MoveCopyToAlbumSheet
 import com.luminagallery.drive.ui.components.OneUiMotion
 import com.luminagallery.drive.ui.components.oneUiClickable
@@ -172,7 +178,7 @@ fun ViewerScreen(
     viewModel: ViewerViewModel,
     sharedTransitionScope: SharedTransitionScope,
     animatedVisibilityScope: AnimatedVisibilityScope,
-    rectMorphProgress: Float = 0f,
+    isRectMorphing: Boolean = false,
     onActiveItemChanged: (String) -> Unit,
     onOpenEditor: (itemId: String, sourceUri: String, displayName: String, isLocal: Boolean) -> Unit = { _, _, _, _ -> },
     onDismiss: () -> Unit
@@ -369,31 +375,61 @@ fun ViewerScreen(
         }
     }
 
-    // Sync chrome & inner black box with Xiaomi HyperOS rect-to-rect morph:
-    // During open/close morph, HyperOsRectMorphFrame draws the full-screen black backdrop behind
-    // the flying photo, so fading the inner black box eliminates black letterbox bars around
-    // landscape photos and lets the pure photo shrink straight into its exact thumbnail tile!
-    val morphInnerBgFactor = (1f - rectMorphProgress * 6f).coerceIn(0f, 1f)
-    val backgroundAlpha = ((1f - dismissDragFraction * 0.85f) * morphInnerBgFactor).coerceIn(0f, 1f)
-    val showChromeNow = chromeVisible && dismissDragFraction < 0.05f && rectMorphProgress < 0.02f
+    // Sync chrome & inner black box with the Xiaomi HyperOS rect-to-rect morph:
+    // while morphing, HyperOsRectMorphFrame draws the full-screen backdrop behind the flying photo,
+    // so the inner black box steps aside (no letterbox bars around landscape photos).
+    // Recomposes only when the morph starts / ends (boolean), never per animation frame.
+    val backgroundAlpha = if (isRectMorphing) 0f else (1f - dismissDragFraction * 0.6f).coerceIn(0f, 1f)
+    val showChromeNow = chromeVisible && dismissDragFraction < 0.05f && !isRectMorphing
+    val isViewerClosing = animatedVisibilityScope.transition.targetState == EnterExitState.PostExit
+    val originTracker = LocalAlbumTransitionOrigin.current
+    val viewerDensity = LocalDensity.current
+    var viewerRootSize by remember { mutableStateOf(IntSize.Zero) }
+
+    DisposableEffect(originTracker) {
+        onDispose {
+            originTracker.viewerContentRect = null
+            originTracker.viewerBackdropAlpha = 1f
+        }
+    }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
+            .onSizeChanged { viewerRootSize = it }
             .background(Color.Black.copy(alpha = backgroundAlpha))
     ) {
         // Media Pager (sits neatly above the pure-black Samsung bottom dock when chrome is visible
         // so bright screenshots never clash with bottom icons, and goes full-bleed when immersive!)
         val showFilmstrip = prefs.showViewerFilmstrip
+        // Layout is frozen during the open/close morph so the photo never shifts mid-flight.
+        val dockChromeVisible = chromeVisible && dismissDragFraction < 0.05f
         val bottomDockClearance by animateDpAsState(
             targetValue = when {
-                !showChromeNow -> 0.dp
+                !dockChromeVisible -> 0.dp
                 showFilmstrip -> 118.dp
                 else -> 60.dp
             },
-            animationSpec = tween(durationMillis = if (rectMorphProgress > 0.002f) 110 else 200),
+            animationSpec = tween(durationMillis = 220, easing = OneUiMotion.PageSlideEasing),
             label = "mediaBottomClearance"
         )
+
+        // Publish the exact on-screen rect of the current photo so the close morph flies the real
+        // picture (not the full screen) home into its grid tile, plus the live backdrop opacity so
+        // a drag-to-dismiss hands over seamlessly to the fly-home animation.
+        val navBarBottomPx = WindowInsets.navigationBars.getBottom(viewerDensity)
+        val activeContentItem = items.getOrNull(pagerState.currentPage)
+        val clearancePx = with(viewerDensity) { bottomDockClearance.coerceAtLeast(0.dp).toPx() }
+        SideEffect {
+            originTracker.viewerBackdropAlpha = (1f - dismissDragFraction * 0.6f).coerceIn(0f, 1f)
+            val rootW = if (viewerRootSize.width > 0) viewerRootSize.width.toFloat() else view.width.toFloat()
+            val rootH = if (viewerRootSize.height > 0) viewerRootSize.height.toFloat() else view.height.toFloat()
+            originTracker.viewerContentRect = fittedViewerContentRect(
+                item = activeContentItem,
+                areaWidth = rootW,
+                areaHeight = rootH - navBarBottomPx - clearancePx
+            )
+        }
 
         HorizontalPager(
             state = pagerState,
@@ -419,6 +455,7 @@ fun ViewerScreen(
                     startMuted = prefs.startVideosMuted,
                     loopVideo = prefs.loopVideos,
                     swipeDownToDismiss = prefs.swipeDownToDismiss,
+                    isClosing = isViewerClosing && isActivePage,
                     onToggleChrome = { chromeVisible = !chromeVisible },
                     onVerticalDismissProgress = { fraction ->
                         if (isActivePage) dismissDragFraction = fraction
@@ -434,6 +471,7 @@ fun ViewerScreen(
                     item = pageItem,
                     isUnmeteredWifi = uiState.isUnmeteredWifi,
                     swipeDownToDismiss = prefs.swipeDownToDismiss,
+                    isClosing = isViewerClosing && isActivePage,
                     motionPhotoInfo = if (isActivePage) currentMotionInfo else null,
                     isPlayingMotion = isActivePage && isPlayingMotionPhoto,
                     onMotionPlayStateChanged = { playing ->
@@ -1518,6 +1556,7 @@ private fun ZoomablePhotoPage(
     item: MediaItem,
     isUnmeteredWifi: Boolean,
     swipeDownToDismiss: Boolean = true,
+    isClosing: Boolean = false,
     motionPhotoInfo: MotionPhotoInfo? = null,
     isPlayingMotion: Boolean = false,
     onMotionPlayStateChanged: (Boolean) -> Unit = {},
@@ -1538,6 +1577,21 @@ private fun ZoomablePhotoPage(
     val offsetXAnim = remember(item.id) { Animatable(0f) }
     val offsetYAnim = remember(item.id) { Animatable(0f) }
     val dismissOffsetY = remember(item.id) { Animatable(0f) }
+
+    // Fly-home hand-off: while the close morph shrinks the whole viewer into the grid tile, glide any
+    // drag offset / pinch zoom back to neutral in perfect sync, so the photo departs from exactly
+    // where the finger left it and still lands pixel-perfect on its thumbnail.
+    LaunchedEffect(isClosing, item.id) {
+        if (!isClosing) return@LaunchedEffect
+        val closeSpec = tween<Float>(
+            durationMillis = OneUiMotion.MORPH_CLOSE_MS,
+            easing = OneUiMotion.MorphCloseEasing
+        )
+        launch { dismissOffsetY.animateTo(0f, closeSpec) }
+        launch { scaleAnim.animateTo(1f, closeSpec) }
+        launch { offsetXAnim.animateTo(0f, closeSpec) }
+        launch { offsetYAnim.animateTo(0f, closeSpec) }
+    }
 
     var containerSize by remember { mutableStateOf(IntSize.Zero) }
     val offlinePath = remember(item.id) { appContainer.offlineMediaManager.getOfflineFilePath(item.id) }
@@ -1788,7 +1842,8 @@ private fun ZoomablePhotoPage(
                     if (verticalDragMode == 1) {
                         val dismissThresholdPx = (containerSize.height * 0.16f).coerceAtLeast(210f)
                         if (latestSwipeDown && dismissOffsetY.value > dismissThresholdPx) {
-                            onVerticalDismissProgress(0f)
+                            // Keep the current drag offset & backdrop level: the close morph picks
+                            // up from exactly here (no snap back to full screen before flying home).
                             onDismiss()
                         } else {
                             coroutineScope.launch {
@@ -1866,3 +1921,28 @@ private fun ZoomablePhotoPage(
 }
 
 private const val VIEWER_MAX_DECODE_PX = 3200
+
+/**
+ * On-screen rect (root coordinates) of a ContentScale.Fit photo / video inside the viewer's pager
+ * area, computed purely from geometry so it stays valid while the morph frame is transformed.
+ */
+private fun fittedViewerContentRect(item: MediaItem?, areaWidth: Float, areaHeight: Float): Rect? {
+    if (item == null || areaWidth <= 1f || areaHeight <= 1f) return null
+    val iw = item.effectiveWidth ?: return null
+    val ih = item.effectiveHeight ?: return null
+    if (iw <= 0 || ih <= 0) return null
+    val imageAspect = iw.toFloat() / ih.toFloat()
+    val areaAspect = areaWidth / areaHeight
+    val fittedW: Float
+    val fittedH: Float
+    if (imageAspect > areaAspect) {
+        fittedW = areaWidth
+        fittedH = areaWidth / imageAspect
+    } else {
+        fittedH = areaHeight
+        fittedW = areaHeight * imageAspect
+    }
+    val left = (areaWidth - fittedW) * 0.5f
+    val top = (areaHeight - fittedH) * 0.5f
+    return Rect(left, top, left + fittedW, top + fittedH)
+}

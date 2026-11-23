@@ -18,6 +18,7 @@ import androidx.annotation.OptIn
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -79,6 +80,7 @@ import com.luminagallery.drive.data.remote.DriveConstants
 import com.luminagallery.drive.data.repository.LocalThumbnailRequest
 import com.luminagallery.drive.domain.model.MediaItem
 import com.luminagallery.drive.ui.components.GlassSurface
+import com.luminagallery.drive.ui.components.OneUiMotion
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -143,6 +145,7 @@ fun VideoPlayerPage(
     startMuted: Boolean = false,
     loopVideo: Boolean = false,
     swipeDownToDismiss: Boolean = true,
+    isClosing: Boolean = false,
     onToggleChrome: () -> Unit,
     onVerticalDismissProgress: (Float) -> Unit,
     onSwipeUpForDetails: () -> Unit,
@@ -157,6 +160,16 @@ fun VideoPlayerPage(
     val haptic = LocalHapticFeedback.current
     val coroutineScope = rememberCoroutineScope()
     val dismissOffsetY = remember(item.id) { Animatable(0f) }
+
+    // Glide any drag-to-dismiss offset back in sync with the fly-home morph
+    LaunchedEffect(isClosing, item.id) {
+        if (isClosing && dismissOffsetY.value != 0f) {
+            dismissOffsetY.animateTo(
+                0f,
+                tween(durationMillis = OneUiMotion.MORPH_CLOSE_MS, easing = OneUiMotion.MorphCloseEasing)
+            )
+        }
+    }
 
     val thumbnailRequest = remember(item.isLocal, item.localContentUri, item.id, item.thumbnailLink, isUnmeteredWifi) {
         if (item.isLocal && !item.localContentUri.isNullOrBlank()) {
@@ -372,7 +385,7 @@ fun VideoPlayerPage(
                     onDragEnd = {
                         when {
                             swipeDownToDismiss && dismissOffsetY.value > 210f -> {
-                                onVerticalDismissProgress(0f)
+                                // Hand the current drag position over to the fly-home morph
                                 onDismiss()
                             }
                             !detailsFired && swipeUpAccumulated > 55f -> {
