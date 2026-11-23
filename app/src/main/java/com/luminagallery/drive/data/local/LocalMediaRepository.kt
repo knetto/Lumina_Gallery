@@ -75,6 +75,8 @@ class LocalMediaRepository(private val context: Context) {
 
     fun getCachedLocalAlbums(): List<DriveFolder> = latestLocalAlbums
 
+    fun getCachedAllMedia(): List<MediaItem> = latestAllMedia
+
     fun getCachedAlbumMedia(bucketId: String): List<MediaItem> = when (bucketId) {
         LOCAL_BUCKET_ALL -> latestAllMedia
         LOCAL_BUCKET_VIDEOS -> latestVideosMedia

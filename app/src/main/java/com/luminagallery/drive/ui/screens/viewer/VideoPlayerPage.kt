@@ -23,12 +23,18 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -47,14 +53,18 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -150,6 +160,7 @@ fun VideoPlayerPage(
     onVerticalDismissProgress: (Float) -> Unit,
     onSwipeUpForDetails: () -> Unit,
     onFrameCapturedMessage: (String) -> Unit,
+    onZoomStateChanged: (Boolean) -> Unit = {},
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -368,13 +379,66 @@ fun VideoPlayerPage(
         }
     }
 
+    var videoZoom by remember(item.id) { mutableFloatStateOf(1f) }
+    var videoPan by remember(item.id) { mutableStateOf(Offset.Zero) }
+    var videoContainerSize by remember { mutableStateOf(IntSize.Zero) }
+
+    LaunchedEffect(isActivePage) {
+        if (!isActivePage && videoZoom > 1f) {
+            videoZoom = 1f
+            videoPan = Offset.Zero
+            onZoomStateChanged(false)
+        }
+    }
+
     val dismissFraction = (dismissOffsetY.value / 420f).coerceIn(0f, 1f)
     val dismissScale = 1f - (dismissFraction * 0.22f)
 
     Box(
         modifier = modifier
             .fillMaxSize()
-            .pointerInput(item.id, swipeDownToDismiss) {
+            .onSizeChanged { videoContainerSize = it }
+            .pointerInput(item.id) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    do {
+                        val event = awaitPointerEvent()
+                        val pressed = event.changes.count { it.pressed }
+                        if (pressed >= 2) {
+                            val zoomChange = event.calculateZoom()
+                            val panChange = event.calculatePan()
+                            val nextZoom = (videoZoom * zoomChange).coerceIn(1f, 4f)
+                            val maxX = ((videoContainerSize.width * (nextZoom - 1f)) / 2f).coerceAtLeast(0f)
+                            val maxY = ((videoContainerSize.height * (nextZoom - 1f)) / 2f).coerceAtLeast(0f)
+                            val nextPan = if (nextZoom <= 1.02f) {
+                                Offset.Zero
+                            } else {
+                                Offset(
+                                    x = (videoPan.x + panChange.x).coerceIn(-maxX, maxX),
+                                    y = (videoPan.y + panChange.y).coerceIn(-maxY, maxY)
+                                )
+                            }
+                            videoZoom = if (nextZoom <= 1.02f) 1f else nextZoom
+                            videoPan = nextPan
+                            onZoomStateChanged(videoZoom > 1.02f)
+                            event.changes.forEach { if (it.positionChanged()) it.consume() }
+                        } else if (videoZoom > 1.02f) {
+                            val panChange = event.calculatePan()
+                            if (panChange != Offset.Zero) {
+                                val maxX = ((videoContainerSize.width * (videoZoom - 1f)) / 2f).coerceAtLeast(0f)
+                                val maxY = ((videoContainerSize.height * (videoZoom - 1f)) / 2f).coerceAtLeast(0f)
+                                videoPan = Offset(
+                                    x = (videoPan.x + panChange.x).coerceIn(-maxX, maxX),
+                                    y = (videoPan.y + panChange.y).coerceIn(-maxY, maxY)
+                                )
+                                event.changes.forEach { if (it.positionChanged()) it.consume() }
+                            }
+                        }
+                    } while (event.changes.any { it.pressed })
+                }
+            }
+            .pointerInput(item.id, swipeDownToDismiss, videoZoom > 1.02f) {
+                if (videoZoom > 1.02f) return@pointerInput
                 var swipeUpAccumulated = 0f
                 var detailsFired = false
                 detectVerticalDragGestures(
@@ -433,9 +497,10 @@ fun VideoPlayerPage(
                 )
             }
             .graphicsLayer {
-                scaleX = dismissScale
-                scaleY = dismissScale
-                translationY = dismissOffsetY.value
+                scaleX = dismissScale * videoZoom
+                scaleY = dismissScale * videoZoom
+                translationX = videoPan.x
+                translationY = dismissOffsetY.value + videoPan.y
             }
             .pointerInput(item.id, exoPlayer) {
                 detectTapGestures(
@@ -501,6 +566,36 @@ fun VideoPlayerPage(
                 strokeWidth = 2.5.dp,
                 modifier = Modifier.size(40.dp)
             )
+        }
+
+        // Pinch-to-zoom indicator + 1-tap reset pill
+        AnimatedVisibility(
+            visible = isActivePage && videoZoom > 1.05f,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .statusBarsPadding()
+                .padding(top = 62.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(50))
+                    .background(Color.Black.copy(alpha = 0.68f))
+                    .clickable {
+                        videoZoom = 1f
+                        videoPan = Offset.Zero
+                        onZoomStateChanged(false)
+                    }
+                    .padding(horizontal = 14.dp, vertical = 6.dp)
+            ) {
+                Text(
+                    text = String.format(java.util.Locale.US, "%.1f× · Tap to reset", videoZoom),
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
         }
 
         // Double-tap ±5s skip indicator overlay

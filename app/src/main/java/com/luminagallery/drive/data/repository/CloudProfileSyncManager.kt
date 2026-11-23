@@ -1,5 +1,7 @@
 package com.luminagallery.drive.data.repository
 
+import android.content.Context
+import android.net.Uri
 import androidx.compose.runtime.Immutable
 import androidx.room.withTransaction
 import com.luminagallery.drive.data.local.GalleryDatabase
@@ -7,8 +9,12 @@ import com.luminagallery.drive.data.local.LocalMediaRepository
 import com.luminagallery.drive.data.local.PreferencesManager
 import com.luminagallery.drive.data.local.entity.AlbumCollectionEntity
 import com.luminagallery.drive.data.local.entity.AlbumLayoutEntity
+import com.luminagallery.drive.data.local.entity.AlbumViewPrefEntity
+import com.luminagallery.drive.data.local.entity.CustomAlbumCoverEntity
 import com.luminagallery.drive.data.local.entity.FavoriteItemEntity
+import com.luminagallery.drive.data.local.entity.FavoriteStoryEntity
 import com.luminagallery.drive.data.local.entity.HiddenAlbumEntity
+import com.luminagallery.drive.data.local.entity.MediaAnnotationEntity
 import com.luminagallery.drive.data.local.entity.PinnedRootEntity
 import com.luminagallery.drive.data.remote.DriveConstants
 import com.luminagallery.drive.data.remote.NetworkMonitor
@@ -18,6 +24,7 @@ import com.luminagallery.drive.domain.model.AlbumGridItem
 import com.luminagallery.drive.domain.model.AlbumSortMode
 import com.luminagallery.drive.domain.model.DriveFolder
 import com.luminagallery.drive.domain.model.MainTab
+import com.luminagallery.drive.domain.model.MediaItem
 import com.luminagallery.drive.domain.model.ThemeMode
 import com.luminagallery.drive.domain.model.UserPreferences
 import kotlinx.coroutines.CoroutineScope
@@ -63,7 +70,11 @@ data class CloudProfileSnapshot(
     val collections: List<CloudAlbumCollection> = emptyList(),
     val layouts: List<CloudAlbumLayout> = emptyList(),
     val hiddenAlbums: List<CloudHiddenAlbum> = emptyList(),
-    val driveFavoriteItemIds: List<String> = emptyList()
+    val driveFavoriteItemIds: List<String> = emptyList(),
+    val favoriteStoryIds: List<String> = emptyList(),
+    val customAlbumCovers: List<CloudCustomAlbumCover> = emptyList(),
+    val mediaAnnotations: List<CloudMediaAnnotation> = emptyList(),
+    val albumViewPrefs: List<CloudAlbumViewPref> = emptyList()
 ) {
     /**
      * Canonical SHA-256 fingerprint of all meaningful profile data (excluding `updatedAtEpochMs`
@@ -81,7 +92,11 @@ data class CloudProfileSnapshot(
                 .sortedBy { it.id },
             layouts = layouts.sortedBy { it.itemId },
             hiddenAlbums = hiddenAlbums.sortedBy { it.albumId },
-            driveFavoriteItemIds = driveFavoriteItemIds.distinct().sorted()
+            driveFavoriteItemIds = driveFavoriteItemIds.distinct().sorted(),
+            favoriteStoryIds = favoriteStoryIds.distinct().sorted(),
+            customAlbumCovers = customAlbumCovers.sortedBy { it.albumId },
+            mediaAnnotations = mediaAnnotations.sortedBy { it.itemId },
+            albumViewPrefs = albumViewPrefs.sortedBy { it.albumId }
         )
         val encoded = json.encodeToString(canonical).toByteArray(Charsets.UTF_8)
         val digest = MessageDigest.getInstance("SHA-256").digest(encoded)
@@ -89,7 +104,7 @@ data class CloudProfileSnapshot(
     }
 
     companion object {
-        const val CURRENT_SCHEMA_VERSION = 1
+        const val CURRENT_SCHEMA_VERSION = 2
     }
 }
 
@@ -114,7 +129,9 @@ data class CloudPreferencesPayload(
     val swipeDownToDismiss: Boolean = true,
     val prefetchAdjacentMedia: Boolean = true,
     val wifiOnlyHighRes: Boolean = true,
-    val autoCheckUpdates: Boolean = true
+    val autoCheckUpdates: Boolean = true,
+    val stripLocationOnShare: Boolean = false,
+    val lockHiddenAlbums: Boolean = false
 )
 
 @Serializable
@@ -152,9 +169,48 @@ data class CloudHiddenAlbum(
 )
 
 @Serializable
+data class CloudCustomAlbumCover(
+    val albumId: String,
+    val isAlbumLocal: Boolean = false,
+    val albumRelativePath: String? = null,
+    val albumFolderName: String? = null,
+    val coverItemId: String,
+    val coverIsLocal: Boolean = false,
+    val coverFileName: String? = null,
+    val coverRelativePath: String? = null,
+    val coverThumbnailLink: String? = null,
+    val coverIsVideo: Boolean = false,
+    val coverSizeBytes: Long = 0L
+)
+
+@Serializable
+data class CloudMediaAnnotation(
+    val itemId: String,
+    val isLocal: Boolean = false,
+    val localFileName: String? = null,
+    val localRelativePath: String? = null,
+    val localSizeBytes: Long = 0L,
+    val tagsCsv: String = "",
+    val note: String = ""
+)
+
+@Serializable
+data class CloudAlbumViewPref(
+    val albumId: String,
+    val isLocal: Boolean = false,
+    val localRelativePath: String? = null,
+    val localFolderName: String? = null,
+    val sortName: String,
+    val groupByName: String
+)
+
+@Serializable
 data class PendingLocalCloudRules(
     val layouts: List<CloudAlbumLayout> = emptyList(),
-    val hiddenAlbums: List<CloudHiddenAlbum> = emptyList()
+    val hiddenAlbums: List<CloudHiddenAlbum> = emptyList(),
+    val customAlbumCovers: List<CloudCustomAlbumCover> = emptyList(),
+    val mediaAnnotations: List<CloudMediaAnnotation> = emptyList(),
+    val albumViewPrefs: List<CloudAlbumViewPref> = emptyList()
 )
 
 @Immutable
@@ -221,6 +277,43 @@ object LocalAlbumCloudMatcher {
             }
         }
         return null
+    }
+
+    /**
+     * Matches a saved local photo/video (for custom album covers or tags/notes) across phones:
+     *  1. Exact MediaStore ID
+     *  2. Normalized relativePath + case-insensitive filename (+ sizeBytes if available)
+     *  3. Unique case-insensitive filename + sizeBytes match on the current device
+     */
+    fun resolveTargetLocalMediaItem(
+        savedItemId: String,
+        savedFileName: String?,
+        savedRelativePath: String?,
+        savedSizeBytes: Long,
+        localMedia: List<MediaItem>
+    ): MediaItem? {
+        if (localMedia.isEmpty()) return null
+        localMedia.firstOrNull { it.id == savedItemId }?.let { return it }
+
+        val targetName = savedFileName?.trim()?.lowercase()?.takeIf { it.isNotBlank() } ?: return null
+        val targetPath = normalizeRelativePath(savedRelativePath)
+
+        if (targetPath != null) {
+            val pathAndNameMatches = localMedia.filter { item ->
+                item.name.trim().lowercase() == targetName &&
+                    normalizeRelativePath(item.storagePath ?: item.relativePath) == targetPath
+            }
+            if (pathAndNameMatches.size == 1) return pathAndNameMatches.first()
+            if (pathAndNameMatches.size > 1 && savedSizeBytes > 0L) {
+                pathAndNameMatches.firstOrNull { it.sizeBytes == savedSizeBytes }?.let { return it }
+            }
+        }
+
+        val nameMatches = localMedia.filter { item ->
+            item.name.trim().lowercase() == targetName &&
+                (savedSizeBytes <= 0L || item.sizeBytes == savedSizeBytes)
+        }
+        return if (nameMatches.size == 1) nameMatches.first() else null
     }
 }
 
@@ -437,6 +530,33 @@ class CloudProfileSyncManager(
         }
     }
 
+    /** Exports the complete profile (settings, Drive links, nested albums, covers, tags) to a local JSON file. */
+    suspend fun exportProfileToUri(context: Context, uri: Uri): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val snapshot = buildLocalSnapshot()
+                val raw = json.encodeToString(snapshot)
+                context.contentResolver.openOutputStream(uri)?.use { out ->
+                    out.write(raw.toByteArray(Charsets.UTF_8))
+                } ?: throw IOException("Unable to open destination file for export")
+                Unit
+            }
+        }
+
+    /** Imports a previously exported local JSON backup file and applies it across Room & DataStore. */
+    suspend fun importProfileFromUri(context: Context, uri: Uri): Result<CloudProfileRestoreSummary> =
+        withContext(Dispatchers.IO) {
+            syncMutex.withLock {
+                runCatching {
+                    val raw = context.contentResolver.openInputStream(uri)?.use { input ->
+                        input.bufferedReader(Charsets.UTF_8).readText()
+                    } ?: throw IOException("Unable to read selected backup file")
+                    val snapshot = json.decodeFromString<CloudProfileSnapshot>(raw)
+                    applySnapshotLocally(snapshot)
+                }
+            }
+        }
+
     private suspend fun syncIfOnlineSilently() {
         if (!credentialStore.isGoogleSignInActive() || !networkMonitor.networkState.value.isOnline) return
         val gen = sessionGeneration.get()
@@ -524,8 +644,14 @@ class CloudProfileSyncManager(
                 collectionDao.observeAllLayouts(),
                 combine(
                     extrasDao.observeHiddenAlbumIds(),
-                    extrasDao.observeFavoriteItemIds()
-                ) { hidden, favs -> hidden to favs }
+                    extrasDao.observeFavoriteItemIds(),
+                    extrasDao.observeFavoriteStoryIds(),
+                    extrasDao.observeCustomAlbumCovers(),
+                    combine(
+                        extrasDao.observeAllAnnotations(),
+                        extrasDao.observeAllAlbumViewPrefs()
+                    ) { anns, viewPrefs -> anns to viewPrefs }
+                ) { _, _, _, _, _ -> Unit }
             ) { _, _, _, _, _ -> Unit }
 
             changeTrigger
@@ -636,7 +762,12 @@ class CloudProfileSyncManager(
                     val pending = runCatching {
                         json.decodeFromString<PendingLocalCloudRules>(rawPending)
                     }.getOrNull() ?: return@collect
-                    if (pending.layouts.isEmpty() && pending.hiddenAlbums.isEmpty()) return@collect
+                    if (pending.layouts.isEmpty() &&
+                        pending.hiddenAlbums.isEmpty() &&
+                        pending.customAlbumCovers.isEmpty() &&
+                        pending.mediaAnnotations.isEmpty() &&
+                        pending.albumViewPrefs.isEmpty()
+                    ) return@collect
 
                     reconcilePendingLocalRules(pending, localAlbums)
                 }
@@ -650,6 +781,10 @@ class CloudProfileSyncManager(
         val existingCollectionIds = collectionDao.getAllCollections().mapTo(HashSet()) { it.id }
         val existingLayoutIds = collectionDao.getAllLayouts().mapTo(HashSet()) { it.itemId }
         val existingHiddenIds = extrasDao.getAllHiddenAlbumIds().toHashSet()
+        val existingCoverAlbumIds = extrasDao.getAllCustomAlbumCovers().mapTo(HashSet()) { it.albumId }
+        val existingAnnotationIds = extrasDao.getAllAnnotations().mapTo(HashSet()) { it.itemId }
+        val existingViewPrefIds = extrasDao.getAllAlbumViewPrefs().mapTo(HashSet()) { it.albumId }
+        val localMedia = localMediaRepository.getCachedAllMedia()
 
         val layoutsToInsert = mutableListOf<AlbumLayoutEntity>()
         for (rule in pending.layouts) {
@@ -689,11 +824,111 @@ class CloudProfileSyncManager(
             }
         }
 
-        if (layoutsToInsert.isNotEmpty() || hiddenToInsert.isNotEmpty()) {
+        val coversToInsert = mutableListOf<CustomAlbumCoverEntity>()
+        for (rule in pending.customAlbumCovers) {
+            val targetAlbumId = if (rule.isAlbumLocal) {
+                LocalAlbumCloudMatcher.resolveTargetBucketId(
+                    savedBucketId = rule.albumId,
+                    savedRelativePath = rule.albumRelativePath,
+                    savedFolderName = rule.albumFolderName,
+                    localAlbums = localAlbums
+                ) ?: continue
+            } else {
+                rule.albumId
+            }
+            if (targetAlbumId in existingCoverAlbumIds) continue
+            if (rule.coverIsLocal) {
+                val matchedMedia = LocalAlbumCloudMatcher.resolveTargetLocalMediaItem(
+                    savedItemId = rule.coverItemId,
+                    savedFileName = rule.coverFileName,
+                    savedRelativePath = rule.coverRelativePath,
+                    savedSizeBytes = rule.coverSizeBytes,
+                    localMedia = localMedia
+                ) ?: continue
+                coversToInsert.add(
+                    CustomAlbumCoverEntity(
+                        albumId = targetAlbumId,
+                        coverItemId = matchedMedia.id,
+                        coverThumbnailLink = matchedMedia.localContentUri,
+                        isLocal = true,
+                        isVideo = matchedMedia.isVideo,
+                        sizeBytes = matchedMedia.sizeBytes,
+                        updatedAtEpochMs = now
+                    )
+                )
+                existingCoverAlbumIds.add(targetAlbumId)
+            } else {
+                coversToInsert.add(
+                    CustomAlbumCoverEntity(
+                        albumId = targetAlbumId,
+                        coverItemId = rule.coverItemId,
+                        coverThumbnailLink = rule.coverThumbnailLink,
+                        isLocal = false,
+                        isVideo = rule.coverIsVideo,
+                        sizeBytes = rule.coverSizeBytes,
+                        updatedAtEpochMs = now
+                    )
+                )
+                existingCoverAlbumIds.add(targetAlbumId)
+            }
+        }
+
+        val annotationsToInsert = mutableListOf<MediaAnnotationEntity>()
+        for (rule in pending.mediaAnnotations) {
+            val matchedMedia = LocalAlbumCloudMatcher.resolveTargetLocalMediaItem(
+                savedItemId = rule.itemId,
+                savedFileName = rule.localFileName,
+                savedRelativePath = rule.localRelativePath,
+                savedSizeBytes = rule.localSizeBytes,
+                localMedia = localMedia
+            ) ?: continue
+            if (matchedMedia.id !in existingAnnotationIds) {
+                annotationsToInsert.add(
+                    MediaAnnotationEntity(
+                        itemId = matchedMedia.id,
+                        tagsCsv = rule.tagsCsv,
+                        note = rule.note,
+                        updatedAtEpochMs = now
+                    )
+                )
+                existingAnnotationIds.add(matchedMedia.id)
+            }
+        }
+
+        val viewPrefsToInsert = mutableListOf<AlbumViewPrefEntity>()
+        for (rule in pending.albumViewPrefs) {
+            val matchedBucket = LocalAlbumCloudMatcher.resolveTargetBucketId(
+                savedBucketId = rule.albumId,
+                savedRelativePath = rule.localRelativePath,
+                savedFolderName = rule.localFolderName,
+                localAlbums = localAlbums
+            ) ?: continue
+            if (matchedBucket !in existingViewPrefIds) {
+                viewPrefsToInsert.add(
+                    AlbumViewPrefEntity(
+                        albumId = matchedBucket,
+                        sortName = rule.sortName,
+                        groupByName = rule.groupByName,
+                        updatedAtEpochMs = now
+                    )
+                )
+                existingViewPrefIds.add(matchedBucket)
+            }
+        }
+
+        if (layoutsToInsert.isNotEmpty() ||
+            hiddenToInsert.isNotEmpty() ||
+            coversToInsert.isNotEmpty() ||
+            annotationsToInsert.isNotEmpty() ||
+            viewPrefsToInsert.isNotEmpty()
+        ) {
             val wasClean = !preferencesManager.getCloudProfileDirty()
             database.withTransaction {
                 if (layoutsToInsert.isNotEmpty()) collectionDao.upsertLayouts(layoutsToInsert)
                 if (hiddenToInsert.isNotEmpty()) extrasDao.upsertHiddenAlbums(hiddenToInsert)
+                if (coversToInsert.isNotEmpty()) extrasDao.upsertCustomAlbumCovers(coversToInsert)
+                if (annotationsToInsert.isNotEmpty()) extrasDao.upsertAnnotations(annotationsToInsert)
+                if (viewPrefsToInsert.isNotEmpty()) extrasDao.upsertAlbumViewPrefs(viewPrefsToInsert)
             }
             if (wasClean) {
                 lastSyncedFingerprint = runCatching {
@@ -814,6 +1049,54 @@ class CloudProfileSyncManager(
         }
 
         val driveFavs = favIds.filterNot { it.startsWith(LocalMediaRepository.LOCAL_ITEM_PREFIX) }
+        val favStories = extrasDao.getAllFavoriteStoryIds()
+        val localMediaById = localMediaRepository.getCachedAllMedia().associateBy { it.id }
+
+        val cloudCovers = extrasDao.getAllCustomAlbumCovers().map { cover ->
+            val albumIsLocal = LocalMediaRepository.isLocalFolderId(cover.albumId)
+            val albumMeta = if (albumIsLocal) localById[cover.albumId] else null
+            val mediaMeta = if (cover.isLocal) localMediaById[cover.coverItemId] else null
+            CloudCustomAlbumCover(
+                albumId = cover.albumId,
+                isAlbumLocal = albumIsLocal,
+                albumRelativePath = albumMeta?.relativePath,
+                albumFolderName = albumMeta?.name,
+                coverItemId = cover.coverItemId,
+                coverIsLocal = cover.isLocal,
+                coverFileName = mediaMeta?.name,
+                coverRelativePath = mediaMeta?.storagePath ?: mediaMeta?.relativePath,
+                coverThumbnailLink = if (cover.isLocal) null else cover.coverThumbnailLink,
+                coverIsVideo = cover.isVideo,
+                coverSizeBytes = cover.sizeBytes
+            )
+        }
+
+        val cloudAnnotations = extrasDao.getAllAnnotations().map { ann ->
+            val isLocal = ann.itemId.startsWith(LocalMediaRepository.LOCAL_ITEM_PREFIX)
+            val mediaMeta = if (isLocal) localMediaById[ann.itemId] else null
+            CloudMediaAnnotation(
+                itemId = ann.itemId,
+                isLocal = isLocal,
+                localFileName = mediaMeta?.name,
+                localRelativePath = mediaMeta?.storagePath ?: mediaMeta?.relativePath,
+                localSizeBytes = mediaMeta?.sizeBytes ?: 0L,
+                tagsCsv = ann.tagsCsv,
+                note = ann.note
+            )
+        }
+
+        val cloudViewPrefs = extrasDao.getAllAlbumViewPrefs().map { pref ->
+            val isLocal = LocalMediaRepository.isLocalFolderId(pref.albumId)
+            val albumMeta = if (isLocal) localById[pref.albumId] else null
+            CloudAlbumViewPref(
+                albumId = pref.albumId,
+                isLocal = isLocal,
+                localRelativePath = albumMeta?.relativePath,
+                localFolderName = albumMeta?.name,
+                sortName = pref.sortName,
+                groupByName = pref.groupByName
+            )
+        }
 
         return CloudProfileSnapshot(
             schemaVersion = CloudProfileSnapshot.CURRENT_SCHEMA_VERSION,
@@ -837,7 +1120,11 @@ class CloudProfileSyncManager(
             },
             layouts = cloudLayouts,
             hiddenAlbums = cloudHidden,
-            driveFavoriteItemIds = driveFavs
+            driveFavoriteItemIds = driveFavs,
+            favoriteStoryIds = favStories,
+            customAlbumCovers = cloudCovers,
+            mediaAnnotations = cloudAnnotations,
+            albumViewPrefs = cloudViewPrefs
         )
     }
 
@@ -849,12 +1136,16 @@ class CloudProfileSyncManager(
         runCatching { onPreferencesRestored(restoredPrefs) }
 
         val localAlbums = getCurrentLocalAlbums()
+        val localMedia = localMediaRepository.getCachedAllMedia()
         val now = System.currentTimeMillis()
         var restoredRootsCount = 0
         var matchedLocalCount = 0
 
         val localLayoutRules = mutableListOf<CloudAlbumLayout>()
         val localHiddenRules = mutableListOf<CloudHiddenAlbum>()
+        val localCoverRules = mutableListOf<CloudCustomAlbumCover>()
+        val localAnnotationRules = mutableListOf<CloudMediaAnnotation>()
+        val localViewPrefRules = mutableListOf<CloudAlbumViewPref>()
 
         database.withTransaction {
             // 2. Authoritatively sync pinned Google Drive album links (propagates unpins too)
@@ -955,12 +1246,148 @@ class CloudProfileSyncManager(
                     }
                 )
             }
+
+            // 6. Sync favorited Stories
+            extrasDao.clearAllFavoriteStories()
+            if (snapshot.favoriteStoryIds.isNotEmpty()) {
+                extrasDao.upsertFavoriteStories(
+                    snapshot.favoriteStoryIds.map { id -> FavoriteStoryEntity(id, now) }
+                )
+            }
+
+            // 7. Sync custom album covers (Drive directly + local matched by path/filename)
+            extrasDao.clearAllCustomAlbumCovers()
+            val coversToUpsert = mutableListOf<CustomAlbumCoverEntity>()
+            for (cover in snapshot.customAlbumCovers) {
+                if (cover.isAlbumLocal || cover.coverIsLocal) {
+                    localCoverRules.add(cover)
+                }
+                val targetAlbumId = if (cover.isAlbumLocal) {
+                    LocalAlbumCloudMatcher.resolveTargetBucketId(
+                        savedBucketId = cover.albumId,
+                        savedRelativePath = cover.albumRelativePath,
+                        savedFolderName = cover.albumFolderName,
+                        localAlbums = localAlbums
+                    ) ?: continue
+                } else {
+                    cover.albumId
+                }
+                if (cover.coverIsLocal) {
+                    val matchedMedia = LocalAlbumCloudMatcher.resolveTargetLocalMediaItem(
+                        savedItemId = cover.coverItemId,
+                        savedFileName = cover.coverFileName,
+                        savedRelativePath = cover.coverRelativePath,
+                        savedSizeBytes = cover.coverSizeBytes,
+                        localMedia = localMedia
+                    ) ?: continue
+                    coversToUpsert.add(
+                        CustomAlbumCoverEntity(
+                            albumId = targetAlbumId,
+                            coverItemId = matchedMedia.id,
+                            coverThumbnailLink = matchedMedia.localContentUri,
+                            isLocal = true,
+                            isVideo = matchedMedia.isVideo,
+                            sizeBytes = matchedMedia.sizeBytes,
+                            updatedAtEpochMs = now
+                        )
+                    )
+                } else {
+                    coversToUpsert.add(
+                        CustomAlbumCoverEntity(
+                            albumId = targetAlbumId,
+                            coverItemId = cover.coverItemId,
+                            coverThumbnailLink = cover.coverThumbnailLink,
+                            isLocal = false,
+                            isVideo = cover.coverIsVideo,
+                            sizeBytes = cover.coverSizeBytes,
+                            updatedAtEpochMs = now
+                        )
+                    )
+                }
+            }
+            if (coversToUpsert.isNotEmpty()) {
+                extrasDao.upsertCustomAlbumCovers(coversToUpsert)
+            }
+
+            // 8. Sync photo tags & notes (Drive directly + local matched by path/name/size)
+            extrasDao.clearAllAnnotations()
+            val annotationsToUpsert = mutableListOf<MediaAnnotationEntity>()
+            for (ann in snapshot.mediaAnnotations) {
+                if (ann.isLocal || ann.itemId.startsWith(LocalMediaRepository.LOCAL_ITEM_PREFIX)) {
+                    localAnnotationRules.add(ann)
+                    val matchedMedia = LocalAlbumCloudMatcher.resolveTargetLocalMediaItem(
+                        savedItemId = ann.itemId,
+                        savedFileName = ann.localFileName,
+                        savedRelativePath = ann.localRelativePath,
+                        savedSizeBytes = ann.localSizeBytes,
+                        localMedia = localMedia
+                    ) ?: continue
+                    annotationsToUpsert.add(
+                        MediaAnnotationEntity(
+                            itemId = matchedMedia.id,
+                            tagsCsv = ann.tagsCsv,
+                            note = ann.note,
+                            updatedAtEpochMs = now
+                        )
+                    )
+                } else {
+                    annotationsToUpsert.add(
+                        MediaAnnotationEntity(
+                            itemId = ann.itemId,
+                            tagsCsv = ann.tagsCsv,
+                            note = ann.note,
+                            updatedAtEpochMs = now
+                        )
+                    )
+                }
+            }
+            if (annotationsToUpsert.isNotEmpty()) {
+                extrasDao.upsertAnnotations(annotationsToUpsert)
+            }
+
+            // 9. Sync per-album sort & grouping preferences
+            extrasDao.clearAllAlbumViewPrefs()
+            val prefsToUpsert = mutableListOf<AlbumViewPrefEntity>()
+            for (pref in snapshot.albumViewPrefs) {
+                if (pref.isLocal || LocalMediaRepository.isLocalFolderId(pref.albumId)) {
+                    localViewPrefRules.add(pref)
+                    val matchedBucket = LocalAlbumCloudMatcher.resolveTargetBucketId(
+                        savedBucketId = pref.albumId,
+                        savedRelativePath = pref.localRelativePath,
+                        savedFolderName = pref.localFolderName,
+                        localAlbums = localAlbums
+                    ) ?: continue
+                    prefsToUpsert.add(
+                        AlbumViewPrefEntity(
+                            albumId = matchedBucket,
+                            sortName = pref.sortName,
+                            groupByName = pref.groupByName,
+                            updatedAtEpochMs = now
+                        )
+                    )
+                } else {
+                    prefsToUpsert.add(
+                        AlbumViewPrefEntity(
+                            albumId = pref.albumId,
+                            sortName = pref.sortName,
+                            groupByName = pref.groupByName,
+                            updatedAtEpochMs = now
+                        )
+                    )
+                }
+            }
+            if (prefsToUpsert.isNotEmpty()) {
+                extrasDao.upsertAlbumViewPrefs(prefsToUpsert)
+            }
         }
 
-        // Persist local DCIM path rules so folders copied later onto a new phone auto-slot into place!
+        // Persist local DCIM path rules so folders/photos copied later onto a new phone auto-slot into place!
         val pendingRules = PendingLocalCloudRules(
             layouts = localLayoutRules,
-            hiddenAlbums = localHiddenRules
+            hiddenAlbums = localHiddenRules,
+            customAlbumCovers = localCoverRules,
+            mediaAnnotations = localAnnotationRules,
+            albumViewPrefs = localViewPrefRules
         )
         preferencesManager.setPendingLocalCloudRulesJson(json.encodeToString(pendingRules))
 
@@ -996,6 +1423,13 @@ class CloudProfileSyncManager(
                 it.itemKind == AlbumGridItem.KIND_LOCAL || LocalMediaRepository.isLocalFolderId(it.itemId)
             },
             hiddenAlbums = snapshot.hiddenAlbums.filter {
+                it.isLocal || LocalMediaRepository.isLocalFolderId(it.albumId)
+            },
+            customAlbumCovers = snapshot.customAlbumCovers.filter { it.isAlbumLocal || it.coverIsLocal },
+            mediaAnnotations = snapshot.mediaAnnotations.filter {
+                it.isLocal || it.itemId.startsWith(LocalMediaRepository.LOCAL_ITEM_PREFIX)
+            },
+            albumViewPrefs = snapshot.albumViewPrefs.filter {
                 it.isLocal || LocalMediaRepository.isLocalFolderId(it.albumId)
             }
         )
@@ -1159,7 +1593,9 @@ private fun UserPreferences.toCloudPayload(): CloudPreferencesPayload =
         swipeDownToDismiss = swipeDownToDismiss,
         prefetchAdjacentMedia = prefetchAdjacentMedia,
         wifiOnlyHighRes = wifiOnlyHighRes,
-        autoCheckUpdates = autoCheckUpdates
+        autoCheckUpdates = autoCheckUpdates,
+        stripLocationOnShare = stripLocationOnShare,
+        lockHiddenAlbums = lockHiddenAlbums
     )
 
 private fun CloudPreferencesPayload.toUserPreferences(current: UserPreferences): UserPreferences =
@@ -1183,5 +1619,7 @@ private fun CloudPreferencesPayload.toUserPreferences(current: UserPreferences):
         swipeDownToDismiss = swipeDownToDismiss,
         prefetchAdjacentMedia = prefetchAdjacentMedia,
         wifiOnlyHighRes = wifiOnlyHighRes,
-        autoCheckUpdates = autoCheckUpdates
+        autoCheckUpdates = autoCheckUpdates,
+        stripLocationOnShare = stripLocationOnShare,
+        lockHiddenAlbums = lockHiddenAlbums
     )

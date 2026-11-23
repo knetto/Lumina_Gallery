@@ -91,6 +91,7 @@ import com.luminagallery.drive.domain.model.CredentialSource
 import com.luminagallery.drive.domain.model.MainTab
 import com.luminagallery.drive.domain.model.ServiceAccountState
 import com.luminagallery.drive.domain.model.ThemeMode
+import com.luminagallery.drive.ui.components.BiometricLockHelper
 import com.luminagallery.drive.ui.components.FormatUtils
 import java.util.Locale
 
@@ -125,6 +126,18 @@ fun SettingsScreen(
     var showSignOutDialog by remember { mutableStateOf(false) }
     var showResetDefaultsDialog by remember { mutableStateOf(false) }
     var showAboutDialog by remember { mutableStateOf(false) }
+
+    val exportBackupLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri != null) viewModel.exportLocalProfileBackup(uri)
+    }
+
+    val importBackupLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) viewModel.importLocalProfileBackup(uri)
+    }
 
     val googleAuthLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
@@ -285,7 +298,7 @@ fun SettingsScreen(
                         subtitle = cloudProfileSubtitle,
                         subtitleAccent = cloudSync.isSyncing || (isGoogleAccount && cloudSync.needsScopeReconsent),
                         enabled = !cloudSync.isSyncing,
-                        showChevron = isGoogleAccount && !cloudSync.needsScopeReconsent && !cloudSync.isSyncing,
+                        showChevron = !cloudSync.isSyncing,
                         trailingContent = if (cloudSync.isSyncing) {
                             {
                                 CircularProgressIndicator(
@@ -296,7 +309,7 @@ fun SettingsScreen(
                             }
                         } else null,
                         onClick = {
-                            if (!isGoogleAccount || cloudSync.needsScopeReconsent) {
+                            if (isGoogleAccount && cloudSync.needsScopeReconsent) {
                                 startGoogleSignIn()
                             } else {
                                 showCloudProfileDialog = true
@@ -327,6 +340,35 @@ fun SettingsScreen(
                         },
                         checked = prefs.wifiOnlyHighRes,
                         onCheckedChange = viewModel::setWifiOnlyHighRes
+                    )
+                }
+            }
+
+            // 1B. PRIVACY & SECURITY
+            item(key = "section_privacy") {
+                OneUiSettingsSection(title = "Privacy & security") {
+                    OneUiToggleRow(
+                        title = "Lock hidden albums",
+                        subtitle = "Require fingerprint, face, or screen PIN to view or unhide private albums (blocks screenshots)",
+                        checked = prefs.lockHiddenAlbums,
+                        onCheckedChange = { wantLocked ->
+                            BiometricLockHelper.authenticate(
+                                context = context,
+                                title = if (wantLocked) "Enable hidden album lock" else "Disable hidden album lock",
+                                subtitle = "Verify your identity to change privacy lock",
+                                onSuccess = { viewModel.setLockHiddenAlbums(wantLocked) },
+                                onFailure = { err -> viewModel.showMessage(err) }
+                            )
+                        }
+                    )
+
+                    OneUiDivider()
+
+                    OneUiToggleRow(
+                        title = "Remove location when sharing",
+                        subtitle = "Strip GPS coordinates and camera EXIF metadata from shared photo copies (originals stay untouched)",
+                        checked = prefs.stripLocationOnShare,
+                        onCheckedChange = viewModel::setStripLocationOnShare
                     )
                 }
             }
@@ -754,17 +796,17 @@ fun SettingsScreen(
             onDismissRequest = { showCloudProfileDialog = false },
             shape = OneUiGroupShape,
             containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-            title = { Text("Google account backup", fontWeight = FontWeight.SemiBold) },
+            title = { Text("Backup & restore", fontWeight = FontWeight.SemiBold) },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
-                        text = "Your Gallery settings, linked Google Drive albums, custom order, and nested album groups (including DCIM folders matched across phones) are saved automatically in your Google Drive's private hidden app data.",
+                        text = "Saves settings, linked Drive albums, nested DCIM groups, custom covers, album sort orders, and tags/notes automatically to Google Drive's private app data — or export/import a local JSON file.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    if (cloudSync.lastSyncedEpochMs > 0L) {
+                    if (isGoogleAccount && cloudSync.lastSyncedEpochMs > 0L) {
                         Text(
-                            text = "Last backup: ${FormatUtils.formatLastSync(cloudSync.lastSyncedEpochMs)}",
+                            text = "Last Google backup: ${FormatUtils.formatLastSync(cloudSync.lastSyncedEpochMs)}",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.primary
                         )
@@ -776,51 +818,119 @@ fun SettingsScreen(
                             color = MaterialTheme.colorScheme.error
                         )
                     }
-                    Surface(
-                        shape = RoundedCornerShape(16.dp),
-                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(16.dp))
-                            .clickable {
-                                showCloudProfileDialog = false
-                                viewModel.backupCloudProfileNow()
+                    if (isGoogleAccount) {
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(16.dp))
+                                .clickable {
+                                    showCloudProfileDialog = false
+                                    viewModel.backupCloudProfileNow()
+                                }
+                        ) {
+                            Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 11.dp)) {
+                                Text(
+                                    text = "Back up to Google now",
+                                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    text = "Upload settings, Drive links, nested groups, covers & tags",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
                             }
-                    ) {
-                        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
-                            Text(
-                                text = "Back up now",
-                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                            Text(
-                                text = "Upload this phone's settings, Drive links & album groups",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(16.dp))
+                                .clickable {
+                                    showCloudProfileDialog = false
+                                    viewModel.restoreCloudProfileNow()
+                                }
+                        ) {
+                            Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 11.dp)) {
+                                Text(
+                                    text = "Restore from Google",
+                                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = "Apply your saved cloud profile & match local DCIM albums",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    } else {
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(16.dp))
+                                .clickable {
+                                    showCloudProfileDialog = false
+                                    startGoogleSignIn()
+                                }
+                        ) {
+                            Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 11.dp)) {
+                                Text(
+                                    text = "Sign in with Google",
+                                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    text = "Enable automatic zero-server Google account sync",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                         }
                     }
-                    Surface(
-                        shape = RoundedCornerShape(16.dp),
-                        color = MaterialTheme.colorScheme.surfaceContainerHighest,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(16.dp))
-                            .clickable {
-                                showCloudProfileDialog = false
-                                viewModel.restoreCloudProfileNow()
-                            }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(14.dp))
+                                .clickable {
+                                    showCloudProfileDialog = false
+                                    exportBackupLauncher.launch("lumina_gallery_backup.json")
+                                }
+                        ) {
                             Text(
-                                text = "Restore from Google",
-                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
-                                color = MaterialTheme.colorScheme.onSurface
+                                text = "Export JSON",
+                                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 12.dp)
                             )
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(14.dp))
+                                .clickable {
+                                    showCloudProfileDialog = false
+                                    importBackupLauncher.launch(arrayOf("application/json", "text/plain", "*/*"))
+                                }
+                        ) {
                             Text(
-                                text = "Apply your saved cloud profile & match local DCIM albums",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                text = "Import JSON",
+                                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 12.dp)
                             )
                         }
                     }

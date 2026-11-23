@@ -78,6 +78,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -121,6 +122,7 @@ import com.luminagallery.drive.domain.model.FolderViewMode
 import com.luminagallery.drive.domain.model.GalleryStory
 import com.luminagallery.drive.domain.model.SidebarAlbumNode
 import com.luminagallery.drive.domain.model.StoryCategory
+import com.luminagallery.drive.ui.components.CollagePdfBottomSheet
 import com.luminagallery.drive.ui.components.CollectionCoverArtwork
 import com.luminagallery.drive.ui.components.ExifMetadataBottomSheet
 import com.luminagallery.drive.ui.components.FastScrollThumb
@@ -136,7 +138,9 @@ import com.luminagallery.drive.LocalGalleryImageLoader
 import com.luminagallery.drive.data.local.LocalMediaRepository
 import com.luminagallery.drive.ui.components.OneUiMotion
 import com.luminagallery.drive.ui.components.PinchZoomGridContainer
+import com.luminagallery.drive.ui.components.SecureWindowEffect
 import com.luminagallery.drive.ui.components.oneUiClickable
+import com.luminagallery.drive.ui.components.photoGridDragSelect
 import com.luminagallery.drive.ui.components.prefetchAlbumThumbnails
 import com.luminagallery.drive.ui.screens.stories.StorySlideshowDialog
 import kotlinx.coroutines.delay
@@ -180,6 +184,37 @@ fun FolderScreen(
     var showSortDialog by remember { mutableStateOf(false) }
     var showSlideshow by remember { mutableStateOf(false) }
     var showMoveCopySheet by remember { mutableStateOf(false) }
+    var showCollagePdfSheet by remember { mutableStateOf(false) }
+    var showRenameAlbumDialog by remember { mutableStateOf(false) }
+    var pendingAlbumRenameName by remember { mutableStateOf<String?>(null) }
+
+    SecureWindowEffect(enabled = uiState.isProtectedPrivateAlbum)
+
+    fun executeAlbumRename(targetName: String) {
+        val itemsToRename = uiState.mediaItems
+        scope.launch {
+            appContainer.localFileOperationsManager.renameLocalAlbum(itemsToRename, targetName)
+                .onSuccess { cleanName ->
+                    appContainer.localMediaRepository.notifyPermissionChanged()
+                    viewModel.onLocalAlbumRenamed(cleanName)
+                }
+                .onFailure { err ->
+                    viewModel.showMessage(err.localizedMessage ?: "Unable to rename album")
+                }
+        }
+    }
+
+    val renameAlbumPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        val target = pendingAlbumRenameName
+        pendingAlbumRenameName = null
+        if (result.resultCode == Activity.RESULT_OK && !target.isNullOrBlank()) {
+            executeAlbumRename(target)
+        } else {
+            viewModel.showMessage("Rename cancelled")
+        }
+    }
 
     BackHandler(enabled = uiState.isSelectionMode) {
         viewModel.clearSelection()
@@ -447,6 +482,15 @@ fun FolderScreen(
                                             )
                                         }
                                     }
+                                    if (uiState.isLocalAlbum && uiState.mediaItems.isNotEmpty()) {
+                                        DropdownMenuItem(
+                                            text = { Text("Rename album") },
+                                            onClick = {
+                                                showOverflowMenu = false
+                                                showRenameAlbumDialog = true
+                                            }
+                                        )
+                                    }
                                     if (uiState.folderId in customCovers) {
                                         DropdownMenuItem(
                                             text = { Text("Reset album cover") },
@@ -649,6 +693,9 @@ fun FolderScreen(
                                         onColumnsChange = viewModel::setGridColumns,
                                         modifier = Modifier.fillMaxSize()
                                     ) {
+                                        val orderedFolderMediaIds = remember(uiState.mediaItems) {
+                                            uiState.mediaItems.map { it.id }
+                                        }
                                         LazyVerticalGrid(
                                             columns = GridCells.Fixed(effectiveColumns),
                                             state = gridState,
@@ -662,54 +709,15 @@ fun FolderScreen(
                                             verticalArrangement = Arrangement.spacedBy(1.5.dp),
                                             modifier = Modifier
                                                 .fillMaxSize()
-                                                .pointerInput(Unit) {
-                                                    var targetSelectState = true
-                                                    var lastDraggedId: String? = null
-                                                    detectDragGesturesAfterLongPress(
-                                                        onDragStart = { startOffset ->
-                                                            val hitId = findMediaIdAtOffset(
-                                                                gridState = gridState,
-                                                                entries = latestEntries,
-                                                                pointerOffset = startOffset
-                                                            )
-                                                            if (hitId != null) {
-                                                                targetSelectState = hitId !in latestSelectedIds
-                                                                lastDraggedId = hitId
-                                                                viewModel.setItemSelected(hitId, targetSelectState)
-                                                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                                            }
-                                                        },
-                                                        onDragEnd = {
-                                                            autoScrollDelta = 0f
-                                                            lastDraggedId = null
-                                                        },
-                                                        onDragCancel = {
-                                                            autoScrollDelta = 0f
-                                                            lastDraggedId = null
-                                                        },
-                                                        onDrag = { change, _ ->
-                                                            change.consume()
-                                                            val pos = change.position
-                                                            val hitId = findMediaIdAtOffset(
-                                                                gridState = gridState,
-                                                                entries = latestEntries,
-                                                                pointerOffset = pos
-                                                            )
-                                                            if (hitId != null && hitId != lastDraggedId) {
-                                                                lastDraggedId = hitId
-                                                                viewModel.setItemSelected(hitId, targetSelectState)
-                                                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                                            }
-                                                            val viewportHeight = size.height.toFloat()
-                                                            val hotZone = viewportHeight * 0.14f
-                                                            autoScrollDelta = when {
-                                                                pos.y > viewportHeight - hotZone -> 24f
-                                                                pos.y < hotZone -> -24f
-                                                                else -> 0f
-                                                            }
-                                                        }
-                                                    )
-                                                }
+                                                .photoGridDragSelect(
+                                                    gridState = gridState,
+                                                    orderedItemIds = orderedFolderMediaIds,
+                                                    keyToItemId = { key ->
+                                                        (key as? String)?.takeIf { it.startsWith("cell_") }?.removePrefix("cell_")
+                                                    },
+                                                    selectedIds = uiState.selectedIds,
+                                                    onSetItemSelected = viewModel::setItemSelected
+                                                )
                                         ) {
                                             items(
                                                 items = uiState.gridEntries,
@@ -893,6 +901,9 @@ fun FolderScreen(
                 onMoveCopyLocal = if (uiState.isLocalAlbum && selectedMediaItems.isNotEmpty()) {
                     { showMoveCopySheet = true }
                 } else null,
+                onCreateCollagePdf = if (comparableIds.isNotEmpty()) {
+                    { showCollagePdfSheet = true }
+                } else null,
                 onInfo = viewModel::openSelectedInfo,
                 onClearSelection = viewModel::clearSelection,
                 modifier = Modifier.align(Alignment.BottomCenter)
@@ -915,6 +926,65 @@ fun FolderScreen(
                 }
             )
         }
+    }
+
+    if (showCollagePdfSheet) {
+        val photosForCreation = remember(uiState.mediaItems, uiState.selectedIds) {
+            uiState.mediaItems.filter { it.id in uiState.selectedIds && !it.isVideo }
+        }
+        if (photosForCreation.isNotEmpty()) {
+            CollagePdfBottomSheet(
+                items = photosForCreation,
+                onDismiss = { showCollagePdfSheet = false },
+                onCompleted = { msg ->
+                    showCollagePdfSheet = false
+                    viewModel.clearSelection()
+                    viewModel.showMessage(msg)
+                }
+            )
+        }
+    }
+
+    if (showRenameAlbumDialog && uiState.isLocalAlbum) {
+        var newAlbumName by remember(uiState.folderName) { mutableStateOf(uiState.folderName) }
+        AlertDialog(
+            onDismissRequest = { showRenameAlbumDialog = false },
+            containerColor = Color(0xFF232326),
+            shape = RoundedCornerShape(26.dp),
+            title = { Text("Rename local album") },
+            text = {
+                OutlinedTextField(
+                    value = newAlbumName,
+                    onValueChange = { newAlbumName = it },
+                    label = { Text("Folder name") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = newAlbumName.isNotBlank() && newAlbumName.trim() != uiState.folderName,
+                    onClick = {
+                        val trimmed = newAlbumName.trim()
+                        showRenameAlbumDialog = false
+                        val sender = appContainer.localFileOperationsManager
+                            .buildWritePermissionSender(uiState.mediaItems)
+                        if (sender != null) {
+                            pendingAlbumRenameName = trimmed
+                            renameAlbumPermissionLauncher.launch(
+                                IntentSenderRequest.Builder(sender).build()
+                            )
+                        } else {
+                            executeAlbumRename(trimmed)
+                        }
+                    }
+                ) { Text("Rename", fontWeight = FontWeight.SemiBold) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRenameAlbumDialog = false }) { Text("Cancel") }
+            }
+        )
     }
 
     // Filter Dialog

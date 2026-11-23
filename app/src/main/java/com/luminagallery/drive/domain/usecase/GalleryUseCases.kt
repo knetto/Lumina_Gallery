@@ -39,12 +39,18 @@ class ManageRootsUseCase(
 }
 
 class ExportMediaUseCase(
-    private val exportManager: MediaExportManager
+    private val exportManager: MediaExportManager,
+    private val preferencesManager: com.luminagallery.drive.data.local.PreferencesManager
 ) {
     suspend fun prepareShareUris(
         items: List<MediaItem>,
+        stripLocationOverride: Boolean? = null,
         onProgress: (Int, Int) -> Unit = { _, _ -> }
-    ): Result<List<Uri>> = exportManager.prepareShareUris(items, onProgress)
+    ): Result<List<Uri>> = exportManager.prepareShareUris(
+        items = items,
+        stripLocation = stripLocationOverride ?: preferencesManager.latestPreferences.stripLocationOnShare,
+        onProgress = onProgress
+    )
 
     suspend fun saveToDevice(
         items: List<MediaItem>,

@@ -9,6 +9,7 @@ import android.graphics.ColorMatrixColorFilter
 import android.graphics.ImageDecoder
 import android.graphics.Matrix
 import android.graphics.Paint
+import android.graphics.Path as AndroidPath
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -50,12 +51,17 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.Redo
+import androidx.compose.material.icons.automirrored.rounded.Undo
 import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.BlurOn
 import androidx.compose.material.icons.rounded.Brightness6
+import androidx.compose.material.icons.rounded.Brush
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Compare
 import androidx.compose.material.icons.rounded.Contrast
 import androidx.compose.material.icons.rounded.Crop
+import androidx.compose.material.icons.rounded.Draw
 import androidx.compose.material.icons.rounded.Exposure
 import androidx.compose.material.icons.rounded.Flip
 import androidx.compose.material.icons.rounded.Gradient
@@ -63,15 +69,19 @@ import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Rotate90DegreesCcw
 import androidx.compose.material.icons.rounded.Rotate90DegreesCw
+import androidx.compose.material.icons.rounded.TextFields
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.WbSunny
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -92,10 +102,16 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ColorMatrix
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -116,14 +132,75 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
 import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.sin
 import android.graphics.ColorMatrix as AndroidColorMatrix
 
 private enum class EditorTab(val label: String, val icon: ImageVector) {
     ADJUST("Adjust", Icons.Rounded.Tune),
     FILTERS("Filters", Icons.Rounded.AutoAwesome),
-    CROP("Crop", Icons.Rounded.Crop)
+    CROP("Crop", Icons.Rounded.Crop),
+    MARKUP("Markup", Icons.Rounded.Draw)
+}
+
+private enum class MarkupTool(val label: String, val icon: ImageVector) {
+    PEN("Pen", Icons.Rounded.Draw),
+    HIGHLIGHTER("Marker", Icons.Rounded.Brush),
+    MOSAIC("Mosaic", Icons.Rounded.BlurOn),
+    TEXT("Text", Icons.Rounded.TextFields)
+}
+
+private data class MarkupStroke(
+    val tool: MarkupTool,
+    val colorArgb: Int,
+    val widthNorm: Float,
+    val points: List<Offset>
+)
+
+private data class MarkupTextOverlay(
+    val id: Long,
+    val text: String,
+    val colorArgb: Int,
+    val normX: Float,
+    val normY: Float
+)
+
+private data class EditorSnapshot(
+    val rotationDeg: Int = 0,
+    val straightenDeg: Float = 0f,
+    val flipH: Boolean = false,
+    val flipV: Boolean = false,
+    val cropLeft: Float = 0f,
+    val cropTop: Float = 0f,
+    val cropRight: Float = 1f,
+    val cropBottom: Float = 1f,
+    val activeAspect: CropAspect = CropAspect.FREE,
+    val activeFilter: PhotoFilterPreset = PhotoFilterPreset.ORIGINAL,
+    val filterStrength: Float = 1f,
+    val exposure: Float = 0f,
+    val brightness: Float = 0f,
+    val contrast: Float = 0f,
+    val saturation: Float = 0f,
+    val warmth: Float = 0f,
+    val fade: Float = 0f,
+    val strokes: List<MarkupStroke> = emptyList(),
+    val texts: List<MarkupTextOverlay> = emptyList()
+)
+
+/**
+ * Computes minimum uniform zoom scale needed to keep a rotated rectangle fully inside the image
+ * frame so free-angle straightening never introduces black corner triangles.
+ */
+internal fun computeStraightenFillScale(angleDeg: Float, width: Float, height: Float): Float {
+    if (abs(angleDeg) < 0.05f || width <= 0f || height <= 0f) return 1f
+    val rad = Math.toRadians(abs(angleDeg).toDouble())
+    val c = cos(rad).toFloat()
+    val s = sin(rad).toFloat()
+    val scaleW = c + s * (height / width)
+    val scaleH = c + s * (width / height)
+    return maxOf(scaleW, scaleH).coerceAtLeast(1f)
 }
 
 private enum class CropAspect(val label: String, val ratio: Float?) {
@@ -201,6 +278,7 @@ fun PhotoEditorScreen(
 
     // Transform state
     var rotationDeg by remember { mutableIntStateOf(0) }
+    var straightenDeg by remember { mutableFloatStateOf(0f) }
     var flipH by remember { mutableStateOf(false) }
     var flipV by remember { mutableStateOf(false) }
 
@@ -218,11 +296,93 @@ fun PhotoEditorScreen(
     var warmth by remember { mutableFloatStateOf(0f) }
     var fade by remember { mutableFloatStateOf(0f) }
 
-    val hasAnyEdits = rotationDeg != 0 || flipH || flipV ||
+    // Markup studio state (normalized [0..1] coordinates on the transformed image)
+    var activeMarkupTool by remember { mutableStateOf(MarkupTool.PEN) }
+    var markupColor by remember { mutableStateOf(Color.White) }
+    var markupBrushNorm by remember { mutableFloatStateOf(0.014f) }
+    var markupStrokes by remember { mutableStateOf<List<MarkupStroke>>(emptyList()) }
+    var activeStrokePoints by remember { mutableStateOf<List<Offset>>(emptyList()) }
+    var markupTexts by remember { mutableStateOf<List<MarkupTextOverlay>>(emptyList()) }
+    var showAddTextDialog by remember { mutableStateOf(false) }
+
+    // Undo / Redo history stack (up to 30 snapshots)
+    var undoStack by remember { mutableStateOf<List<EditorSnapshot>>(emptyList()) }
+    var redoStack by remember { mutableStateOf<List<EditorSnapshot>>(emptyList()) }
+
+    fun captureSnapshot(): EditorSnapshot = EditorSnapshot(
+        rotationDeg = rotationDeg,
+        straightenDeg = straightenDeg,
+        flipH = flipH,
+        flipV = flipV,
+        cropLeft = cropLeft,
+        cropTop = cropTop,
+        cropRight = cropRight,
+        cropBottom = cropBottom,
+        activeAspect = activeAspect,
+        activeFilter = activeFilter,
+        filterStrength = filterStrength,
+        exposure = exposure,
+        brightness = brightness,
+        contrast = contrast,
+        saturation = saturation,
+        warmth = warmth,
+        fade = fade,
+        strokes = markupStrokes,
+        texts = markupTexts
+    )
+
+    fun restoreSnapshot(snap: EditorSnapshot) {
+        rotationDeg = snap.rotationDeg
+        straightenDeg = snap.straightenDeg
+        flipH = snap.flipH
+        flipV = snap.flipV
+        cropLeft = snap.cropLeft
+        cropTop = snap.cropTop
+        cropRight = snap.cropRight
+        cropBottom = snap.cropBottom
+        activeAspect = snap.activeAspect
+        activeFilter = snap.activeFilter
+        filterStrength = snap.filterStrength
+        exposure = snap.exposure
+        brightness = snap.brightness
+        contrast = snap.contrast
+        saturation = snap.saturation
+        warmth = snap.warmth
+        fade = snap.fade
+        markupStrokes = snap.strokes
+        markupTexts = snap.texts
+    }
+
+    fun pushUndoCheckpoint() {
+        val snap = captureSnapshot()
+        if (undoStack.lastOrNull() != snap) {
+            undoStack = (undoStack + snap).takeLast(30)
+            redoStack = emptyList()
+        }
+    }
+
+    fun performUndo() {
+        val prev = undoStack.lastOrNull() ?: return
+        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+        redoStack = (redoStack + captureSnapshot()).takeLast(30)
+        undoStack = undoStack.dropLast(1)
+        restoreSnapshot(prev)
+    }
+
+    fun performRedo() {
+        val next = redoStack.lastOrNull() ?: return
+        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+        undoStack = (undoStack + captureSnapshot()).takeLast(30)
+        redoStack = redoStack.dropLast(1)
+        restoreSnapshot(next)
+    }
+
+    val hasAnyEdits = rotationDeg != 0 || abs(straightenDeg) > 0.1f || flipH || flipV ||
         cropLeft > 0.005f || cropTop > 0.005f || cropRight < 0.995f || cropBottom < 0.995f ||
         activeFilter != PhotoFilterPreset.ORIGINAL ||
         abs(exposure) > 0.01f || abs(brightness) > 0.01f || abs(contrast) > 0.01f ||
-        abs(saturation) > 0.01f || abs(warmth) > 0.01f || abs(fade) > 0.01f
+        abs(saturation) > 0.01f || abs(warmth) > 0.01f || abs(fade) > 0.01f ||
+        markupStrokes.isNotEmpty() || markupTexts.isNotEmpty()
 
     // Load source bitmap once
     LaunchedEffect(itemId, sourceUri, isLocal) {
@@ -334,8 +494,10 @@ fun PhotoEditorScreen(
     }
 
     fun resetAll() {
+        pushUndoCheckpoint()
         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
         rotationDeg = 0
+        straightenDeg = 0f
         flipH = false
         flipV = false
         resetCropOnly()
@@ -347,6 +509,8 @@ fun PhotoEditorScreen(
         saturation = 0f
         warmth = 0f
         fade = 0f
+        markupStrokes = emptyList()
+        markupTexts = emptyList()
     }
 
     fun valueForTool(tool: AdjustTool): Float = when (tool) {
@@ -375,25 +539,112 @@ fun PhotoEditorScreen(
         if (isSaving) return
         isSaving = true
         val finalMatrix = buildCombinedColorMatrix()
+        val finalStraighten = straightenDeg
+        val finalStrokes = markupStrokes
+        val finalTexts = markupTexts
         scope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
-                    val leftPx = (cropLeft * bmp.width).roundToInt().coerceIn(0, bmp.width - 1)
-                    val topPx = (cropTop * bmp.height).roundToInt().coerceIn(0, bmp.height - 1)
-                    val wPx = ((cropRight - cropLeft) * bmp.width).roundToInt().coerceIn(1, bmp.width - leftPx)
-                    val hPx = ((cropBottom - cropTop) * bmp.height).roundToInt().coerceIn(1, bmp.height - topPx)
-
-                    val outBmp = Bitmap.createBitmap(wPx, hPx, Bitmap.Config.ARGB_8888)
-                    val canvas = Canvas(outBmp)
-                    val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+                    // 1. Render full transformed image with tone filter + free-angle straighten + markup
+                    val fullCanvasBmp = Bitmap.createBitmap(bmp.width, bmp.height, Bitmap.Config.ARGB_8888)
+                    val fullCanvas = Canvas(fullCanvasBmp)
+                    val tonePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
                         colorFilter = ColorMatrixColorFilter(finalMatrix)
                     }
-                    canvas.drawBitmap(
-                        bmp,
-                        android.graphics.Rect(leftPx, topPx, leftPx + wPx, topPx + hPx),
-                        android.graphics.Rect(0, 0, wPx, hPx),
-                        paint
-                    )
+                    if (abs(finalStraighten) > 0.05f) {
+                        val fillScale = computeStraightenFillScale(
+                            finalStraighten,
+                            bmp.width.toFloat(),
+                            bmp.height.toFloat()
+                        )
+                        fullCanvas.save()
+                        fullCanvas.translate(bmp.width / 2f, bmp.height / 2f)
+                        fullCanvas.rotate(finalStraighten)
+                        fullCanvas.scale(fillScale, fillScale)
+                        fullCanvas.translate(-bmp.width / 2f, -bmp.height / 2f)
+                        fullCanvas.drawBitmap(bmp, 0f, 0f, tonePaint)
+                        fullCanvas.restore()
+                    } else {
+                        fullCanvas.drawBitmap(bmp, 0f, 0f, tonePaint)
+                    }
+
+                    // 2. Bake Markup strokes (Pen, Highlighter, Mosaic pixelation censor) & Text overlays
+                    if (finalStrokes.isNotEmpty() || finalTexts.isNotEmpty()) {
+                        val hasMosaic = finalStrokes.any { it.tool == MarkupTool.MOSAIC }
+                        val mosaicBmp = if (hasMosaic) {
+                            val blockScale = (min(bmp.width, bmp.height) / 36).coerceIn(12, 64)
+                            val tinyW = (bmp.width / blockScale).coerceAtLeast(4)
+                            val tinyH = (bmp.height / blockScale).coerceAtLeast(4)
+                            val tiny = Bitmap.createScaledBitmap(fullCanvasBmp, tinyW, tinyH, true)
+                            Bitmap.createScaledBitmap(tiny, bmp.width, bmp.height, false).also { tiny.recycle() }
+                        } else null
+
+                        try {
+                            val baseMin = min(bmp.width, bmp.height).toFloat()
+                            for (stroke in finalStrokes) {
+                                if (stroke.points.isEmpty()) continue
+                                val path = AndroidPath()
+                                val first = stroke.points.first()
+                                path.moveTo(first.x * bmp.width, first.y * bmp.height)
+                                for (pt in stroke.points.drop(1)) {
+                                    path.lineTo(pt.x * bmp.width, pt.y * bmp.height)
+                                }
+                                val strokePx = (stroke.widthNorm * baseMin).coerceAtLeast(4f)
+                                if (stroke.tool == MarkupTool.MOSAIC && mosaicBmp != null) {
+                                    val mosaicPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                                        style = Paint.Style.STROKE
+                                        strokeWidth = strokePx * 2.2f
+                                        strokeCap = Paint.Cap.ROUND
+                                        strokeJoin = Paint.Join.ROUND
+                                        shader = android.graphics.BitmapShader(
+                                            mosaicBmp,
+                                            android.graphics.Shader.TileMode.CLAMP,
+                                            android.graphics.Shader.TileMode.CLAMP
+                                        )
+                                    }
+                                    fullCanvas.drawPath(path, mosaicPaint)
+                                } else {
+                                    val drawPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                                        style = Paint.Style.STROKE
+                                        color = stroke.colorArgb
+                                        alpha = if (stroke.tool == MarkupTool.HIGHLIGHTER) 115 else 255
+                                        strokeWidth = if (stroke.tool == MarkupTool.HIGHLIGHTER) strokePx * 2.1f else strokePx
+                                        strokeCap = Paint.Cap.ROUND
+                                        strokeJoin = Paint.Join.ROUND
+                                    }
+                                    fullCanvas.drawPath(path, drawPaint)
+                                }
+                            }
+
+                            for (item in finalTexts) {
+                                val textSizePx = (baseMin * 0.055f).coerceIn(28f, 140f)
+                                val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                                    color = item.colorArgb
+                                    textSize = textSizePx
+                                    textAlign = Paint.Align.CENTER
+                                    isFakeBoldText = true
+                                    setShadowLayer(textSizePx * 0.14f, 0f, textSizePx * 0.06f, android.graphics.Color.argb(180, 0, 0, 0))
+                                }
+                                fullCanvas.drawText(
+                                    item.text,
+                                    item.normX * bmp.width,
+                                    item.normY * bmp.height,
+                                    textPaint
+                                )
+                            }
+                        } finally {
+                            mosaicBmp?.recycle()
+                        }
+                    }
+
+                    // 3. Apply crop rect onto the final baked canvas
+                    val leftPx = (cropLeft * fullCanvasBmp.width).roundToInt().coerceIn(0, fullCanvasBmp.width - 1)
+                    val topPx = (cropTop * fullCanvasBmp.height).roundToInt().coerceIn(0, fullCanvasBmp.height - 1)
+                    val wPx = ((cropRight - cropLeft) * fullCanvasBmp.width).roundToInt().coerceIn(1, fullCanvasBmp.width - leftPx)
+                    val hPx = ((cropBottom - cropTop) * fullCanvasBmp.height).roundToInt().coerceIn(1, fullCanvasBmp.height - topPx)
+
+                    val outBmp = Bitmap.createBitmap(fullCanvasBmp, leftPx, topPx, wPx, hPx)
+                    fullCanvasBmp.recycle()
                     try {
                         val stem = displayName.substringBeforeLast('.').take(70).ifBlank { "photo" }
                         val outName = "${stem}_edited_${System.currentTimeMillis() % 100000}.jpg"
@@ -448,66 +699,104 @@ fun PhotoEditorScreen(
                     )
                 }
 
-                // Center: Hold-to-Compare "Original" + Reset pills (shown cleanly only when edited!)
-                AnimatedVisibility(
-                    visible = hasAnyEdits,
-                    enter = fadeIn(tween(180)),
-                    exit = fadeOut(tween(150))
+                // Center: Undo / Redo + Hold-to-Compare "Original" + Reset pills
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Surface(
-                            shape = RoundedCornerShape(50),
-                            color = if (isComparingOriginal) accentColor else Color.White.copy(alpha = 0.11f),
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(50))
-                                .pointerInput(Unit) {
-                                    detectTapGestures(
-                                        onPress = {
-                                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                            isComparingOriginal = true
-                                            tryAwaitRelease()
-                                            isComparingOriginal = false
-                                        }
-                                    )
-                                }
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(5.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Compare,
-                                    contentDescription = "Compare original",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(15.dp)
-                                )
-                                Text(
-                                    text = "Original",
-                                    color = Color.White,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Medium
-                                )
-                            }
-                        }
-
+                    if (undoStack.isNotEmpty() || redoStack.isNotEmpty()) {
                         Box(
                             modifier = Modifier
                                 .size(34.dp)
                                 .clip(CircleShape)
-                                .background(Color.White.copy(alpha = 0.11f))
-                                .clickable(enabled = !isSaving, onClick = ::resetAll),
+                                .background(Color.White.copy(alpha = if (undoStack.isNotEmpty()) 0.12f else 0.05f))
+                                .clickable(enabled = !isSaving && undoStack.isNotEmpty(), onClick = ::performUndo),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
-                                imageVector = Icons.Rounded.Refresh,
-                                contentDescription = "Reset all",
-                                tint = Color.White.copy(alpha = 0.88f),
+                                imageVector = Icons.AutoMirrored.Rounded.Undo,
+                                contentDescription = "Undo",
+                                tint = Color.White.copy(alpha = if (undoStack.isNotEmpty()) 0.92f else 0.30f),
                                 modifier = Modifier.size(18.dp)
                             )
+                        }
+                        Box(
+                            modifier = Modifier
+                                .size(34.dp)
+                                .clip(CircleShape)
+                                .background(Color.White.copy(alpha = if (redoStack.isNotEmpty()) 0.12f else 0.05f))
+                                .clickable(enabled = !isSaving && redoStack.isNotEmpty(), onClick = ::performRedo),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Rounded.Redo,
+                                contentDescription = "Redo",
+                                tint = Color.White.copy(alpha = if (redoStack.isNotEmpty()) 0.92f else 0.30f),
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+
+                    AnimatedVisibility(
+                        visible = hasAnyEdits,
+                        enter = fadeIn(tween(180)),
+                        exit = fadeOut(tween(150))
+                    ) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Surface(
+                                shape = RoundedCornerShape(50),
+                                color = if (isComparingOriginal) accentColor else Color.White.copy(alpha = 0.11f),
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(50))
+                                    .pointerInput(Unit) {
+                                        detectTapGestures(
+                                            onPress = {
+                                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                isComparingOriginal = true
+                                                tryAwaitRelease()
+                                                isComparingOriginal = false
+                                            }
+                                        )
+                                    }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 11.dp, vertical = 7.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Compare,
+                                        contentDescription = "Compare original",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Text(
+                                        text = "Original",
+                                        color = Color.White,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                }
+                            }
+
+                            Box(
+                                modifier = Modifier
+                                    .size(34.dp)
+                                    .clip(CircleShape)
+                                    .background(Color.White.copy(alpha = 0.11f))
+                                    .clickable(enabled = !isSaving, onClick = ::resetAll),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Refresh,
+                                    contentDescription = "Reset all",
+                                    tint = Color.White.copy(alpha = 0.88f),
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
                         }
                     }
                 }
@@ -565,14 +854,200 @@ fun PhotoEditorScreen(
                         val imgRect = remember(viewportSize, bmp.width, bmp.height) {
                             computeFittedRect(viewportSize, bmp.width, bmp.height)
                         }
+                        val liveStraighten = if (isComparingOriginal) 0f else straightenDeg
+                        val liveFillScale = remember(liveStraighten, bmp.width, bmp.height) {
+                            computeStraightenFillScale(liveStraighten, bmp.width.toFloat(), bmp.height.toFloat())
+                        }
+                        val textMeasurer = rememberTextMeasurer()
 
-                        Image(
-                            bitmap = bmp.asImageBitmap(),
-                            contentDescription = displayName,
-                            contentScale = ContentScale.Fit,
-                            colorFilter = composeColorFilter,
-                            modifier = Modifier.fillMaxSize()
-                        )
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .graphicsLayer { clip = true }
+                        ) {
+                            Image(
+                                bitmap = bmp.asImageBitmap(),
+                                contentDescription = displayName,
+                                contentScale = ContentScale.Fit,
+                                colorFilter = composeColorFilter,
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .graphicsLayer {
+                                        rotationZ = liveStraighten
+                                        scaleX = liveFillScale
+                                        scaleY = liveFillScale
+                                    }
+                            )
+
+                            // Live Markup Layer (Pen / Marker / Mosaic preview / Draggable Text overlays)
+                            if (!isComparingOriginal &&
+                                (markupStrokes.isNotEmpty() || activeStrokePoints.isNotEmpty() || markupTexts.isNotEmpty() || activeTab == EditorTab.MARKUP) &&
+                                imgRect.width > 10f && imgRect.height > 10f
+                            ) {
+                                var draggingTextId by remember { mutableStateOf<Long?>(null) }
+                                ComposeCanvas(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .then(
+                                            if (activeTab == EditorTab.MARKUP) {
+                                                Modifier.pointerInput(
+                                                    imgRect,
+                                                    activeMarkupTool,
+                                                    markupColor,
+                                                    markupBrushNorm,
+                                                    markupTexts
+                                                ) {
+                                                    detectDragGestures(
+                                                        onDragStart = { pos ->
+                                                            if (pos.x !in imgRect.left..imgRect.right || pos.y !in imgRect.top..imgRect.bottom) return@detectDragGestures
+                                                            val nx = ((pos.x - imgRect.left) / imgRect.width).coerceIn(0f, 1f)
+                                                            val ny = ((pos.y - imgRect.top) / imgRect.height).coerceIn(0f, 1f)
+                                                            val hitText = markupTexts.lastOrNull { t ->
+                                                                abs(t.normX - nx) < 0.14f && abs(t.normY - ny) < 0.08f
+                                                            }
+                                                            if (hitText != null) {
+                                                                pushUndoCheckpoint()
+                                                                draggingTextId = hitText.id
+                                                            } else if (activeMarkupTool != MarkupTool.TEXT) {
+                                                                activeStrokePoints = listOf(Offset(nx, ny))
+                                                            }
+                                                        },
+                                                        onDragEnd = {
+                                                            if (draggingTextId != null) {
+                                                                draggingTextId = null
+                                                            } else if (activeStrokePoints.isNotEmpty()) {
+                                                                pushUndoCheckpoint()
+                                                                markupStrokes = markupStrokes + MarkupStroke(
+                                                                    tool = activeMarkupTool,
+                                                                    colorArgb = markupColor.toArgb(),
+                                                                    widthNorm = markupBrushNorm,
+                                                                    points = activeStrokePoints
+                                                                )
+                                                                activeStrokePoints = emptyList()
+                                                            }
+                                                        },
+                                                        onDragCancel = {
+                                                            draggingTextId = null
+                                                            activeStrokePoints = emptyList()
+                                                        },
+                                                        onDrag = { change, drag ->
+                                                            change.consume()
+                                                            val textId = draggingTextId
+                                                            if (textId != null) {
+                                                                val dx = drag.x / imgRect.width
+                                                                val dy = drag.y / imgRect.height
+                                                                markupTexts = markupTexts.map { t ->
+                                                                    if (t.id == textId) {
+                                                                        t.copy(
+                                                                            normX = (t.normX + dx).coerceIn(0.05f, 0.95f),
+                                                                            normY = (t.normY + dy).coerceIn(0.05f, 0.95f)
+                                                                        )
+                                                                    } else t
+                                                                }
+                                                            } else if (activeMarkupTool != MarkupTool.TEXT) {
+                                                                val pos = change.position
+                                                                val nx = ((pos.x - imgRect.left) / imgRect.width).coerceIn(0f, 1f)
+                                                                val ny = ((pos.y - imgRect.top) / imgRect.height).coerceIn(0f, 1f)
+                                                                activeStrokePoints = activeStrokePoints + Offset(nx, ny)
+                                                            }
+                                                        }
+                                                    )
+                                                }
+                                            } else Modifier
+                                        )
+                                ) {
+                                    val baseMin = min(imgRect.width, imgRect.height)
+                                    val strokesToDraw = if (activeStrokePoints.isNotEmpty()) {
+                                        markupStrokes + MarkupStroke(
+                                            tool = activeMarkupTool,
+                                            colorArgb = markupColor.toArgb(),
+                                            widthNorm = markupBrushNorm,
+                                            points = activeStrokePoints
+                                        )
+                                    } else markupStrokes
+
+                                    for (stroke in strokesToDraw) {
+                                        if (stroke.points.isEmpty()) continue
+                                        val path = Path().apply {
+                                            val p0 = stroke.points.first()
+                                            moveTo(imgRect.left + p0.x * imgRect.width, imgRect.top + p0.y * imgRect.height)
+                                            for (pt in stroke.points.drop(1)) {
+                                                lineTo(imgRect.left + pt.x * imgRect.width, imgRect.top + pt.y * imgRect.height)
+                                            }
+                                        }
+                                        val widthPx = (stroke.widthNorm * baseMin).coerceAtLeast(3f)
+                                        when (stroke.tool) {
+                                            MarkupTool.MOSAIC -> {
+                                                // Clean semi-opaque pixel-grid censor preview (full mosaic baked on save)
+                                                drawPath(
+                                                    path = path,
+                                                    color = Color(0xCC2C2C32),
+                                                    style = Stroke(
+                                                        width = widthPx * 2.2f,
+                                                        cap = StrokeCap.Round,
+                                                        join = StrokeJoin.Round
+                                                    )
+                                                )
+                                                drawPath(
+                                                    path = path,
+                                                    color = Color(0x66FFFFFF),
+                                                    style = Stroke(
+                                                        width = widthPx * 1.0f,
+                                                        cap = StrokeCap.Round,
+                                                        join = StrokeJoin.Round
+                                                    )
+                                                )
+                                            }
+                                            MarkupTool.HIGHLIGHTER -> {
+                                                drawPath(
+                                                    path = path,
+                                                    color = Color(stroke.colorArgb).copy(alpha = 0.45f),
+                                                    style = Stroke(
+                                                        width = widthPx * 2.1f,
+                                                        cap = StrokeCap.Round,
+                                                        join = StrokeJoin.Round
+                                                    )
+                                                )
+                                            }
+                                            else -> {
+                                                drawPath(
+                                                    path = path,
+                                                    color = Color(stroke.colorArgb),
+                                                    style = Stroke(
+                                                        width = widthPx,
+                                                        cap = StrokeCap.Round,
+                                                        join = StrokeJoin.Round
+                                                    )
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    for (t in markupTexts) {
+                                        val measured = textMeasurer.measure(
+                                            text = t.text,
+                                            style = TextStyle(
+                                                color = Color(t.colorArgb),
+                                                fontSize = 20.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        )
+                                        val cx = imgRect.left + t.normX * imgRect.width - measured.size.width / 2f
+                                        val cy = imgRect.top + t.normY * imgRect.height - measured.size.height / 2f
+                                        drawRoundRect(
+                                            color = Color.Black.copy(alpha = 0.40f),
+                                            topLeft = Offset(cx - 10f, cy - 4f),
+                                            size = Size(measured.size.width + 20f, measured.size.height + 8f),
+                                            cornerRadius = CornerRadius(10f, 10f)
+                                        )
+                                        drawText(
+                                            textLayoutResult = measured,
+                                            topLeft = Offset(cx, cy)
+                                        )
+                                    }
+                                }
+                            }
+                        }
 
                         // Floating "ORIGINAL" pill badge when user holds Compare
                         androidx.compose.animation.AnimatedVisibility(
@@ -627,6 +1102,7 @@ fun PhotoEditorScreen(
                                                     pos.x in l..r && pos.y in t..b -> CropHandle.MOVE
                                                     else -> null
                                                 }
+                                                if (activeHandle != null) pushUndoCheckpoint()
                                             },
                                             onDragEnd = { activeHandle = null },
                                             onDragCancel = { activeHandle = null },
@@ -844,6 +1320,7 @@ fun PhotoEditorScreen(
                                             modifier = Modifier
                                                 .width(66.dp)
                                                 .clickable {
+                                                    pushUndoCheckpoint()
                                                     haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                                     activeFilter = preset
                                                     if (preset != PhotoFilterPreset.ORIGINAL && filterStrength < 0.05f) {
@@ -899,8 +1376,29 @@ fun PhotoEditorScreen(
                         EditorTab.CROP -> {
                             Column(
                                 modifier = Modifier.fillMaxWidth(),
-                                verticalArrangement = Arrangement.spacedBy(12.dp)
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
                             ) {
+                                // Free-angle Straighten Slider (-45° to +45°, auto zoom-to-fill!)
+                                ProRulerSlider(
+                                    label = "Straighten (${String.format(java.util.Locale.US, "%+.1f°", straightenDeg)})",
+                                    value = (straightenDeg / 45f).coerceIn(-1f, 1f),
+                                    minValue = -1f,
+                                    maxValue = 1f,
+                                    accentColor = accentColor,
+                                    onValueChange = { norm ->
+                                        val deg = (norm * 45f).coerceIn(-45f, 45f)
+                                        straightenDeg = if (abs(deg) < 0.6f) 0f else deg
+                                    },
+                                    onDoubleTapReset = {
+                                        pushUndoCheckpoint()
+                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                        straightenDeg = 0f
+                                    },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 20.dp)
+                                )
+
                                 // Clean Circular Transform Buttons
                                 Row(
                                     modifier = Modifier
@@ -913,6 +1411,7 @@ fun PhotoEditorScreen(
                                         label = "Rotate L",
                                         active = false
                                     ) {
+                                        pushUndoCheckpoint()
                                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                         rotationDeg = (rotationDeg + 270) % 360
                                     }
@@ -921,6 +1420,7 @@ fun PhotoEditorScreen(
                                         label = "Rotate R",
                                         active = false
                                     ) {
+                                        pushUndoCheckpoint()
                                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                         rotationDeg = (rotationDeg + 90) % 360
                                     }
@@ -929,6 +1429,7 @@ fun PhotoEditorScreen(
                                         label = "Flip H",
                                         active = flipH
                                     ) {
+                                        pushUndoCheckpoint()
                                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                         flipH = !flipH
                                     }
@@ -937,6 +1438,7 @@ fun PhotoEditorScreen(
                                         label = "Flip V",
                                         active = flipV
                                     ) {
+                                        pushUndoCheckpoint()
                                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                         flipV = !flipV
                                     }
@@ -960,7 +1462,10 @@ fun PhotoEditorScreen(
                                                     shape = RoundedCornerShape(50)
                                                 )
                                                 .clip(RoundedCornerShape(50))
-                                                .clickable { applyAspectRatio(aspect) }
+                                                .clickable {
+                                                    pushUndoCheckpoint()
+                                                    applyAspectRatio(aspect)
+                                                }
                                         ) {
                                             Text(
                                                 text = aspect.label,
@@ -970,6 +1475,101 @@ fun PhotoEditorScreen(
                                                 modifier = Modifier.padding(horizontal = 15.dp, vertical = 7.dp)
                                             )
                                         }
+                                    }
+                                }
+                            }
+                        }
+
+                        EditorTab.MARKUP -> {
+                            val swatches = remember {
+                                listOf(
+                                    Color.White,
+                                    Color.Black,
+                                    Color(0xFFFF4D5E),
+                                    Color(0xFFFFD54F),
+                                    Color(0xFF40C4FF),
+                                    Color(0xFF69F0AE)
+                                )
+                            }
+                            Column(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                // Tool selector row: Pen | Marker | Mosaic Censor | Add Text
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 18.dp),
+                                    horizontalArrangement = Arrangement.SpaceEvenly
+                                ) {
+                                    MarkupTool.entries.forEach { tool ->
+                                        val isToolActive = activeMarkupTool == tool
+                                        StudioTransformButton(
+                                            icon = tool.icon,
+                                            label = tool.label,
+                                            active = isToolActive
+                                        ) {
+                                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                            activeMarkupTool = tool
+                                            if (tool == MarkupTool.TEXT) {
+                                                showAddTextDialog = true
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Color swatches + Brush size + Clear markup
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 20.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                                        swatches.forEach { swatch ->
+                                            val chosen = markupColor == swatch
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(26.dp)
+                                                    .clip(CircleShape)
+                                                    .background(swatch)
+                                                    .border(
+                                                        width = if (chosen) 2.5.dp else 1.dp,
+                                                        color = if (chosen) accentColor else Color.White.copy(alpha = 0.35f),
+                                                        shape = CircleShape
+                                                    )
+                                                    .clickable { markupColor = swatch }
+                                            )
+                                        }
+                                    }
+
+                                    // Brush size toggle pill (S / M / L)
+                                    val sizeLabel = when {
+                                        markupBrushNorm < 0.011f -> "Thin"
+                                        markupBrushNorm < 0.022f -> "Medium"
+                                        else -> "Thick"
+                                    }
+                                    Surface(
+                                        shape = RoundedCornerShape(50),
+                                        color = Color(0xFF22222A),
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(50))
+                                            .clickable {
+                                                markupBrushNorm = when {
+                                                    markupBrushNorm < 0.011f -> 0.016f
+                                                    markupBrushNorm < 0.022f -> 0.030f
+                                                    else -> 0.008f
+                                                }
+                                            }
+                                    ) {
+                                        Text(
+                                            text = "Size: $sizeLabel",
+                                            color = Color.White,
+                                            fontSize = 11.5.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                                        )
                                     }
                                 }
                             }
@@ -1039,6 +1639,45 @@ fun PhotoEditorScreen(
                 .align(Alignment.BottomCenter)
                 .navigationBarsPadding()
                 .padding(bottom = 140.dp)
+        )
+    }
+
+    if (showAddTextDialog) {
+        var textInput by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { showAddTextDialog = false },
+            containerColor = Color(0xFF232328),
+            shape = RoundedCornerShape(24.dp),
+            title = { Text("Add text label", color = Color.White) },
+            text = {
+                OutlinedTextField(
+                    value = textInput,
+                    onValueChange = { textInput = it },
+                    placeholder = { Text("Type caption (drag to move on photo)") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = textInput.isNotBlank(),
+                    onClick = {
+                        pushUndoCheckpoint()
+                        markupTexts = markupTexts + MarkupTextOverlay(
+                            id = System.currentTimeMillis(),
+                            text = textInput.trim(),
+                            colorArgb = markupColor.toArgb(),
+                            normX = 0.5f,
+                            normY = 0.5f
+                        )
+                        showAddTextDialog = false
+                    }
+                ) { Text("Add", fontWeight = FontWeight.SemiBold) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAddTextDialog = false }) { Text("Cancel") }
+            }
         )
     }
 }

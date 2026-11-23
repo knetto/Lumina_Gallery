@@ -73,14 +73,19 @@ fun MoveCopyToAlbumSheet(
 
     val localItems = remember(items) { items.filter { it.isLocal } }
     var isMoveMode by remember { mutableStateOf(initialMoveMode) }
+    var useDcimParent by remember { mutableStateOf(true) }
     var newAlbumName by remember { mutableStateOf("") }
     var isBusy by remember { mutableStateOf(false) }
-    var pendingMoveTarget by remember { mutableStateOf<String?>(null) }
+    var pendingMoveTarget by remember { mutableStateOf<Pair<String, Boolean>?>(null) }
 
-    fun executeMoveNow(targetFolderName: String) {
+    fun executeMoveNow(targetFolderName: String, inDcim: Boolean) {
         isBusy = true
         scope.launch {
-            container.localFileOperationsManager.moveLocalItemsToAlbum(localItems, targetFolderName)
+            container.localFileOperationsManager.moveLocalItemsToAlbum(
+                items = localItems,
+                albumFolderName = targetFolderName,
+                useDcimParent = inDcim
+            )
                 .onSuccess { count ->
                     container.localMediaRepository.notifyPermissionChanged()
                     isBusy = false
@@ -98,14 +103,14 @@ fun MoveCopyToAlbumSheet(
     ) { result ->
         val target = pendingMoveTarget
         pendingMoveTarget = null
-        if (result.resultCode == Activity.RESULT_OK && !target.isNullOrBlank()) {
-            executeMoveNow(target)
+        if (result.resultCode == Activity.RESULT_OK && target != null && target.first.isNotBlank()) {
+            executeMoveNow(target.first, target.second)
         } else {
             onCompleted("Move cancelled")
         }
     }
 
-    fun selectAlbum(targetFolderName: String) {
+    fun selectAlbum(targetFolderName: String, inDcim: Boolean = useDcimParent) {
         if (isBusy || localItems.isEmpty()) return
         val cleanName = targetFolderName.trim()
         if (cleanName.isEmpty()) return
@@ -113,15 +118,19 @@ fun MoveCopyToAlbumSheet(
         if (isMoveMode) {
             val sender = container.localFileOperationsManager.buildWritePermissionSender(localItems)
             if (sender != null) {
-                pendingMoveTarget = cleanName
+                pendingMoveTarget = cleanName to inDcim
                 writePermissionLauncher.launch(IntentSenderRequest.Builder(sender).build())
             } else {
-                executeMoveNow(cleanName)
+                executeMoveNow(cleanName, inDcim)
             }
         } else {
             isBusy = true
             scope.launch {
-                container.localFileOperationsManager.copyLocalItemsToAlbum(localItems, cleanName)
+                container.localFileOperationsManager.copyLocalItemsToAlbum(
+                    items = localItems,
+                    albumFolderName = cleanName,
+                    useDcimParent = inDcim
+                )
                     .onSuccess { count ->
                         container.localMediaRepository.notifyPermissionChanged()
                         isBusy = false
@@ -213,9 +222,39 @@ fun MoveCopyToAlbumSheet(
                 )
                 TextButton(
                     enabled = !isBusy && newAlbumName.isNotBlank(),
-                    onClick = { selectAlbum(newAlbumName) }
+                    onClick = { selectAlbum(newAlbumName, inDcim = useDcimParent) }
                 ) {
                     Text(if (isMoveMode) "Move" else "Copy", fontWeight = FontWeight.SemiBold)
+                }
+            }
+
+            // DCIM vs Pictures parent selector for newly created folders
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = "New folder location:",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                listOf(true to "DCIM/", false to "Pictures/").forEach { (dcim, label) ->
+                    val chosen = useDcimParent == dcim
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = if (chosen) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .clickable(enabled = !isBusy) { useDcimParent = dcim }
+                    ) {
+                        Text(
+                            text = label,
+                            fontSize = 12.sp,
+                            fontWeight = if (chosen) FontWeight.SemiBold else FontWeight.Normal,
+                            color = if (chosen) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                        )
+                    }
                 }
             }
 
@@ -227,11 +266,12 @@ fun MoveCopyToAlbumSheet(
                     .heightIn(max = 300.dp)
             ) {
                 items(localAlbums, key = { it.id }) { album ->
+                    val albumInDcim = album.relativePath?.startsWith("DCIM", ignoreCase = true) == true
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(14.dp))
-                            .clickable(enabled = !isBusy) { selectAlbum(album.name) }
+                            .clickable(enabled = !isBusy) { selectAlbum(album.name, inDcim = albumInDcim) }
                             .padding(horizontal = 8.dp, vertical = 12.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(12.dp)

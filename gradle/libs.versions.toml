@@ -26,6 +26,8 @@ exifinterface = "1.4.2"
 profileinstaller = "1.4.1"
 media3 = "1.11.1"
 maplibre = "13.7.1"
+biometric = "1.1.0"
+mlkitTextRecognition = "16.0.1"
 
 [libraries]
 # AndroidX Core & Lifecycle
@@ -83,6 +85,10 @@ androidx-media3-common = { group = "androidx.media3", name = "media3-common", ve
 
 # MapLibre Native Vector Map SDK (Zero API key with OpenFreeMap)
 maplibre-android-sdk = { group = "org.maplibre.gl", name = "android-sdk", version.ref = "maplibre" }
+
+# Biometric / Device Credential Lock & On-Device ML Kit OCR (100% offline)
+androidx-biometric = { group = "androidx.biometric", name = "biometric", version.ref = "biometric" }
+mlkit-text-recognition = { group = "com.google.mlkit", name = "text-recognition", version.ref = "mlkitTextRecognition" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

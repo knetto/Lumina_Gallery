@@ -71,7 +71,8 @@ class LocalFileOperationsManager(
 
     suspend fun copyLocalItemsToAlbum(
         items: List<MediaItem>,
-        albumFolderName: String
+        albumFolderName: String,
+        useDcimParent: Boolean = false
     ): Result<Int> = withContext(Dispatchers.IO) {
         runCatching {
             val cleanAlbum = sanitizeFolderName(albumFolderName)
@@ -87,7 +88,11 @@ class LocalFileOperationsManager(
                 } else {
                     MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
                 }
-                val baseDir = if (isVideo) Environment.DIRECTORY_MOVIES else Environment.DIRECTORY_PICTURES
+                val baseDir = when {
+                    useDcimParent -> Environment.DIRECTORY_DCIM
+                    isVideo -> Environment.DIRECTORY_MOVIES
+                    else -> Environment.DIRECTORY_PICTURES
+                }
                 val values = ContentValues().apply {
                     put(MediaStore.MediaColumns.DISPLAY_NAME, item.name)
                     put(
@@ -128,11 +133,12 @@ class LocalFileOperationsManager(
 
     suspend fun moveLocalItemsToAlbum(
         items: List<MediaItem>,
-        albumFolderName: String
+        albumFolderName: String,
+        useDcimParent: Boolean = false
     ): Result<Int> = withContext(Dispatchers.IO) {
         runCatching {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-                return@runCatching copyLocalItemsToAlbum(items, albumFolderName).getOrThrow()
+                return@runCatching copyLocalItemsToAlbum(items, albumFolderName, useDcimParent).getOrThrow()
             }
             val cleanAlbum = sanitizeFolderName(albumFolderName)
             val resolver = context.contentResolver
@@ -141,7 +147,11 @@ class LocalFileOperationsManager(
             for (item in items) {
                 if (!item.isLocal || item.localContentUri.isNullOrBlank()) continue
                 val uri = Uri.parse(item.localContentUri)
-                val baseDir = if (item.isVideo) Environment.DIRECTORY_MOVIES else Environment.DIRECTORY_PICTURES
+                val baseDir = when {
+                    useDcimParent -> Environment.DIRECTORY_DCIM
+                    item.isVideo -> Environment.DIRECTORY_MOVIES
+                    else -> Environment.DIRECTORY_PICTURES
+                }
                 val values = ContentValues().apply {
                     put(MediaStore.MediaColumns.RELATIVE_PATH, "$baseDir/$cleanAlbum/")
                 }
@@ -152,6 +162,26 @@ class LocalFileOperationsManager(
                 throw IOException("Unable to move file(s). Android denied write permission.")
             }
             moved
+        }
+    }
+
+    /**
+     * Renames a local album folder by moving all of its MediaStore items into the new sibling
+     * folder under the same top-level directory (DCIM / Pictures / Movies).
+     * Requires Android 11+ batch write permission obtained via [buildWritePermissionSender].
+     */
+    suspend fun renameLocalAlbum(
+        items: List<MediaItem>,
+        newAlbumName: String
+    ): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cleanName = sanitizeFolderName(newAlbumName)
+            val localItems = items.filter { it.isLocal && !it.localContentUri.isNullOrBlank() }
+            require(localItems.isNotEmpty()) { "Album has no local files to rename" }
+            val currentPath = localItems.first().storagePath?.trim()?.trim('/').orEmpty()
+            val useDcim = currentPath.startsWith("DCIM", ignoreCase = true)
+            moveLocalItemsToAlbum(localItems, cleanName, useDcimParent = useDcim).getOrThrow()
+            cleanName
         }
     }
 

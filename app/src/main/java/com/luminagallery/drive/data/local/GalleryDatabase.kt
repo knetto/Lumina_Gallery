@@ -13,6 +13,7 @@ import com.luminagallery.drive.data.local.dao.PinnedRootDao
 import com.luminagallery.drive.data.local.dao.SyncStateDao
 import com.luminagallery.drive.data.local.entity.AlbumCollectionEntity
 import com.luminagallery.drive.data.local.entity.AlbumLayoutEntity
+import com.luminagallery.drive.data.local.entity.AlbumViewPrefEntity
 import com.luminagallery.drive.data.local.entity.CustomAlbumCoverEntity
 import com.luminagallery.drive.data.local.entity.DriveItemEntity
 import com.luminagallery.drive.data.local.entity.FavoriteItemEntity
@@ -22,6 +23,7 @@ import com.luminagallery.drive.data.local.entity.IgnoredCleanOutEntity
 import com.luminagallery.drive.data.local.entity.MediaAnnotationEntity
 import com.luminagallery.drive.data.local.entity.OfflinePinnedEntity
 import com.luminagallery.drive.data.local.entity.PhotoLocationEntity
+import com.luminagallery.drive.data.local.entity.PhotoOcrEntity
 import com.luminagallery.drive.data.local.entity.PinnedRootEntity
 import com.luminagallery.drive.data.local.entity.SyncStateEntity
 
@@ -39,9 +41,11 @@ import com.luminagallery.drive.data.local.entity.SyncStateEntity
         PhotoLocationEntity::class,
         CustomAlbumCoverEntity::class,
         MediaAnnotationEntity::class,
-        OfflinePinnedEntity::class
+        OfflinePinnedEntity::class,
+        PhotoOcrEntity::class,
+        AlbumViewPrefEntity::class
     ],
-    version = 7,
+    version = 8,
     exportSchema = true
 )
 abstract class GalleryDatabase : RoomDatabase() {
@@ -205,6 +209,33 @@ abstract class GalleryDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `photo_ocr_cache` (
+                        `itemId` TEXT NOT NULL,
+                        `dateModifiedMs` INTEGER NOT NULL,
+                        `extractedText` TEXT NOT NULL,
+                        `hasText` INTEGER NOT NULL,
+                        PRIMARY KEY(`itemId`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `album_view_prefs` (
+                        `albumId` TEXT NOT NULL,
+                        `sortName` TEXT NOT NULL,
+                        `groupByName` TEXT NOT NULL,
+                        `updatedAtEpochMs` INTEGER NOT NULL,
+                        PRIMARY KEY(`albumId`)
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
         fun build(context: Context): GalleryDatabase =
             Room.databaseBuilder(
                 context.applicationContext,
@@ -217,7 +248,8 @@ abstract class GalleryDatabase : RoomDatabase() {
                     MIGRATION_3_4,
                     MIGRATION_4_5,
                     MIGRATION_5_6,
-                    MIGRATION_6_7
+                    MIGRATION_6_7,
+                    MIGRATION_7_8
                 )
                 .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
                 .fallbackToDestructiveMigration(dropAllTables = true)

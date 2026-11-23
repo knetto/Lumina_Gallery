@@ -73,3 +73,21 @@ data class OfflinePinnedEntity(
     val sizeBytes: Long,
     val pinnedAtEpochMs: Long
 )
+
+@Entity(tableName = "photo_ocr_cache")
+data class PhotoOcrEntity(
+    @PrimaryKey
+    val itemId: String,
+    val dateModifiedMs: Long,
+    val extractedText: String,
+    val hasText: Boolean
+)
+
+@Entity(tableName = "album_view_prefs")
+data class AlbumViewPrefEntity(
+    @PrimaryKey
+    val albumId: String,
+    val sortName: String,
+    val groupByName: String,
+    val updatedAtEpochMs: Long
+)

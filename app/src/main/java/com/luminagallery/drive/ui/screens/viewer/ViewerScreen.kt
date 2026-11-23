@@ -1,6 +1,10 @@
 package com.luminagallery.drive.ui.screens.viewer
 
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
 import android.view.LayoutInflater
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -61,6 +65,9 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
@@ -72,8 +79,10 @@ import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Share
+import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.ContentCut
 import androidx.compose.material.icons.rounded.CropFree
+import androidx.compose.material.icons.rounded.DocumentScanner
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.MotionPhotosOn
@@ -154,6 +163,7 @@ import coil3.size.Precision
 import com.luminagallery.drive.LocalAppContainer
 import com.luminagallery.drive.LocalGalleryImageLoader
 import com.luminagallery.drive.data.remote.DriveConstants
+import com.luminagallery.drive.data.repository.ExtractedPhotoText
 import com.luminagallery.drive.data.repository.LocalThumbnailRequest
 import com.luminagallery.drive.data.repository.MotionPhotoInfo
 import com.luminagallery.drive.data.repository.WallpaperTarget
@@ -211,6 +221,7 @@ fun ViewerScreen(
     var currentMotionInfo by remember { mutableStateOf<MotionPhotoInfo?>(null) }
     var isPlayingMotionPhoto by remember { mutableStateOf(false) }
     var isApplyingQuickAction by remember { mutableStateOf(false) }
+    var extractedTextResult by remember { mutableStateOf<ExtractedPhotoText?>(null) }
 
     val prefs = uiState.preferences
 
@@ -484,6 +495,9 @@ fun ViewerScreen(
                         if (isActivePage) viewModel.openExifSheet(pageItem)
                     },
                     onFrameCapturedMessage = viewModel::showMessage,
+                    onZoomStateChanged = { zoomed ->
+                        if (isActivePage) isCurrentPageZoomed = zoomed
+                    },
                     onDismiss = onDismiss
                 )
             } else {
@@ -598,6 +612,36 @@ fun ViewerScreen(
                     }
                 }
 
+                if (!currentItem.isVideo && !isApplyingQuickAction) {
+                    IconButton(
+                        onClick = {
+                            val target = currentItem
+                            coroutineScope.launch {
+                                isApplyingQuickAction = true
+                                appContainer.ocrIndexerManager.extractTextForViewer(target)
+                                    .onSuccess { extracted ->
+                                        if (extracted.fullText.isBlank()) {
+                                            viewModel.showMessage("No text detected in this photo")
+                                        } else {
+                                            extractedTextResult = extracted
+                                        }
+                                    }
+                                    .onFailure { err ->
+                                        viewModel.showMessage(err.localizedMessage ?: "Text scan failed")
+                                    }
+                                isApplyingQuickAction = false
+                            }
+                        }
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.DocumentScanner,
+                            contentDescription = "Extract text from photo",
+                            tint = Color.White,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                }
+
                 if (uiState.isExporting || isApplyingQuickAction) {
                     CircularProgressIndicator(
                         color = Color.White,
@@ -681,6 +725,27 @@ fun ViewerScreen(
                             }
                         )
                         if (!currentItem.isVideo) {
+                            DropdownMenuItem(
+                                text = { Text("Share without location / EXIF") },
+                                onClick = {
+                                    showOverflowMenu = false
+                                    val target = currentItem
+                                    coroutineScope.launch {
+                                        isApplyingQuickAction = true
+                                        appContainer.exportMediaUseCase.prepareShareUris(
+                                            items = listOf(target),
+                                            stripLocationOverride = true
+                                        ).onSuccess { uris ->
+                                            if (uris.isNotEmpty()) {
+                                                FormatUtils.launchShareSheet(context, uris, target.mimeType)
+                                            }
+                                        }.onFailure { err ->
+                                            viewModel.showMessage(err.localizedMessage ?: "Unable to prepare clean copy")
+                                        }
+                                        isApplyingQuickAction = false
+                                    }
+                                }
+                            )
                             DropdownMenuItem(
                                 text = { Text("Edit photo") },
                                 onClick = {
@@ -1008,6 +1073,102 @@ fun ViewerScreen(
             onDismiss = viewModel::closeExifSheet,
             onCopiedMessage = viewModel::showMessage
         )
+    }
+
+    extractedTextResult?.let { scanned ->
+        ModalBottomSheet(
+            onDismissRequest = { extractedTextResult = null },
+            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+            shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(horizontal = 20.dp)
+                    .padding(bottom = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Text in photo",
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        TextButton(
+                            onClick = {
+                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                clipboard?.setPrimaryClip(ClipData.newPlainText("Photo text", scanned.fullText))
+                                extractedTextResult = null
+                                viewModel.showMessage("Copied all text to clipboard")
+                            }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.ContentCopy,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text("Copy all", fontWeight = FontWeight.SemiBold)
+                        }
+                        TextButton(
+                            onClick = {
+                                val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(Intent.EXTRA_TEXT, scanned.fullText)
+                                }
+                                context.startActivity(Intent.createChooser(shareIntent, "Share text"))
+                                extractedTextResult = null
+                            }
+                        ) {
+                            Text("Share")
+                        }
+                    }
+                }
+
+                Text(
+                    text = "Tap any block to copy it, or highlight specific words below:",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(260.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    scanned.blocks.forEach { block ->
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .clickable {
+                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                    clipboard?.setPrimaryClip(ClipData.newPlainText("Photo text", block))
+                                    viewModel.showMessage("Copied block to clipboard")
+                                }
+                        ) {
+                            SelectionContainer {
+                                Text(
+                                    text = block,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     if (showWallpaperSheet) {

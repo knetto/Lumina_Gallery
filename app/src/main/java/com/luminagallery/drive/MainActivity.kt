@@ -4,10 +4,10 @@ import android.content.Intent
 import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
-import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.fragment.app.FragmentActivity
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -21,7 +21,7 @@ import com.luminagallery.drive.ui.navigation.LuminaNavGraph
 import com.luminagallery.drive.ui.theme.LuminaTheme
 import kotlinx.coroutines.delay
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
 
     private val externalViewRequestState = mutableStateOf<Pair<Uri, String>?>(null)
 

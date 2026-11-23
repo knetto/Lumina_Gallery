@@ -125,6 +125,8 @@ import com.luminagallery.drive.domain.model.MainTab
 import com.luminagallery.drive.domain.model.ServiceAccountState
 import com.luminagallery.drive.domain.model.SpecialGalleryFilter
 import com.luminagallery.drive.ui.components.AlbumSelectionActionBar
+import com.luminagallery.drive.ui.components.BiometricLockHelper
+import com.luminagallery.drive.ui.components.CollagePdfBottomSheet
 import com.luminagallery.drive.ui.components.DraggableAlbumGrid
 import com.luminagallery.drive.ui.components.ExifMetadataBottomSheet
 import com.luminagallery.drive.ui.components.FastScrollThumb
@@ -136,7 +138,9 @@ import com.luminagallery.drive.ui.components.OneUiBottomNavBar
 import com.luminagallery.drive.ui.components.OneUiMotion
 import com.luminagallery.drive.ui.components.PinchZoomGridContainer
 import com.luminagallery.drive.ui.components.SamsungMenuBottomSheet
+import com.luminagallery.drive.ui.components.SecureWindowEffect
 import com.luminagallery.drive.ui.components.SetupCredentialsCard
+import com.luminagallery.drive.ui.components.photoGridDragSelect
 import com.luminagallery.drive.ui.screens.stories.StoriesTabContent
 
 private val OneUiTabEasing = OneUiMotion.FluidEasing
@@ -174,6 +178,7 @@ fun HomeScreen(
     var showSortDialog by remember { mutableStateOf(false) }
     var showAlbumsFilterDialog by remember { mutableStateOf(false) }
     var showHideAlbumsSheet by remember { mutableStateOf(false) }
+    var showCollagePdfSheet by remember { mutableStateOf(false) }
     var showCreateCollectionDialog by remember { mutableStateOf(false) }
     var pendingGroupPair by remember { mutableStateOf<Pair<AlbumGridItem, AlbumGridItem>?>(null) }
     var showGroupSelectedDialog by remember { mutableStateOf(false) }
@@ -414,7 +419,17 @@ fun HomeScreen(
                     },
                     onHideAlbumsClick = {
                         showOverflowMenu = false
-                        showHideAlbumsSheet = true
+                        if (uiState.lockHiddenAlbums) {
+                            BiometricLockHelper.authenticate(
+                                context = context,
+                                title = "Unlock hidden albums",
+                                subtitle = "Verify your identity to view or manage hidden albums",
+                                onSuccess = { showHideAlbumsSheet = true },
+                                onFailure = { err -> viewModel.showMessage(err) }
+                            )
+                        } else {
+                            showHideAlbumsSheet = true
+                        }
                     },
                     onCleanOutQuickClick = {
                         showOverflowMenu = false
@@ -468,6 +483,11 @@ fun HomeScreen(
                                         onColumnsChange = viewModel::setGridColumns,
                                         modifier = Modifier.fillMaxSize()
                                     ) {
+                                        val orderedPictureIds = remember(uiState.timelineEntries) {
+                                            uiState.timelineEntries
+                                                .filterIsInstance<PicturesTimelineEntry.PhotoTile>()
+                                                .map { it.item.id }
+                                        }
                                         LazyVerticalGrid(
                                             columns = GridCells.Fixed(uiState.gridColumns),
                                             state = picturesGridState,
@@ -479,7 +499,17 @@ fun HomeScreen(
                                             ),
                                             horizontalArrangement = Arrangement.spacedBy(1.5.dp),
                                             verticalArrangement = Arrangement.spacedBy(1.5.dp),
-                                            modifier = Modifier.fillMaxSize()
+                                            modifier = Modifier
+                                                .fillMaxSize()
+                                                .photoGridDragSelect(
+                                                    gridState = picturesGridState,
+                                                    orderedItemIds = orderedPictureIds,
+                                                    keyToItemId = { key ->
+                                                        (key as? String)?.takeIf { it.startsWith("pic_") }?.removePrefix("pic_")
+                                                    },
+                                                    selectedIds = uiState.selectedPictureIds,
+                                                    onSetItemSelected = viewModel::setPictureSelected
+                                                )
                                         ) {
                                             items(
                                                 items = uiState.timelineEntries,
@@ -561,10 +591,7 @@ fun HomeScreen(
                                                                     onOpenPictureViewer(entry.item.id)
                                                                 }
                                                             },
-                                                            onLongClick = {
-                                                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                                                viewModel.togglePictureSelection(entry.item.id)
-                                                            },
+                                                            onLongClick = null,
                                                             modifier = Modifier.animateItem()
                                                         )
                                                     }
@@ -762,6 +789,9 @@ fun HomeScreen(
                 onMoveCopyLocal = if (selectedPictures.isNotEmpty()) {
                     { showMoveCopyPicturesSheet = true }
                 } else null,
+                onCreateCollagePdf = if (comparablePictureIds.isNotEmpty()) {
+                    { showCollagePdfSheet = true }
+                } else null,
                 onInfo = viewModel::openSelectedPictureInfo,
                 onClearSelection = viewModel::clearPictureSelection,
                 modifier = Modifier.align(Alignment.BottomCenter)
@@ -912,12 +942,38 @@ fun HomeScreen(
         )
     }
 
-    // Samsung Hide Albums Bottom Sheet
+    if (showCollagePdfSheet) {
+        val photosForCreation = remember(uiState.timelineEntries, uiState.selectedPictureIds) {
+            uiState.timelineEntries
+                .filterIsInstance<PicturesTimelineEntry.PhotoTile>()
+                .map { it.item }
+                .filter { it.id in uiState.selectedPictureIds && !it.isVideo }
+        }
+        if (photosForCreation.isNotEmpty()) {
+            CollagePdfBottomSheet(
+                items = photosForCreation,
+                onDismiss = { showCollagePdfSheet = false },
+                onCompleted = { msg ->
+                    showCollagePdfSheet = false
+                    viewModel.clearPictureSelection()
+                    viewModel.showMessage(msg)
+                }
+            )
+        }
+    }
+
+    // Samsung Hide Albums Bottom Sheet (Biometric Private Vault when lockHiddenAlbums is enabled)
     if (showHideAlbumsSheet) {
+        SecureWindowEffect(enabled = uiState.lockHiddenAlbums)
         HideAlbumsBottomSheet(
             allAlbums = uiState.allAvailableAlbums,
             hiddenAlbumIds = uiState.hiddenAlbumIds,
+            isBiometricProtected = uiState.lockHiddenAlbums,
             onToggleHidden = viewModel::toggleHiddenAlbum,
+            onOpenPrivateAlbum = { folder ->
+                showHideAlbumsSheet = false
+                onOpenFolder(folder.id, folder.name)
+            },
             onDismiss = { showHideAlbumsSheet = false }
         )
     }
@@ -1296,7 +1352,9 @@ private fun SamsungTopHeaderBar(
 private fun HideAlbumsBottomSheet(
     allAlbums: List<DriveFolder>,
     hiddenAlbumIds: Set<String>,
+    isBiometricProtected: Boolean,
     onToggleHidden: (String) -> Unit,
+    onOpenPrivateAlbum: (DriveFolder) -> Unit,
     onDismiss: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -1314,11 +1372,15 @@ private fun HideAlbumsBottomSheet(
         ) {
             Column(modifier = Modifier.padding(horizontal = 24.dp, vertical = 10.dp)) {
                 Text(
-                    text = "Hide albums",
+                    text = if (isBiometricProtected) "Hidden albums (Locked)" else "Hide albums",
                     style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.SemiBold)
                 )
                 Text(
-                    text = "Turn on to hide albums from the Albums grid",
+                    text = if (isBiometricProtected) {
+                        "Tap a hidden album to browse privately, or toggle switches to hide/unhide"
+                    } else {
+                        "Turn on to hide albums from the Albums grid · lock in Privacy settings"
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -1336,10 +1398,13 @@ private fun HideAlbumsBottomSheet(
                         },
                         supportingContent = {
                             Text(
-                                text = if (album.isLocal) "${album.mediaCount} items · On device"
-                                else "${album.mediaCount} items · Google Drive",
+                                text = buildString {
+                                    append("${album.mediaCount} items · ")
+                                    append(if (album.isLocal) "On device" else "Google Drive")
+                                    if (isHidden) append(" · Tap to browse privately")
+                                },
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                color = if (isHidden) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         },
                         trailingContent = {
@@ -1349,7 +1414,13 @@ private fun HideAlbumsBottomSheet(
                             )
                         },
                         colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                        modifier = Modifier.clickable { onToggleHidden(album.id) }
+                        modifier = Modifier.clickable {
+                            if (isHidden) {
+                                onOpenPrivateAlbum(album)
+                            } else {
+                                onToggleHidden(album.id)
+                            }
+                        }
                     )
                 }
             }

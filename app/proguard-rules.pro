@@ -61,3 +61,8 @@
 -keep @androidx.room.Entity class *
 -keep class com.luminagallery.drive.data.local.dao.** { *; }
 -dontwarn androidx.room.paging.**
+
+# ML Kit On-Device Text Recognition & Biometric
+-dontwarn com.google.mlkit.**
+-dontwarn com.google.android.gms.internal.mlkit_**
+-dontwarn androidx.biometric.**

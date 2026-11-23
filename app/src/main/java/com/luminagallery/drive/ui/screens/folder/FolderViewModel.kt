@@ -95,6 +95,7 @@ data class FolderUiState(
     val hasCompletedInitialLoad: Boolean = false,
     val isOnline: Boolean = true,
     val isUnmeteredWifi: Boolean = true,
+    val isProtectedPrivateAlbum: Boolean = false,
     val favoriteItemIds: Set<String> = emptySet(),
     val selectedIds: Set<String> = emptySet(),
     val forceSelectionMode: Boolean = false,
@@ -257,8 +258,8 @@ class FolderViewModel(
         preferencesManager.preferencesFlow,
         isRefreshingFlow,
         hasLoadedOnceFlow,
-        networkMonitor.networkState
-    ) { crumbs, prefs, refreshing, loaded, net ->
+        combine(networkMonitor.networkState, extrasRepository.hiddenAlbumIdsFlow) { net, hidden -> net to hidden }
+    ) { crumbs, prefs, refreshing, loaded, (net, hiddenIds) ->
         FolderMeta(
             breadcrumbs = crumbs,
             gridColumns = prefs.gridColumns,
@@ -266,7 +267,9 @@ class FolderViewModel(
             isRefreshing = refreshing,
             hasLoadedOnce = loaded,
             isOnline = net.isOnline,
-            isUnmeteredWifi = net.isUnmeteredWifi || !prefs.wifiOnlyHighRes
+            isUnmeteredWifi = net.isUnmeteredWifi || !prefs.wifiOnlyHighRes,
+            lockHiddenAlbums = prefs.lockHiddenAlbums,
+            hiddenAlbumIds = hiddenIds
         )
     }
 
@@ -318,6 +321,7 @@ class FolderViewModel(
                 content.unfilteredCount > 0,
             isOnline = meta.isOnline,
             isUnmeteredWifi = meta.isUnmeteredWifi,
+            isProtectedPrivateAlbum = meta.lockHiddenAlbums && content.folderId in meta.hiddenAlbumIds,
             favoriteItemIds = content.favoriteIds,
             selectedIds = interaction.selectedIds,
             forceSelectionMode = interaction.forceSelectionMode,
@@ -383,9 +387,24 @@ class FolderViewModel(
     }
 
     init {
+        loadSavedAlbumViewPref(initialFolderId)
         if (!LocalMediaRepository.isLocalFolderId(initialFolderId)) {
             loadBreadcrumbs(initialFolderId)
             refreshFolder(silent = true)
+        }
+    }
+
+    private fun loadSavedAlbumViewPref(albumId: String) {
+        viewModelScope.launch {
+            val saved = extrasRepository.getAlbumViewPref(albumId)
+            if (activeFolderFlow.value.first == albumId) {
+                mediaSortFlow.value = saved?.sortName?.let {
+                    runCatching { AlbumMediaSort.valueOf(it) }.getOrNull()
+                } ?: AlbumMediaSort.DATE_DESC
+                mediaGroupByFlow.value = saved?.groupByName?.let {
+                    runCatching { AlbumMediaGroupBy.valueOf(it) }.getOrNull()
+                } ?: AlbumMediaGroupBy.NONE
+            }
         }
     }
 
@@ -402,6 +421,7 @@ class FolderViewModel(
         viewModeFlow.value = FolderViewMode.HIERARCHY
         breadcrumbsFlow.value = listOf(BreadcrumbItem(folderId, folderName))
         hasLoadedOnceFlow.value = local
+        loadSavedAlbumViewPref(folderId)
         if (!local) {
             loadBreadcrumbs(folderId)
             refreshFolder(silent = true)
@@ -414,10 +434,25 @@ class FolderViewModel(
 
     fun setMediaGroupBy(groupBy: AlbumMediaGroupBy) {
         mediaGroupByFlow.value = groupBy
+        val activeId = activeFolderFlow.value.first
+        viewModelScope.launch {
+            extrasRepository.saveAlbumViewPref(activeId, mediaSortFlow.value, groupBy)
+        }
     }
 
     fun setMediaSort(sort: AlbumMediaSort) {
         mediaSortFlow.value = sort
+        val activeId = activeFolderFlow.value.first
+        viewModelScope.launch {
+            extrasRepository.saveAlbumViewPref(activeId, sort, mediaGroupByFlow.value)
+        }
+    }
+
+    fun onLocalAlbumRenamed(newName: String) {
+        val currentId = activeFolderFlow.value.first
+        activeFolderFlow.value = currentId to newName
+        breadcrumbsFlow.value = listOf(BreadcrumbItem(currentId, newName))
+        snackbarFlow.value = "Renamed album to \"$newName\""
     }
 
     fun toggleSidebar() {
@@ -731,7 +766,9 @@ class FolderViewModel(
         val isRefreshing: Boolean,
         val hasLoadedOnce: Boolean,
         val isOnline: Boolean,
-        val isUnmeteredWifi: Boolean
+        val isUnmeteredWifi: Boolean,
+        val lockHiddenAlbums: Boolean = false,
+        val hiddenAlbumIds: Set<String> = emptySet()
     )
 
     private data class FolderInteraction(

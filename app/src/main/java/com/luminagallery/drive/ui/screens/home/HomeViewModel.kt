@@ -97,6 +97,7 @@ data class HomeUiState(
     val stories: List<GalleryStory> = emptyList(),
     val gridColumns: Int = 4,
     val showCloudBadges: Boolean = true,
+    val lockHiddenAlbums: Boolean = false,
     val highResThumbnailsAllowed: Boolean = true,
     val serviceAccountState: ServiceAccountState = ServiceAccountState.NotConfigured,
     val pinnedRoots: List<DriveFolder> = emptyList(),
@@ -131,6 +132,7 @@ class HomeViewModel(
     private val extrasRepository: GalleryExtrasRepository,
     private val preferencesManager: PreferencesManager,
     private val cloudProfileSyncManager: CloudProfileSyncManager,
+    private val ocrIndexerManager: com.luminagallery.drive.data.repository.OcrIndexerManager,
     private val syncUseCase: SyncGalleryUseCase,
     private val manageRootsUseCase: ManageRootsUseCase,
     private val exportMediaUseCase: ExportMediaUseCase,
@@ -266,6 +268,7 @@ class HomeViewModel(
             gridColumns = prefs.gridColumns,
             albumSortMode = prefs.albumSortMode,
             showCloudBadges = prefs.showCloudBadges,
+            lockHiddenAlbums = prefs.lockHiddenAlbums,
             wifiOnlyHighRes = prefs.wifiOnlyHighRes,
             setupError = setupErr,
             snackbarMessage = snack,
@@ -311,6 +314,7 @@ class HomeViewModel(
             stories = extras.stories,
             gridColumns = misc.gridColumns,
             showCloudBadges = misc.showCloudBadges,
+            lockHiddenAlbums = misc.lockHiddenAlbums,
             highResThumbnailsAllowed = drive.networkState.isUnmeteredWifi || !misc.wifiOnlyHighRes,
             serviceAccountState = drive.account,
             pinnedRoots = drive.pinnedRoots,
@@ -383,6 +387,8 @@ class HomeViewModel(
                 }
                 .collect { (localPics, _) ->
                     extrasRepository.syncLocationsIndex(localPics)
+                    // Light offline OCR warm-up prioritizing Screenshots/Documents so Search is instant
+                    ocrIndexerManager.syncOcrIndex(localPics, maxNewItemsPerRun = 60)
                 }
         }
     }
@@ -511,6 +517,12 @@ class HomeViewModel(
     fun togglePictureSelection(itemId: String) {
         selectedPictureIdsFlow.update { current ->
             if (itemId in current) current - itemId else current + itemId
+        }
+    }
+
+    fun setPictureSelected(itemId: String, selected: Boolean) {
+        selectedPictureIdsFlow.update { current ->
+            if (selected) current + itemId else current - itemId
         }
     }
 
@@ -914,6 +926,7 @@ class HomeViewModel(
         val gridColumns: Int,
         val albumSortMode: AlbumSortMode,
         val showCloudBadges: Boolean,
+        val lockHiddenAlbums: Boolean,
         val wifiOnlyHighRes: Boolean,
         val setupError: String?,
         val snackbarMessage: String?,
@@ -931,6 +944,7 @@ class HomeViewModel(
             extrasRepository = container.galleryExtrasRepository,
             preferencesManager = container.preferencesManager,
             cloudProfileSyncManager = container.cloudProfileSyncManager,
+            ocrIndexerManager = container.ocrIndexerManager,
             syncUseCase = container.syncGalleryUseCase,
             manageRootsUseCase = container.manageRootsUseCase,
             exportMediaUseCase = container.exportMediaUseCase,

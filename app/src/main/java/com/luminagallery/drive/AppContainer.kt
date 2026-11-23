@@ -16,11 +16,13 @@ import com.luminagallery.drive.data.repository.AlbumOrganizationRepository
 import com.luminagallery.drive.data.repository.AppUpdateManager
 import com.luminagallery.drive.data.repository.CloudProfileSyncManager
 import com.luminagallery.drive.data.repository.CoilCacheManager
+import com.luminagallery.drive.data.repository.CollagePdfCreator
 import com.luminagallery.drive.data.repository.GalleryExtrasRepository
 import com.luminagallery.drive.data.repository.GalleryRepository
 import com.luminagallery.drive.data.repository.LocalFileOperationsManager
 import com.luminagallery.drive.data.repository.MediaExportManager
 import com.luminagallery.drive.data.repository.MotionPhotoDetector
+import com.luminagallery.drive.data.repository.OcrIndexerManager
 import com.luminagallery.drive.data.repository.OfflineMediaManager
 import com.luminagallery.drive.data.repository.VideoTrimmer
 import com.luminagallery.drive.data.repository.sync.DriveSyncScheduler
@@ -118,9 +120,22 @@ class AppContainer(context: Context) {
         networkMonitor = networkMonitor
     )
 
+    val ocrIndexerManager: OcrIndexerManager = OcrIndexerManager(
+        context = appContext,
+        database = database,
+        driveApi = driveApiService,
+        offlineMediaManager = offlineMediaManager
+    )
+
+    val collagePdfCreator: CollagePdfCreator = CollagePdfCreator(
+        context = appContext,
+        driveApi = driveApiService,
+        offlineMediaManager = offlineMediaManager
+    )
+
     val syncGalleryUseCase: SyncGalleryUseCase = SyncGalleryUseCase(galleryRepository)
     val manageRootsUseCase: ManageRootsUseCase = ManageRootsUseCase(galleryRepository)
-    val exportMediaUseCase: ExportMediaUseCase = ExportMediaUseCase(mediaExportManager)
+    val exportMediaUseCase: ExportMediaUseCase = ExportMediaUseCase(mediaExportManager, preferencesManager)
 
     val cloudProfileSyncManager: CloudProfileSyncManager = CloudProfileSyncManager(
         database = database,

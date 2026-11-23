@@ -3,15 +3,26 @@ package com.luminagallery.drive
 import androidx.compose.ui.geometry.Rect
 import com.luminagallery.drive.data.repository.CloudAlbumCollection
 import com.luminagallery.drive.data.repository.CloudAlbumLayout
+import com.luminagallery.drive.data.repository.CloudAlbumViewPref
+import com.luminagallery.drive.data.repository.CloudCustomAlbumCover
+import com.luminagallery.drive.data.repository.CloudMediaAnnotation
 import com.luminagallery.drive.data.repository.CloudPinnedRoot
 import com.luminagallery.drive.data.repository.CloudPreferencesPayload
 import com.luminagallery.drive.data.repository.CloudProfileSnapshot
 import com.luminagallery.drive.data.repository.CloudProfileSyncManager
+import com.luminagallery.drive.data.repository.CollageLayoutMath
+import com.luminagallery.drive.data.repository.CollageLayoutMode
 import com.luminagallery.drive.data.repository.LocalAlbumCloudMatcher
+import com.luminagallery.drive.data.repository.MediaExportManager
+import com.luminagallery.drive.data.repository.OcrIndexerManager
 import com.luminagallery.drive.domain.model.AlbumGridItem
 import com.luminagallery.drive.domain.model.DriveFolder
+import com.luminagallery.drive.domain.model.ExifMetadata
+import com.luminagallery.drive.domain.model.MediaItem
+import com.luminagallery.drive.domain.model.MediaType
 import com.luminagallery.drive.ui.components.AlbumTransitionOriginTracker
 import com.luminagallery.drive.ui.components.FormatUtils
+import com.luminagallery.drive.ui.screens.editor.computeStraightenFillScale
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -258,5 +269,113 @@ class GalleryCoreLogicTest {
         assertTrue(CloudProfileSyncManager.isScopeDeniedErrorBody(legacyScopeError))
         assertFalse(CloudProfileSyncManager.isScopeDeniedErrorBody(rateLimitError))
         assertFalse(CloudProfileSyncManager.isScopeDeniedErrorBody(quotaError))
+    }
+
+    @Test
+    fun localMediaCloudMatcher_matchesCoversAndAnnotationsAcrossPhones() {
+        fun photo(id: String, name: String, path: String, size: Long) = MediaItem(
+            id = id,
+            parentId = "local_bucket_1",
+            name = name,
+            mimeType = "image/jpeg",
+            mediaType = MediaType.PHOTO,
+            sizeBytes = size,
+            createdTimeEpochMs = 1_000L,
+            monthYearLabel = "Nov 2026",
+            fullDateLabel = "Nov 23, 2026",
+            thumbnailLink = null,
+            width = 4000,
+            height = 3000,
+            rotation = 0,
+            durationMillis = null,
+            exif = ExifMetadata(null, null, null, null, null, null, null, null),
+            isLocal = true,
+            localContentUri = "content://media/external/images/media/$id",
+            relativePath = path.substringAfterLast('/'),
+            storagePath = path
+        )
+
+        val newPhoneMedia = listOf(
+            photo("local_901", "IMG_2026.jpg", "DCIM/Vacations", 4_200_000L),
+            photo("local_902", "receipt.png", "Pictures/Screenshots", 310_000L)
+        )
+
+        val matchedByPath = LocalAlbumCloudMatcher.resolveTargetLocalMediaItem(
+            savedItemId = "local_old_11",
+            savedFileName = "img_2026.jpg",
+            savedRelativePath = "dcim/vacations/",
+            savedSizeBytes = 4_200_000L,
+            localMedia = newPhoneMedia
+        )
+        assertEquals("local_901", matchedByPath?.id)
+
+        val matchedByUniqueNameAndSize = LocalAlbumCloudMatcher.resolveTargetLocalMediaItem(
+            savedItemId = "local_old_22",
+            savedFileName = "receipt.png",
+            savedRelativePath = "DCIM/Screenshots",
+            savedSizeBytes = 310_000L,
+            localMedia = newPhoneMedia
+        )
+        assertEquals("local_902", matchedByUniqueNameAndSize?.id)
+    }
+
+    @Test
+    fun cloudProfileSnapshotV2_preservesCoversAnnotationsViewPrefsAndPrivacyFlags() {
+        val codec = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+        val snap = CloudProfileSnapshot(
+            preferences = CloudPreferencesPayload(stripLocationOnShare = true, lockHiddenAlbums = true),
+            favoriteStoryIds = listOf("story_trip_1"),
+            customAlbumCovers = listOf(
+                CloudCustomAlbumCover(
+                    albumId = "local_bucket_1",
+                    isAlbumLocal = true,
+                    albumRelativePath = "DCIM/Vacations",
+                    albumFolderName = "Vacations",
+                    coverItemId = "local_901",
+                    coverIsLocal = true,
+                    coverFileName = "IMG_2026.jpg",
+                    coverRelativePath = "DCIM/Vacations",
+                    coverSizeBytes = 4_200_000L
+                )
+            ),
+            mediaAnnotations = listOf(
+                CloudMediaAnnotation(
+                    itemId = "drive_photo_1",
+                    isLocal = false,
+                    tagsCsv = "passport,travel",
+                    note = "Renew in 2029"
+                )
+            ),
+            albumViewPrefs = listOf(
+                CloudAlbumViewPref(
+                    albumId = "local_bucket_1",
+                    isLocal = true,
+                    localRelativePath = "DCIM/Vacations",
+                    localFolderName = "Vacations",
+                    sortName = "DATE_ASC",
+                    groupByName = "DAY"
+                )
+            )
+        )
+        val decoded = codec.decodeFromString<CloudProfileSnapshot>(codec.encodeToString(snap))
+        assertEquals(snap, decoded)
+        assertEquals(snap.contentFingerprint(codec), decoded.contentFingerprint(codec))
+    }
+
+    @Test
+    fun collageLayoutMath_straightenScale_ocrNormalize_andExifStripList_areValid() {
+        for (mode in CollageLayoutMode.entries) {
+            val cells = CollageLayoutMath.computeCells(4, mode, 1000f, 1000f, 20f)
+            assertEquals(4, cells.size)
+            cells.forEach { c ->
+                assertTrue(c.left >= 0f && c.right <= 1000.5f && c.right > c.left)
+                assertTrue(c.top >= 0f && c.bottom <= 1000.5f && c.bottom > c.top)
+            }
+        }
+        assertEquals(1f, computeStraightenFillScale(0f, 1600f, 900f), 0.001f)
+        assertTrue(computeStraightenFillScale(15f, 1600f, 900f) > 1.2f)
+        assertEquals("WiFi Pass 1234", OcrIndexerManager.normalizeSearchText("  WiFi\n\tPass   1234  "))
+        assertTrue(MediaExportManager.SENSITIVE_EXIF_TAGS.contains("GPSLatitude"))
+        assertTrue(MediaExportManager.SENSITIVE_EXIF_TAGS.contains("GPSLongitude"))
     }
 }

@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.DriveFileMove
+import androidx.compose.material.icons.rounded.AutoAwesomeMosaic
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Compare
 import androidx.compose.material.icons.rounded.DeleteOutline
@@ -47,6 +48,7 @@ fun MultiSelectActionBar(
     onDeleteLocal: (() -> Unit)? = null,
     onCompare: (() -> Unit)? = null,
     onMoveCopyLocal: (() -> Unit)? = null,
+    onCreateCollagePdf: (() -> Unit)? = null,
     onInfo: () -> Unit,
     onClearSelection: () -> Unit,
     modifier: Modifier = Modifier
@@ -112,6 +114,13 @@ fun MultiSelectActionBar(
                                 icon = Icons.Rounded.Compare,
                                 contentDescription = "Compare photos",
                                 onClick = onCompare
+                            )
+                        }
+                        if (onCreateCollagePdf != null && selectedCount >= 1) {
+                            ActionIconPill(
+                                icon = Icons.Rounded.AutoAwesomeMosaic,
+                                contentDescription = "Create collage or PDF",
+                                onClick = onCreateCollagePdf
                             )
                         }
                         if (onMoveCopyLocal != null) {

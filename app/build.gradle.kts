@@ -171,6 +171,10 @@ dependencies {
     // MapLibre Native 120Hz Vector Map (API-key-free OpenFreeMap tiles)
     implementation(libs.maplibre.android.sdk)
 
+    // Biometric Private Vault Lock & Offline On-Device OCR Text Search
+    implementation(libs.androidx.biometric)
+    implementation(libs.mlkit.text.recognition)
+
     // JVM Unit Tests
     testImplementation("junit:junit:4.13.2")
 }

@@ -1,6 +1,7 @@
 package com.luminagallery.drive.ui.screens.settings
 
 import android.content.Context
+import android.net.Uri
 import androidx.compose.runtime.Immutable
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -284,6 +285,49 @@ class SettingsViewModel(
         }
     }
 
+    fun exportLocalProfileBackup(uri: Uri) {
+        viewModelScope.launch {
+            cloudProfileSyncManager.exportProfileToUri(appContext, uri)
+                .onSuccess { snackbarFlow.value = "Exported Lumina backup file" }
+                .onFailure { err -> snackbarFlow.value = err.message ?: "Export failed" }
+        }
+    }
+
+    fun importLocalProfileBackup(uri: Uri) {
+        viewModelScope.launch {
+            cloudProfileSyncManager.importProfileFromUri(appContext, uri)
+                .onSuccess { summary ->
+                    snackbarFlow.value = "Imported settings, ${summary.restoredCollectionsCount} group(s) & ${summary.restoredPinnedRootsCount} Drive album(s)"
+                    if (summary.restoredPinnedRootsCount > 0 && credentialStore.state.value is ServiceAccountState.Configured) {
+                        launch { syncUseCase.syncDeltaOrInitial(forceFullRescan = false, waitIfBusy = true) }
+                    }
+                }
+                .onFailure { err -> snackbarFlow.value = err.message ?: "Import failed" }
+        }
+    }
+
+    fun setStripLocationOnShare(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesManager.setStripLocationOnShare(enabled)
+            snackbarFlow.value = if (enabled) {
+                "GPS & camera metadata will be stripped when sharing photos"
+            } else {
+                "Original photo metadata kept when sharing"
+            }
+        }
+    }
+
+    fun setLockHiddenAlbums(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesManager.setLockHiddenAlbums(enabled)
+            snackbarFlow.value = if (enabled) {
+                "Hidden albums locked with biometrics / screen lock"
+            } else {
+                "Hidden albums lock turned off"
+            }
+        }
+    }
+
     fun signOutGoogleAccount() {
         viewModelScope.launch {
             cloudProfileSyncManager.onSignedOut()
@@ -461,6 +505,8 @@ class SettingsViewModel(
             preferencesManager.setWifiOnlyHighRes(defaults.wifiOnlyHighRes)
             preferencesManager.setExternalGallery(defaults.externalGalleryPackage, defaults.externalGalleryLabel)
             preferencesManager.setAutoCheckUpdates(defaults.autoCheckUpdates)
+            preferencesManager.setStripLocationOnShare(defaults.stripLocationOnShare)
+            preferencesManager.setLockHiddenAlbums(defaults.lockHiddenAlbums)
             preferencesManager.setBackgroundSyncEnabled(defaults.backgroundSyncEnabled)
             DriveSyncScheduler.setBackgroundSyncEnabled(appContext, false)
             preferencesManager.setMaxCacheSizeMb(defaults.maxCacheSizeMb)

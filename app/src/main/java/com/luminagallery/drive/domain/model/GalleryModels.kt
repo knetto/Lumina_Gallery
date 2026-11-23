@@ -354,5 +354,7 @@ data class UserPreferences(
     val wifiOnlyHighRes: Boolean = true,
     val externalGalleryPackage: String = "",
     val externalGalleryLabel: String = "",
-    val autoCheckUpdates: Boolean = true
+    val autoCheckUpdates: Boolean = true,
+    val stripLocationOnShare: Boolean = false,
+    val lockHiddenAlbums: Boolean = false
 )

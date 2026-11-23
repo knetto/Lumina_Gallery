@@ -3,6 +3,7 @@ package com.luminagallery.drive.data.repository
 import androidx.compose.runtime.Immutable
 import com.luminagallery.drive.data.local.GalleryDatabase
 import com.luminagallery.drive.data.local.LocalMediaRepository
+import com.luminagallery.drive.data.local.entity.AlbumViewPrefEntity
 import com.luminagallery.drive.data.local.entity.CustomAlbumCoverEntity
 import com.luminagallery.drive.data.local.entity.FavoriteItemEntity
 import com.luminagallery.drive.data.local.entity.FavoriteStoryEntity
@@ -10,6 +11,9 @@ import com.luminagallery.drive.data.local.entity.HiddenAlbumEntity
 import com.luminagallery.drive.data.local.entity.IgnoredCleanOutEntity
 import com.luminagallery.drive.data.local.entity.MediaAnnotationEntity
 import com.luminagallery.drive.data.local.entity.PhotoLocationEntity
+import com.luminagallery.drive.data.local.entity.PhotoOcrEntity
+import com.luminagallery.drive.domain.model.AlbumMediaGroupBy
+import com.luminagallery.drive.domain.model.AlbumMediaSort
 import com.luminagallery.drive.domain.model.GalleryStory
 import com.luminagallery.drive.domain.model.GeoTaggedMediaItem
 import com.luminagallery.drive.domain.model.LocationPhotoGroup
@@ -91,6 +95,32 @@ class GalleryExtrasRepository(
         extrasDao.observeCachedLocations()
             .map { list -> list.associateBy { it.itemId } }
             .flowOn(Dispatchers.Default)
+
+    val ocrTextMapFlow: Flow<Map<String, PhotoOcrEntity>> =
+        extrasDao.observeOcrTextEntries()
+            .map { list -> list.associateBy { it.itemId } }
+            .flowOn(Dispatchers.Default)
+
+    fun observeAlbumViewPref(albumId: String): Flow<AlbumViewPrefEntity?> =
+        extrasDao.observeAlbumViewPref(albumId)
+
+    suspend fun getAlbumViewPref(albumId: String): AlbumViewPrefEntity? =
+        withContext(Dispatchers.IO) { extrasDao.getAlbumViewPref(albumId) }
+
+    suspend fun saveAlbumViewPref(
+        albumId: String,
+        sort: AlbumMediaSort,
+        groupBy: AlbumMediaGroupBy
+    ) = withContext(Dispatchers.IO) {
+        extrasDao.upsertAlbumViewPref(
+            AlbumViewPrefEntity(
+                albumId = albumId,
+                sortName = sort.name,
+                groupByName = groupBy.name,
+                updatedAtEpochMs = System.currentTimeMillis()
+            )
+        )
+    }
 
     fun observeAnnotation(itemId: String): Flow<MediaAnnotationEntity?> =
         extrasDao.observeAnnotation(itemId)

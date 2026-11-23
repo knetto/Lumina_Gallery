@@ -10,9 +10,12 @@ import com.luminagallery.drive.data.local.LocalMediaRepository
 import com.luminagallery.drive.data.local.PreferencesManager
 import com.luminagallery.drive.data.local.entity.MediaAnnotationEntity
 import com.luminagallery.drive.data.local.entity.PhotoLocationEntity
+import com.luminagallery.drive.data.local.entity.PhotoOcrEntity
 import com.luminagallery.drive.data.remote.NetworkMonitor
 import com.luminagallery.drive.data.repository.GalleryExtrasRepository
 import com.luminagallery.drive.data.repository.GalleryRepository
+import com.luminagallery.drive.data.repository.OcrIndexProgress
+import com.luminagallery.drive.data.repository.OcrIndexerManager
 import com.luminagallery.drive.domain.model.MediaItem
 import com.luminagallery.drive.domain.model.MediaType
 import com.luminagallery.drive.domain.usecase.ExportMediaUseCase
@@ -51,6 +54,8 @@ data class SearchUiState(
     val recentSearches: List<String> = emptyList(),
     val suggestedCities: List<String> = emptyList(),
     val suggestedTags: List<String> = emptyList(),
+    val onlyWithText: Boolean = false,
+    val ocrProgress: OcrIndexProgress = OcrIndexProgress(),
     val gridColumns: Int = 3,
     val isUnmeteredWifi: Boolean = true,
     val selectedIds: Set<String> = emptySet(),
@@ -68,13 +73,15 @@ private data class SearchQueryParams(
     val query: String,
     val mediaType: MediaType?,
     val fromEpochMs: Long?,
-    val toEpochMs: Long?
+    val toEpochMs: Long?,
+    val onlyWithText: Boolean = false
 )
 
 class SearchViewModel(
     private val repository: GalleryRepository,
     private val localMediaRepository: LocalMediaRepository,
     private val extrasRepository: GalleryExtrasRepository,
+    private val ocrIndexerManager: OcrIndexerManager,
     private val preferencesManager: PreferencesManager,
     private val exportMediaUseCase: ExportMediaUseCase,
     networkMonitor: NetworkMonitor
@@ -82,8 +89,18 @@ class SearchViewModel(
 
     private val queryFlow = MutableStateFlow("")
     private val mediaTypeFlow = MutableStateFlow<MediaType?>(null)
+    private val onlyWithTextFlow = MutableStateFlow(false)
     private val datePresetFlow = MutableStateFlow(DateFilterPreset.ANY)
     private val customRangeFlow = MutableStateFlow<Pair<Long?, Long?>>(null to null)
+
+    init {
+        viewModelScope.launch(Dispatchers.IO) {
+            val cachedLocal = localMediaRepository.getCachedAllMedia()
+            if (cachedLocal.isNotEmpty()) {
+                ocrIndexerManager.syncOcrIndex(cachedLocal, maxNewItemsPerRun = 260)
+            }
+        }
+    }
 
     private val selectedIdsFlow = MutableStateFlow<Set<String>>(emptySet())
     private val isExportingFlow = MutableStateFlow(false)
@@ -96,13 +113,14 @@ class SearchViewModel(
         queryFlow.debounce(110L),
         mediaTypeFlow,
         datePresetFlow,
-        customRangeFlow
-    ) { query, type, preset, (customFrom, customTo) ->
+        customRangeFlow,
+        onlyWithTextFlow
+    ) { query, type, preset, (customFrom, customTo), onlyText ->
         val (from, to) = resolveDateRange(preset, customFrom, customTo)
-        SearchQueryParams(query, type, from, to)
+        SearchQueryParams(query, type, from, to, onlyText)
     }
 
-    // Combined offline index across phone media, cached Drive media, GPS cities, and custom tags/notes
+    // Combined offline index across phone media, cached Drive media, GPS cities, custom tags/notes, and ML Kit OCR text
     private val allSearchableMediaFlow = combine(
         localMediaRepository.observeAllLocalMedia(),
         repository.searchMedia("", null, null, null)
@@ -113,11 +131,15 @@ class SearchViewModel(
     private val enrichmentFlow = combine(
         extrasRepository.cachedLocationsMapFlow,
         extrasRepository.mediaAnnotationsFlow,
+        extrasRepository.ocrTextMapFlow,
+        ocrIndexerManager.progress,
         preferencesManager.recentSearchesFlow
-    ) { locs, annotations, recents ->
+    ) { locs, annotations, ocrMap, ocrProg, recents ->
         SearchEnrichment(
             locationsByItem = locs,
             annotationsByItem = annotations,
+            ocrByItem = ocrMap,
+            ocrProgress = ocrProg,
             recentSearches = recents,
             topCities = locs.values
                 .map { it.city }
@@ -155,11 +177,13 @@ class SearchViewModel(
             if (params.mediaType != null && item.mediaType != params.mediaType) return@filter false
             if (params.fromEpochMs != null && item.createdTimeEpochMs < params.fromEpochMs) return@filter false
             if (params.toEpochMs != null && item.createdTimeEpochMs > params.toEpochMs) return@filter false
+            val ocr = enrich.ocrByItem[item.id]
+            if (params.onlyWithText && (ocr == null || !ocr.hasText)) return@filter false
             if (tokens.isEmpty()) return@filter true
 
             val loc = enrich.locationsByItem[item.id]
             val ann = enrich.annotationsByItem[item.id]
-            tokens.all { token -> matchesToken(item, loc, ann, token) }
+            tokens.all { token -> matchesToken(item, loc, ann, ocr, token) }
         }
         filtered to enrich
     }.flowOn(Dispatchers.Default)
@@ -168,9 +192,10 @@ class SearchViewModel(
         queryFlow,
         mediaTypeFlow,
         datePresetFlow,
-        customRangeFlow
-    ) { query, type, preset, range ->
-        SearchControls(query, type, preset, range.first, range.second)
+        customRangeFlow,
+        onlyWithTextFlow
+    ) { query, type, preset, range, onlyText ->
+        SearchControls(query, type, preset, range.first, range.second, onlyText)
     }
 
     private val interactionFlow = combine(
@@ -207,6 +232,8 @@ class SearchViewModel(
             recentSearches = enrich.recentSearches,
             suggestedCities = enrich.topCities,
             suggestedTags = enrich.topTags,
+            onlyWithText = controls.onlyWithText,
+            ocrProgress = enrich.ocrProgress,
             gridColumns = prefs.gridColumns,
             isUnmeteredWifi = net.isUnmeteredWifi || !prefs.wifiOnlyHighRes,
             selectedIds = interaction.selectedIds,
@@ -227,6 +254,7 @@ class SearchViewModel(
         item: MediaItem,
         location: PhotoLocationEntity?,
         annotation: MediaAnnotationEntity?,
+        ocr: PhotoOcrEntity?,
         token: String
     ): Boolean {
         if (item.name.contains(token, ignoreCase = true)) return true
@@ -247,10 +275,21 @@ class SearchViewModel(
                     annotation.note.contains(token, ignoreCase = true)
                 )
         ) return true
+        if (ocr != null && ocr.hasText && ocr.extractedText.contains(token, ignoreCase = true)) return true
         if (token.equals("video", ignoreCase = true) && item.isVideo) return true
         if (token.equals("raw", ignoreCase = true) && item.isRaw) return true
         if (token.equals("drive", ignoreCase = true) && !item.isLocal) return true
         return false
+    }
+
+    fun toggleOnlyWithText() {
+        onlyWithTextFlow.update { !it }
+    }
+
+    fun setItemSelected(itemId: String, selected: Boolean) {
+        selectedIdsFlow.update { current ->
+            if (selected) current + itemId else current - itemId
+        }
     }
 
     fun onQueryChanged(value: String) {
@@ -399,6 +438,8 @@ class SearchViewModel(
     private data class SearchEnrichment(
         val locationsByItem: Map<String, PhotoLocationEntity>,
         val annotationsByItem: Map<String, MediaAnnotationEntity>,
+        val ocrByItem: Map<String, PhotoOcrEntity>,
+        val ocrProgress: OcrIndexProgress,
         val recentSearches: List<String>,
         val topCities: List<String>,
         val topTags: List<String>
@@ -409,7 +450,8 @@ class SearchViewModel(
         val mediaType: MediaType?,
         val preset: DateFilterPreset,
         val customFrom: Long?,
-        val customTo: Long?
+        val customTo: Long?,
+        val onlyWithText: Boolean
     )
 
     private data class SearchInteraction(
@@ -427,6 +469,7 @@ class SearchViewModel(
             repository = container.galleryRepository,
             localMediaRepository = container.localMediaRepository,
             extrasRepository = container.galleryExtrasRepository,
+            ocrIndexerManager = container.ocrIndexerManager,
             preferencesManager = container.preferencesManager,
             exportMediaUseCase = container.exportMediaUseCase,
             networkMonitor = container.networkMonitor

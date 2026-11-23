@@ -62,7 +62,9 @@ class PreferencesManager(private val context: Context) {
             wifiOnlyHighRes = prefs[KEY_WIFI_ONLY_HIGH_RES] ?: true,
             externalGalleryPackage = prefs[KEY_EXTERNAL_GALLERY_PACKAGE].orEmpty(),
             externalGalleryLabel = prefs[KEY_EXTERNAL_GALLERY_LABEL].orEmpty(),
-            autoCheckUpdates = prefs[KEY_AUTO_CHECK_UPDATES] ?: true
+            autoCheckUpdates = prefs[KEY_AUTO_CHECK_UPDATES] ?: true,
+            stripLocationOnShare = prefs[KEY_STRIP_LOCATION_ON_SHARE] ?: false,
+            lockHiddenAlbums = prefs[KEY_LOCK_HIDDEN_ALBUMS] ?: false
         ).also { latestPreferences = it }
     }
 
@@ -200,6 +202,18 @@ class PreferencesManager(private val context: Context) {
         }
     }
 
+    suspend fun setStripLocationOnShare(enabled: Boolean) {
+        context.galleryDataStore.edit { prefs ->
+            prefs[KEY_STRIP_LOCATION_ON_SHARE] = enabled
+        }
+    }
+
+    suspend fun setLockHiddenAlbums(enabled: Boolean) {
+        context.galleryDataStore.edit { prefs ->
+            prefs[KEY_LOCK_HIDDEN_ALBUMS] = enabled
+        }
+    }
+
     suspend fun getDismissedUpdateSha(): String =
         context.galleryDataStore.data.map { it[KEY_DISMISSED_UPDATE_SHA].orEmpty() }.first()
 
@@ -282,6 +296,8 @@ class PreferencesManager(private val context: Context) {
             prefs[KEY_PREFETCH_ADJACENT] = synced.prefetchAdjacentMedia
             prefs[KEY_WIFI_ONLY_HIGH_RES] = synced.wifiOnlyHighRes
             prefs[KEY_AUTO_CHECK_UPDATES] = synced.autoCheckUpdates
+            prefs[KEY_STRIP_LOCATION_ON_SHARE] = synced.stripLocationOnShare
+            prefs[KEY_LOCK_HIDDEN_ALBUMS] = synced.lockHiddenAlbums
         }
     }
 
@@ -342,6 +358,8 @@ class PreferencesManager(private val context: Context) {
         private val KEY_EXTERNAL_GALLERY_PACKAGE = stringPreferencesKey("external_gallery_package")
         private val KEY_EXTERNAL_GALLERY_LABEL = stringPreferencesKey("external_gallery_label")
         private val KEY_AUTO_CHECK_UPDATES = booleanPreferencesKey("auto_check_updates")
+        private val KEY_STRIP_LOCATION_ON_SHARE = booleanPreferencesKey("strip_location_on_share")
+        private val KEY_LOCK_HIDDEN_ALBUMS = booleanPreferencesKey("lock_hidden_albums")
         private val KEY_DISMISSED_UPDATE_SHA = stringPreferencesKey("dismissed_update_sha")
         private val KEY_LAST_UPDATE_CHECK_MS = longPreferencesKey("last_update_check_ms")
         private val KEY_RECENT_SEARCHES = stringPreferencesKey("recent_searches")

@@ -28,11 +28,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.DocumentScanner
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Label
 import androidx.compose.material.icons.rounded.LocationOn
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.AssistChip
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.DateRangePicker
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -66,12 +68,14 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.luminagallery.drive.LocalAppContainer
 import com.luminagallery.drive.domain.model.MediaType
+import com.luminagallery.drive.ui.components.CollagePdfBottomSheet
 import com.luminagallery.drive.ui.components.ExifMetadataBottomSheet
 import com.luminagallery.drive.ui.components.FastScrollThumb
 import com.luminagallery.drive.ui.components.FormatUtils
 import com.luminagallery.drive.ui.components.MediaGridItem
 import com.luminagallery.drive.ui.components.MultiSelectActionBar
 import com.luminagallery.drive.ui.components.PinchZoomGridContainer
+import com.luminagallery.drive.ui.components.photoGridDragSelect
 
 @OptIn(ExperimentalSharedTransitionApi::class, ExperimentalMaterial3Api::class)
 @Composable
@@ -97,6 +101,7 @@ fun SearchScreen(
     val gridState = rememberLazyGridState()
     val snackbarHostState = remember { SnackbarHostState() }
     var showDateRangeDialog by remember { mutableStateOf(false) }
+    var showCollagePdfSheet by remember { mutableStateOf(false) }
 
     LaunchedEffect(uiState.pendingShareUris) {
         val uris = uiState.pendingShareUris ?: return@LaunchedEffect
@@ -141,7 +146,7 @@ fun SearchScreen(
                         TextField(
                             value = uiState.query,
                             onValueChange = viewModel::onQueryChanged,
-                            placeholder = { Text("Search city, tag, date, camera, or name…") },
+                            placeholder = { Text("Search text in photos, city, tag, or name…") },
                             singleLine = true,
                             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                             keyboardActions = KeyboardActions(onSearch = { viewModel.commitSearchHistory() }),
@@ -194,6 +199,20 @@ fun SearchScreen(
                             label = { Text("RAW") }
                         )
                     }
+                    item(key = "filter_has_text") {
+                        FilterChip(
+                            selected = uiState.onlyWithText,
+                            onClick = viewModel::toggleOnlyWithText,
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Rounded.DocumentScanner,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            },
+                            label = { Text("Text in photos") }
+                        )
+                    }
                     items(
                         items = DateFilterPreset.entries,
                         key = { "date_${it.name}" }
@@ -217,6 +236,26 @@ fun SearchScreen(
                                 }
                             } else null,
                             label = { Text(preset.label) }
+                        )
+                    }
+                }
+                if (uiState.ocrProgress.isIndexing) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 20.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(13.dp),
+                            strokeWidth = 1.8.dp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = "Scanning text in photos offline (${uiState.ocrProgress.indexedCount}/${uiState.ocrProgress.totalCount})…",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
@@ -257,6 +296,7 @@ fun SearchScreen(
                     onColumnsChange = viewModel::setGridColumns,
                     modifier = Modifier.fillMaxSize()
                 ) {
+                    val orderedResultIds = remember(uiState.results) { uiState.results.map { it.id } }
                     LazyVerticalGrid(
                         columns = GridCells.Fixed(uiState.gridColumns),
                         state = gridState,
@@ -268,7 +308,17 @@ fun SearchScreen(
                         ),
                         horizontalArrangement = Arrangement.spacedBy(2.dp),
                         verticalArrangement = Arrangement.spacedBy(2.dp),
-                        modifier = Modifier.fillMaxSize()
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .photoGridDragSelect(
+                                gridState = gridState,
+                                orderedItemIds = orderedResultIds,
+                                keyToItemId = { key ->
+                                    (key as? String)?.takeUnless { it == "smart_discovery" }
+                                },
+                                selectedIds = uiState.selectedIds,
+                                onSetItemSelected = viewModel::setItemSelected
+                            )
                     ) {
                         // Recent searches & smart city/tag discovery chips when query is blank
                         if (uiState.query.isBlank() &&
@@ -389,7 +439,7 @@ fun SearchScreen(
                                         )
                                     }
                                 },
-                                onLongClick = { viewModel.toggleSelection(item.id) },
+                                onLongClick = null,
                                 showCloudBadge = true,
                                 modifier = Modifier.animateItem()
                             )
@@ -405,8 +455,11 @@ fun SearchScreen(
                 }
             }
 
-            val comparableIds = remember(uiState.selectedIds, uiState.results) {
-                uiState.results.filter { it.id in uiState.selectedIds && !it.isVideo }.map { it.id }
+            val selectedSearchPhotos = remember(uiState.selectedIds, uiState.results) {
+                uiState.results.filter { it.id in uiState.selectedIds && !it.isVideo }
+            }
+            val comparableIds = remember(selectedSearchPhotos) {
+                selectedSearchPhotos.map { it.id }
             }
             MultiSelectActionBar(
                 visible = uiState.isSelectionMode,
@@ -419,11 +472,31 @@ fun SearchScreen(
                         onOpenCompare(comparableIds)
                     }
                 } else null,
+                onCreateCollagePdf = if (selectedSearchPhotos.isNotEmpty()) {
+                    { showCollagePdfSheet = true }
+                } else null,
                 onShare = viewModel::shareSelected,
                 onSaveToDevice = viewModel::saveSelectedToDevice,
                 onInfo = viewModel::openSelectedInfo,
                 onClearSelection = viewModel::clearSelection,
                 modifier = Modifier.align(Alignment.BottomCenter)
+            )
+        }
+    }
+
+    if (showCollagePdfSheet) {
+        val photosForCreation = remember(uiState.selectedIds, uiState.results) {
+            uiState.results.filter { it.id in uiState.selectedIds && !it.isVideo }
+        }
+        if (photosForCreation.isNotEmpty()) {
+            CollagePdfBottomSheet(
+                items = photosForCreation,
+                onDismiss = { showCollagePdfSheet = false },
+                onCompleted = { msg ->
+                    showCollagePdfSheet = false
+                    viewModel.clearSelection()
+                    viewModel.showMessage(msg)
+                }
             )
         }
     }
