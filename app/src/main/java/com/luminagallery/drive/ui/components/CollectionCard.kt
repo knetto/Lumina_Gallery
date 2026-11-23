@@ -94,6 +94,22 @@ fun CollectionCard(
     val hostView = LocalView.current
     val coverBoundsRef = remember { arrayOf<androidx.compose.ui.geometry.Rect?>(null) }
 
+    val singleCoverMorphInfo = remember(collection.previewCovers, isUnmeteredWifi) {
+        val single = collection.previewCovers.singleOrNull()
+        if (single == null) {
+            null
+        } else {
+            AlbumCoverMorphInfo(
+                isLocal = single.isLocal,
+                coverItemId = single.itemId,
+                coverThumbnailLink = single.thumbnailLink,
+                coverIsVideo = single.isVideo,
+                coverSizeBytes = single.sizeBytes,
+                isUnmeteredWifi = isUnmeteredWifi
+            )
+        }
+    }
+
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -102,6 +118,7 @@ fun CollectionCard(
                 interactionSource = interactionSource,
                 indication = null,
                 onClick = {
+                    originTracker.recordAlbumCover(collection.id, singleCoverMorphInfo)
                     coverBoundsRef[0]?.let { rect ->
                         originTracker.recordBounds(
                             key = collection.id,
@@ -121,6 +138,7 @@ fun CollectionCard(
                 .onGloballyPositioned { coords ->
                     val rect = coords.boundsInRoot()
                     coverBoundsRef[0] = rect
+                    originTracker.recordAlbumCover(collection.id, singleCoverMorphInfo)
                     originTracker.recordBounds(
                         key = collection.id,
                         boundsInRoot = rect,
@@ -130,6 +148,7 @@ fun CollectionCard(
                     )
                 }
                 .graphicsLayer {
+                    alpha = if (originTracker.activeMorphKey == collection.id) 0f else 1f
                     scaleX = coverScale
                     scaleY = coverScale
                 }

@@ -62,7 +62,8 @@ class ViewerViewModel(
     private val extrasRepository: GalleryExtrasRepository,
     private val preferencesManager: PreferencesManager,
     private val exportMediaUseCase: ExportMediaUseCase,
-    networkMonitor: NetworkMonitor
+    networkMonitor: NetworkMonitor,
+    private val initialTappedItem: MediaItem? = null
 ) : ViewModel() {
 
     private val isExportingFlow = MutableStateFlow(false)
@@ -174,11 +175,51 @@ class ViewerViewModel(
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000L),
-        initialValue = ViewerUiState(
-            isUnmeteredWifi = networkMonitor.networkState.value.isUnmeteredWifi,
-            isOnline = networkMonitor.networkState.value.isOnline
-        )
+        initialValue = buildInstantInitialState(networkMonitor)
     )
+
+    /**
+     * Populates frame 0 synchronously from in-memory caches (or the tapped grid item) so opening a
+     * photo expands the real image immediately out of its thumbnail with zero black spinner flash.
+     */
+    private fun buildInstantInitialState(networkMonitor: NetworkMonitor): ViewerUiState {
+        val prefs = preferencesManager.latestPreferences
+        val net = networkMonitor.networkState.value
+        val cached = when {
+            launchContext.specialFilter == SpecialGalleryFilter.VIDEOS ->
+                localMediaRepository.getCachedAlbumMedia(LocalMediaRepository.LOCAL_BUCKET_VIDEOS)
+            launchContext.specialFilter == SpecialGalleryFilter.RECENT ->
+                localMediaRepository.getCachedAlbumMedia(LocalMediaRepository.LOCAL_BUCKET_ALL).take(300)
+            launchContext.specialFilter != null || launchContext.isSearchMode -> emptyList()
+            LocalMediaRepository.isLocalFolderId(launchContext.folderId) ->
+                localMediaRepository.getCachedAlbumMedia(launchContext.folderId)
+            !launchContext.isFlattened && launchContext.folderId.isNotBlank() ->
+                repository.getCachedFolderMedia(launchContext.folderId).orEmpty()
+            else -> emptyList()
+        }.distinctBy { it.id }
+
+        val idxInCache = cached.indexOfFirst { it.id == launchContext.initialItemId }
+        val initialItems: List<MediaItem>
+        val initialIndex: Int
+        if (idxInCache >= 0) {
+            initialItems = cached
+            initialIndex = idxInCache
+        } else if (initialTappedItem != null && initialTappedItem.id == launchContext.initialItemId) {
+            initialItems = listOf(initialTappedItem)
+            initialIndex = 0
+        } else {
+            initialItems = emptyList()
+            initialIndex = 0
+        }
+
+        return ViewerUiState(
+            items = initialItems,
+            initialPageIndex = initialIndex,
+            isUnmeteredWifi = net.isUnmeteredWifi || !prefs.wifiOnlyHighRes,
+            isOnline = net.isOnline,
+            preferences = prefs
+        )
+    }
 
     fun toggleFavorite(item: MediaItem) {
         val currentlyFav = item.id in uiState.value.favoriteItemIds
@@ -277,7 +318,8 @@ class ViewerViewModel(
 
     class Factory(
         private val launchContext: ViewerLaunchContext,
-        private val container: AppContainer
+        private val container: AppContainer,
+        private val initialTappedItem: MediaItem? = null
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T = ViewerViewModel(
@@ -287,7 +329,8 @@ class ViewerViewModel(
             extrasRepository = container.galleryExtrasRepository,
             preferencesManager = container.preferencesManager,
             exportMediaUseCase = container.exportMediaUseCase,
-            networkMonitor = container.networkMonitor
+            networkMonitor = container.networkMonitor,
+            initialTappedItem = initialTappedItem
         ) as T
     }
 }

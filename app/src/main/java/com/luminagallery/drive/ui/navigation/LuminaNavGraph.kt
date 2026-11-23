@@ -375,8 +375,12 @@ fun LuminaNavGraph(
                         entryId = backStackEntry.id,
                         targetKey = route.collectionId,
                         targetCornerRadius = 18.dp,
-                        verticalCropBias = 0.16f,
-                        backdropMaxAlpha = 0.28f
+                        verticalCropBias = 0f,
+                        backdropMaxAlpha = 0.34f,
+                        fallbackToLastBounds = false,
+                        midFlightCornerBump = 8.dp,
+                        hideSourceWhileMorphing = true,
+                        useAlbumCoverCrossfade = true
                     ) {
                         CollectionScreen(
                             viewModel = collectionViewModel,
@@ -436,8 +440,12 @@ fun LuminaNavGraph(
                         entryId = backStackEntry.id,
                         targetKey = activeFolderId.folderId.ifBlank { route.folderId },
                         targetCornerRadius = 18.dp,
-                        verticalCropBias = 0.16f,
-                        backdropMaxAlpha = 0.28f
+                        verticalCropBias = 0f,
+                        backdropMaxAlpha = 0.34f,
+                        fallbackToLastBounds = false,
+                        midFlightCornerBump = 8.dp,
+                        hideSourceWhileMorphing = true,
+                        useAlbumCoverCrossfade = true
                     ) {
                         FolderScreen(
                             viewModel = folderViewModel,
@@ -545,6 +553,9 @@ fun LuminaNavGraph(
                     val specialFilter = route.specialFilterName?.let {
                         runCatching { SpecialGalleryFilter.valueOf(it) }.getOrNull()
                     }
+                    val initialTappedItem = remember(route.initialItemId) {
+                        originTracker.lastTappedMediaItem?.takeIf { it.id == route.initialItemId }
+                    }
                     val viewerViewModel: ViewerViewModel = viewModel(
                         key = "viewer_${route.folderId}_${route.initialItemId}_${route.isFlattened}_${route.isSearchMode}_${route.specialFilterName}",
                         factory = ViewerViewModel.Factory(
@@ -559,7 +570,8 @@ fun LuminaNavGraph(
                                 toEpochMs = route.toEpochMs,
                                 specialFilter = specialFilter
                             ),
-                            container = container
+                            container = container,
+                            initialTappedItem = initialTappedItem
                         )
                     )
                     val targetPhotoKey = "media_${activeViewerItemId ?: route.initialItemId}"
@@ -572,7 +584,9 @@ fun LuminaNavGraph(
                         backdropMaxAlpha = 1f,
                         fallbackToLastBounds = false,
                         maxShadowElevation = 0.dp,
-                        midFlightCornerBump = 12.dp,
+                        midFlightCornerBump = 8.dp,
+                        hideSourceWhileMorphing = true,
+                        useAlbumCoverCrossfade = false,
                         sourceRectProvider = { originTracker.viewerContentRect },
                         backdropAlphaProvider = { originTracker.viewerBackdropAlpha }
                     ) { isRectMorphing ->
@@ -580,6 +594,7 @@ fun LuminaNavGraph(
                             viewModel = viewerViewModel,
                             sharedTransitionScope = this@SharedTransitionLayout,
                             animatedVisibilityScope = this@composable,
+                            initialItemId = route.initialItemId,
                             isRectMorphing = isRectMorphing,
                             onActiveItemChanged = { activeId ->
                                 activeViewerItemId = activeId

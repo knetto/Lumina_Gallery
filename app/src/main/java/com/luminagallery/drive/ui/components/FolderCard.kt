@@ -107,9 +107,36 @@ fun FolderCard(
     val hostView = LocalView.current
     val coverBoundsRef = remember { arrayOf<androidx.compose.ui.geometry.Rect?>(null) }
 
+    val singleCoverMorphInfo = remember(
+        folder.isLocal,
+        folder.subfolderCount,
+        folder.previewCovers.size,
+        folder.coverItemId,
+        folder.coverThumbnailLink,
+        folder.coverIsVideo,
+        folder.coverSizeBytes,
+        isUnmeteredWifi
+    ) {
+        val isCollage = !folder.isLocal && folder.subfolderCount > 0 && folder.previewCovers.size >= 2
+        val coverId = folder.coverItemId
+        if (isCollage || coverId.isNullOrBlank()) {
+            null
+        } else {
+            AlbumCoverMorphInfo(
+                isLocal = folder.isLocal,
+                coverItemId = coverId,
+                coverThumbnailLink = folder.coverThumbnailLink,
+                coverIsVideo = folder.coverIsVideo,
+                coverSizeBytes = folder.coverSizeBytes,
+                isUnmeteredWifi = isUnmeteredWifi
+            )
+        }
+    }
+
     val wrappedOnClick = {
         val vw = hostView.width.toFloat()
         val vh = hostView.height.toFloat()
+        originTracker.recordAlbumCover(folder.id, singleCoverMorphInfo)
         coverBoundsRef[0]?.let { rect ->
             originTracker.recordBounds(folder.id, rect, vw, vh, markAsLast = true)
         }
@@ -143,6 +170,7 @@ fun FolderCard(
                 .onGloballyPositioned { coords ->
                     val rect = coords.boundsInRoot()
                     coverBoundsRef[0] = rect
+                    originTracker.recordAlbumCover(folder.id, singleCoverMorphInfo)
                     originTracker.recordBounds(
                         key = folder.id,
                         boundsInRoot = rect,
@@ -152,6 +180,7 @@ fun FolderCard(
                     )
                 }
                 .graphicsLayer {
+                    alpha = if (originTracker.activeMorphKey == folder.id) 0f else 1f
                     scaleX = coverScale
                     scaleY = coverScale
                 }

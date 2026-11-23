@@ -12,6 +12,7 @@ import androidx.annotation.OptIn as MediaOptIn
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.EnterExitState
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.animation.core.Animatable
@@ -178,6 +179,7 @@ fun ViewerScreen(
     viewModel: ViewerViewModel,
     sharedTransitionScope: SharedTransitionScope,
     animatedVisibilityScope: AnimatedVisibilityScope,
+    initialItemId: String = "",
     isRectMorphing: Boolean = false,
     onActiveItemChanged: (String) -> Unit,
     onOpenEditor: (itemId: String, sourceUri: String, displayName: String, isLocal: Boolean) -> Unit = { _, _, _, _ -> },
@@ -285,10 +287,12 @@ fun ViewerScreen(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color.Black),
+                .background(if (isRectMorphing) Color.Transparent else Color.Black),
             contentAlignment = Alignment.Center
         ) {
-            CircularProgressIndicator(color = Color.White)
+            if (!isRectMorphing) {
+                CircularProgressIndicator(color = Color.White)
+            }
         }
         return
     }
@@ -297,6 +301,19 @@ fun ViewerScreen(
         initialPage = uiState.initialPageIndex.coerceIn(0, items.lastIndex),
         pageCount = { items.size }
     )
+
+    // If ViewerViewModel booted with the single tapped item for instant frame-0 morphing and the
+    // full album/search list arrives moments later, silently lock onto the exact same item index.
+    var hasSyncedFullList by remember { mutableStateOf(items.size > 1 || initialItemId.isBlank()) }
+    LaunchedEffect(items.size) {
+        if (!hasSyncedFullList && items.size > 1) {
+            val targetIdx = items.indexOfFirst { it.id == initialItemId }
+            if (targetIdx >= 0 && pagerState.currentPage != targetIdx) {
+                pagerState.scrollToPage(targetIdx)
+            }
+            hasSyncedFullList = true
+        }
+    }
 
     val currentItem = items.getOrNull(pagerState.currentPage) ?: items.first()
     val settledItem = items.getOrNull(pagerState.settledPage) ?: currentItem
@@ -322,11 +339,13 @@ fun ViewerScreen(
     }
 
     // Reset zoom/motion immediately when page changes, and detect Motion Photos once settled
-    LaunchedEffect(currentItem.id) {
+    LaunchedEffect(currentItem.id, hasSyncedFullList) {
         isCurrentPageZoomed = false
         isPlayingMotionPhoto = false
         currentMotionInfo = null
-        onActiveItemChanged(currentItem.id)
+        if (hasSyncedFullList || currentItem.id == initialItemId || initialItemId.isBlank()) {
+            onActiveItemChanged(currentItem.id)
+        }
     }
 
     LaunchedEffect(settledItem.id) {
@@ -414,12 +433,12 @@ fun ViewerScreen(
             label = "mediaBottomClearance"
         )
 
-        // Publish the exact on-screen rect of the current photo so the close morph flies the real
-        // picture (not the full screen) home into its grid tile, plus the live backdrop opacity so
-        // a drag-to-dismiss hands over seamlessly to the fly-home animation.
+        // Publish the exact on-screen rect of the current photo so the open & close morphs fly the
+        // real picture (not the full screen) straight out of & home into its grid tile.
         val navBarBottomPx = WindowInsets.navigationBars.getBottom(viewerDensity)
         val activeContentItem = items.getOrNull(pagerState.currentPage)
         val clearancePx = with(viewerDensity) { bottomDockClearance.coerceAtLeast(0.dp).toPx() }
+        var decodedAspectForActive by remember(activeContentItem?.id) { mutableStateOf<Float?>(null) }
         SideEffect {
             originTracker.viewerBackdropAlpha = (1f - dismissDragFraction * 0.6f).coerceIn(0f, 1f)
             val rootW = if (viewerRootSize.width > 0) viewerRootSize.width.toFloat() else view.width.toFloat()
@@ -427,7 +446,8 @@ fun ViewerScreen(
             originTracker.viewerContentRect = fittedViewerContentRect(
                 item = activeContentItem,
                 areaWidth = rootW,
-                areaHeight = rootH - navBarBottomPx - clearancePx
+                areaHeight = rootH - navBarBottomPx - clearancePx,
+                fallbackAspectRatio = decodedAspectForActive
             )
         }
 
@@ -487,16 +507,23 @@ fun ViewerScreen(
                     onSwipeUpForDetails = {
                         if (isActivePage) viewModel.openExifSheet(pageItem)
                     },
+                    onImageAspectResolved = { aspect ->
+                        if (isActivePage) decodedAspectForActive = aspect
+                    },
                     onDismiss = onDismiss
                 )
             }
         }
 
-        // Translucent Top Bar
+        // Translucent Top Bar (vanishes cleanly on morph close so it never shrinks inside the photo!)
         AnimatedVisibility(
             visible = showChromeNow,
-            enter = fadeIn(tween(180)) + slideInVertically { -it / 2 },
-            exit = fadeOut(tween(150)) + slideOutVertically { -it / 2 },
+            enter = fadeIn(tween(150)),
+            exit = if (isRectMorphing) {
+                ExitTransition.None
+            } else {
+                fadeOut(tween(150)) + slideOutVertically { -it / 2 }
+            },
             modifier = Modifier.align(Alignment.TopCenter)
         ) {
             Row(
@@ -788,8 +815,12 @@ fun ViewerScreen(
         //  3. Minimalist Icon-Only Action Row (Heart | Info | Share | Save or Delete)
         AnimatedVisibility(
             visible = showChromeNow,
-            enter = fadeIn(tween(180)) + slideInVertically { it / 2 },
-            exit = fadeOut(tween(150)) + slideOutVertically { it / 2 },
+            enter = fadeIn(tween(150)),
+            exit = if (isRectMorphing) {
+                ExitTransition.None
+            } else {
+                fadeOut(tween(150)) + slideOutVertically { it / 2 }
+            },
             modifier = Modifier.align(Alignment.BottomCenter)
         ) {
             val isFavorited = currentItem.id in uiState.favoriteItemIds
@@ -1564,6 +1595,7 @@ private fun ZoomablePhotoPage(
     onZoomStateChanged: (Boolean) -> Unit,
     onVerticalDismissProgress: (Float) -> Unit,
     onSwipeUpForDetails: () -> Unit,
+    onImageAspectResolved: (Float) -> Unit = {},
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -1879,6 +1911,14 @@ private fun ZoomablePhotoPage(
             imageLoader = imageLoader,
             contentDescription = item.name,
             contentScale = ContentScale.Fit,
+            onSuccess = { state ->
+                val intrinsic = state.painter.intrinsicSize
+                if (intrinsic.width > 1f && intrinsic.height > 1f &&
+                    !intrinsic.width.isNaN() && !intrinsic.height.isNaN()
+                ) {
+                    onImageAspectResolved(intrinsic.width / intrinsic.height)
+                }
+            },
             modifier = modifier
                 .fillMaxSize()
                 .graphicsLayer {
@@ -1926,12 +1966,20 @@ private const val VIEWER_MAX_DECODE_PX = 3200
  * On-screen rect (root coordinates) of a ContentScale.Fit photo / video inside the viewer's pager
  * area, computed purely from geometry so it stays valid while the morph frame is transformed.
  */
-private fun fittedViewerContentRect(item: MediaItem?, areaWidth: Float, areaHeight: Float): Rect? {
+private fun fittedViewerContentRect(
+    item: MediaItem?,
+    areaWidth: Float,
+    areaHeight: Float,
+    fallbackAspectRatio: Float? = null
+): Rect? {
     if (item == null || areaWidth <= 1f || areaHeight <= 1f) return null
-    val iw = item.effectiveWidth ?: return null
-    val ih = item.effectiveHeight ?: return null
-    if (iw <= 0 || ih <= 0) return null
-    val imageAspect = iw.toFloat() / ih.toFloat()
+    val iw = item.effectiveWidth
+    val ih = item.effectiveHeight
+    val imageAspect = when {
+        iw != null && ih != null && iw > 0 && ih > 0 -> iw.toFloat() / ih.toFloat()
+        fallbackAspectRatio != null && fallbackAspectRatio > 0.05f -> fallbackAspectRatio
+        else -> return null
+    }
     val areaAspect = areaWidth / areaHeight
     val fittedW: Float
     val fittedH: Float

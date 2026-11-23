@@ -22,15 +22,23 @@ import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.State
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.drawBehind
@@ -45,21 +53,26 @@ import androidx.compose.ui.graphics.Outline
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import coil3.ImageLoader
+import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import coil3.request.allowRgb565
 import coil3.request.crossfade
 import coil3.size.Precision
+import com.luminagallery.drive.LocalGalleryImageLoader
 import com.luminagallery.drive.data.remote.DriveConstants
 import com.luminagallery.drive.data.repository.LocalThumbnailRequest
 import com.luminagallery.drive.domain.model.MediaItem
 import kotlin.math.PI
 import kotlin.math.max
+import kotlin.math.pow
 import kotlin.math.sin
 
 /**
@@ -96,22 +109,22 @@ object OneUiMotion {
      * Xiaomi HyperOS page push / pop curve: confident launch with a long, soft settle.
      * Used for full-width horizontal page slides (Settings, Search, Editor...).
      */
-    val PageSlideEasing = CubicBezierEasing(0.24f, 0.86f, 0.22f, 1f)
-    const val PAGE_SLIDE_MS = 400
+    val PageSlideEasing = CubicBezierEasing(0.22f, 0.90f, 0.24f, 1f)
+    const val PAGE_SLIDE_MS = 340
 
-    /** Photo / album card bloom-out (thumbnail -> full screen). */
-    val MorphOpenEasing = CubicBezierEasing(0.20f, 0.92f, 0.24f, 1f)
-    const val MORPH_OPEN_MS = 380
+    /** Photo / album card bloom-out (thumbnail -> full screen): instant tactile lift, silky settle. */
+    val MorphOpenEasing = CubicBezierEasing(0.18f, 0.90f, 0.22f, 1f)
+    const val MORPH_OPEN_MS = 330
 
     /**
-     * Photo / album card fly-home (full screen -> thumbnail). Starts with real velocity right
-     * on release (no sluggish ease-in) and decelerates gently into the exact grid tile.
+     * Photo / album card fly-home (full screen -> thumbnail). Starts immediately on release with
+     * spring-like velocity and lands cleanly right into the exact grid slot.
      */
-    val MorphCloseEasing = CubicBezierEasing(0.26f, 0.80f, 0.20f, 1f)
-    const val MORPH_CLOSE_MS = 380
+    val MorphCloseEasing = CubicBezierEasing(0.22f, 0.88f, 0.24f, 1f)
+    const val MORPH_CLOSE_MS = 310
 
     /** Depth scrim drawn over the page sitting underneath a sliding page. */
-    const val PAGE_DIM_ALPHA = 0.30f
+    const val PAGE_DIM_ALPHA = 0.28f
 
     /** Critically damped Apple/HyperOS fluid spring (zero jarring bounce, silky settle). */
     fun <T> fluidSpring() = spring<T>(
@@ -240,10 +253,20 @@ fun BoxScope.OneUiCoverHighlightOverlay(
     }
 }
 
+@Immutable
+data class AlbumCoverMorphInfo(
+    val isLocal: Boolean,
+    val coverItemId: String,
+    val coverThumbnailLink: String?,
+    val coverIsVideo: Boolean,
+    val coverSizeBytes: Long,
+    val isUnmeteredWifi: Boolean
+)
+
 /**
- * Tracks the exact normalized screen center (`TransformOrigin`) of the album or collection card
- * the user tapped so the open/close depth-zoom animation expands directly OUT of the tapped card
- * and collapses right BACK into it — matching Samsung One UI 7/8 & Xiaomi HyperOS Gallery physics.
+ * Tracks the exact normalized screen center (`TransformOrigin`), pixel bounding rects, and
+ * cover/item handoff metadata for every album card and photo tile so open/close animations
+ * expand directly OUT of the exact tapped card/tile and collapse seamlessly BACK into it.
  */
 @Stable
 class AlbumTransitionOriginTracker {
@@ -253,9 +276,63 @@ class AlbumTransitionOriginTracker {
     var lastBounds: Rect? = null
         private set
 
+    /** Most recently tapped MediaItem for instant frame-0 Viewer rendering (zero black spinner flash). */
+    var lastTappedMediaItem: MediaItem? = null
+        private set
+
     private val originByKey = HashMap<String, TransformOrigin>(32)
     private val boundsByKey = HashMap<String, Rect>(128)
+    private val albumCoverByKey = HashMap<String, AlbumCoverMorphInfo>(64)
     private val morphEnabledByEntryId = HashMap<String, Boolean>(16)
+
+    private var activeMorphOwnerEntryId: String? = null
+
+    /**
+     * Key of the grid tile or album cover currently in-flight (`"media_<id>"` or `<folderId>`).
+     * That single source tile vacates its slot (`alpha = 0f` in `graphicsLayer`) while the
+     * real flying photo/album lifts out of or lands back into it — eliminating double-image ghosting.
+     */
+    var activeMorphKey by mutableStateOf<String?>(null)
+        private set
+
+    fun setActiveMorph(entryId: String, key: String?) {
+        if (key != null) {
+            activeMorphOwnerEntryId = entryId
+            if (activeMorphKey != key) {
+                activeMorphKey = key
+            }
+        } else if (activeMorphOwnerEntryId == entryId) {
+            activeMorphOwnerEntryId = null
+            if (activeMorphKey != null) {
+                activeMorphKey = null
+            }
+        }
+    }
+
+    fun clearActiveMorph(entryId: String) {
+        if (activeMorphOwnerEntryId == entryId) {
+            activeMorphOwnerEntryId = null
+            if (activeMorphKey != null) {
+                activeMorphKey = null
+            }
+        }
+    }
+
+    fun recordTappedMediaItem(item: MediaItem) {
+        lastTappedMediaItem = item
+    }
+
+    fun recordAlbumCover(key: String, info: AlbumCoverMorphInfo?) {
+        if (info == null) {
+            albumCoverByKey.remove(key)
+        } else {
+            if (albumCoverByKey.size > 256) albumCoverByKey.clear()
+            albumCoverByKey[key] = info
+        }
+    }
+
+    fun albumCoverFor(key: String?): AlbumCoverMorphInfo? =
+        if (key != null) albumCoverByKey[key] else null
 
     fun setMorphEnabled(entryId: String, enabled: Boolean) {
         if (morphEnabledByEntryId.size > 64) {
@@ -276,8 +353,8 @@ class AlbumTransitionOriginTracker {
 
     /**
      * Exact on-screen rect (root coordinates, un-transformed) of the photo/video currently shown
-     * in the Viewer. Lets the close morph start from the real picture instead of the full screen,
-     * so landscape / panorama shots fly home without black bars or a size jump.
+     * in the Viewer. Lets the open & close morphs use the real picture bounds instead of the full
+     * screen, so landscape / portrait shots expand & fly home with zero black bars or size jumps.
      */
     var viewerContentRect: Rect? = null
 
@@ -369,24 +446,27 @@ private fun Modifier.hyperOsPageDim(
 }
 
 /**
- * Xiaomi HyperOS Gallery style Rect-to-Rect morph frame.
- *  - Open (`PreEnter -> Visible`): blooms straight out of the tapped tile / album card.
- *  - Close (`Visible -> PostExit`): starts only once back is *released* (see LuminaNavGraph) and
- *    flies the real picture home into the exact tile it belongs to, landing on a center-crop that
- *    matches the grid thumbnail pixel-for-pixel before melting into it.
- *  - Everything is computed in the draw phase (`graphicsLayer`), so the screen content is never
- *    recomposed per frame; content only receives a boolean "is morphing" flag.
+ * Xiaomi HyperOS / Apple Photos style Rect-to-Rect morph frame.
+ *  - Open (`PreEnter -> Visible`): vacates the tapped grid tile / album cover and expands
+ *    smoothly straight out of its exact pixel rectangle up to full screen.
+ *  - Close (`Visible -> PostExit`): starts ONLY after the back gesture is released, vacates
+ *    the target tile / cover slot, and flies the picture or album right back into that exact
+ *    pixel rectangle at 100% solid opacity (with seamless album cover crossfade for albums!).
+ *  - All geometry runs strictly in the GPU `graphicsLayer` draw phase at 120Hz with zero
+ *    per-frame recomposition of the screen content.
  */
 @Composable
 fun AnimatedVisibilityScope.HyperOsRectMorphFrame(
     entryId: String,
     targetKey: String?,
     targetCornerRadius: Dp = 18.dp,
-    verticalCropBias: Float = 0.5f,
-    backdropMaxAlpha: Float = 0.28f,
-    fallbackToLastBounds: Boolean = true,
-    maxShadowElevation: Dp = 12.dp,
-    midFlightCornerBump: Dp = 14.dp,
+    verticalCropBias: Float = 0f,
+    backdropMaxAlpha: Float = 0.34f,
+    fallbackToLastBounds: Boolean = false,
+    maxShadowElevation: Dp = 14.dp,
+    midFlightCornerBump: Dp = 10.dp,
+    hideSourceWhileMorphing: Boolean = true,
+    useAlbumCoverCrossfade: Boolean = false,
     sourceRectProvider: (() -> Rect?)? = null,
     backdropAlphaProvider: () -> Float = { 1f },
     content: @Composable (isMorphing: Boolean) -> Unit
@@ -397,7 +477,7 @@ fun AnimatedVisibilityScope.HyperOsRectMorphFrame(
     val bumpCornerPx = with(density) { midFlightCornerBump.toPx() }
     val maxShadowPx = with(density) { maxShadowElevation.toPx() }
 
-    // 0f = full screen (Visible), 1f = fully collapsed into the target tile (PreEnter / PostExit)
+    // 0f = full screen (Visible), 1f = fully collapsed inside the target tile/card (PreEnter / PostExit)
     val morphProgressState = transition.animateFloat(
         transitionSpec = {
             if (targetState == EnterExitState.Visible) {
@@ -414,21 +494,59 @@ fun AnimatedVisibilityScope.HyperOsRectMorphFrame(
         }
     }
 
-    val isMorphing by remember(entryId) {
+    val animTransition = transition
+    val isTransitionActive by remember(entryId, animTransition) {
         derivedStateOf {
-            morphProgressState.value > 0.002f && originTracker.isMorphEnabled(entryId)
+            (animTransition.currentState != EnterExitState.Visible ||
+                animTransition.targetState != EnterExitState.Visible) &&
+                originTracker.isMorphEnabled(entryId)
+        }
+    }
+    val isMorphing by remember(entryId, animTransition) {
+        derivedStateOf {
+            originTracker.isMorphEnabled(entryId) &&
+                (morphProgressState.value > 0.002f || isTransitionActive)
+        }
+    }
+
+    val albumCoverInfo = if (useAlbumCoverCrossfade) originTracker.albumCoverFor(targetKey) else null
+    val canSolidlyHandOff = !useAlbumCoverCrossfade || albumCoverInfo != null
+
+    val shouldHideSource by remember(entryId, targetKey, hideSourceWhileMorphing, canSolidlyHandOff, animTransition) {
+        derivedStateOf {
+            if (!hideSourceWhileMorphing || !canSolidlyHandOff || targetKey == null) return@derivedStateOf false
+            if (!originTracker.isMorphEnabled(entryId)) return@derivedStateOf false
+            if (!isTransitionActive) return@derivedStateOf false
+            val t = morphProgressState.value.coerceIn(0f, 1f)
+            val isClosingNow = animTransition.targetState == EnterExitState.PostExit
+            val inFlight = if (isClosingNow) t < 0.985f else t > 0.015f
+            inFlight && originTracker.boundsFor(targetKey, fallbackToLast = false) != null
+        }
+    }
+
+    SideEffect {
+        if (shouldHideSource && targetKey != null) {
+            originTracker.setActiveMorph(entryId, targetKey)
+        } else {
+            originTracker.clearActiveMorph(entryId)
+        }
+    }
+
+    DisposableEffect(entryId) {
+        onDispose {
+            originTracker.clearActiveMorph(entryId)
         }
     }
 
     val pageDim = rememberPageDimFraction()
-    val animTransition = transition
+    val frameSizeRef = remember { floatArrayOf(0f, 0f) }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
             .hyperOsPageDim(animTransition, originTracker, pageDim)
     ) {
-        // Full-screen backdrop behind the flying picture: clears smoothly as it travels home.
+        // Full-screen depth / theater backdrop behind the flying photo or album card.
         if (backdropMaxAlpha > 0f) {
             Box(
                 modifier = Modifier
@@ -436,8 +554,10 @@ fun AnimatedVisibilityScope.HyperOsRectMorphFrame(
                     .drawBehind {
                         if (!originTracker.isMorphEnabled(entryId)) return@drawBehind
                         val t = morphProgressState.value.coerceIn(0f, 1f)
-                        if (t <= 0.002f) return@drawBehind
-                        val a = ((1f - t) * backdropMaxAlpha * backdropAlphaProvider().coerceIn(0f, 1f))
+                        if (t <= 0.002f && !isTransitionActive) return@drawBehind
+                        val isClosingNow = animTransition.targetState == EnterExitState.PostExit
+                        val curve = if (isClosingNow) (1f - t).pow(1.25f) else (1f - t).pow(0.75f)
+                        val a = (curve * backdropMaxAlpha * backdropAlphaProvider().coerceIn(0f, 1f))
                             .coerceIn(0f, 1f)
                         if (a > 0.003f) drawRect(Color.Black.copy(alpha = a))
                     }
@@ -454,6 +574,8 @@ fun AnimatedVisibilityScope.HyperOsRectMorphFrame(
 
                     val w = size.width
                     val h = size.height
+                    frameSizeRef[0] = w
+                    frameSizeRef[1] = h
                     if (w <= 1f || h <= 1f) return@graphicsLayer
 
                     val providedSource = sourceRectProvider?.invoke()?.takeIf {
@@ -463,8 +585,8 @@ fun AnimatedVisibilityScope.HyperOsRectMorphFrame(
                     val src = providedSource ?: Rect(0f, 0f, w, h)
                     val cropBias = if (providedSource != null) 0.5f else verticalCropBias.coerceIn(0f, 1f)
 
-                    // Live lookup: if the grid underneath just scrolled to the photo the user swiped to,
-                    // we immediately lock onto its fresh on-screen rect.
+                    // Live lookup: even if the underlying grid just scrolled to a newly viewed photo,
+                    // we lock straight onto its exact on-screen pixel rectangle!
                     val target = originTracker.boundsFor(
                         key = targetKey,
                         fallbackToLast = fallbackToLastBounds
@@ -474,23 +596,22 @@ fun AnimatedVisibilityScope.HyperOsRectMorphFrame(
                     }
                     val hasTarget = target != null
 
-                    // Tile scrolled off-screen: gently shrink in place & fade (HyperOS fallback).
+                    // Fallback if target tile/card is off-screen: gentle centered scale & fade
                     val dst = target ?: Rect(
-                        left = src.center.x - src.width * 0.30f,
-                        top = src.center.y - src.height * 0.30f,
-                        right = src.center.x + src.width * 0.30f,
-                        bottom = src.center.y + src.height * 0.30f
+                        left = src.center.x - src.width * 0.36f,
+                        top = src.center.y - src.height * 0.36f,
+                        right = src.center.x + src.width * 0.36f,
+                        bottom = src.center.y + src.height * 0.36f
                     )
 
                     val cur = lerp(src, dst, t)
                     val curW = cur.width.coerceAtLeast(1f)
                     val curH = cur.height.coerceAtLeast(1f)
 
-                    // Uniform (aspect-preserving) scale that makes the picture COVER the current window,
-                    // so it lands as the same center-crop the grid thumbnail shows.
+                    // Uniform aspect-preserving scale so the photo / album fills cur with zero stretch
                     val uniformScale = max(curW / src.width, curH / src.height).coerceIn(0.02f, 6f)
 
-                    // Local (un-scaled) crop window inside the source picture
+                    // Exact local clip window that projects pixel-for-pixel onto `cur`
                     val localW = (curW / uniformScale).coerceIn(1f, src.width)
                     val localH = (curH / uniformScale).coerceIn(1f, src.height)
                     val localLeft = src.left + (src.width - localW) * 0.5f
@@ -508,8 +629,8 @@ fun AnimatedVisibilityScope.HyperOsRectMorphFrame(
                     val localRadius = (visualCornerPx / uniformScale).coerceAtLeast(0f)
 
                     shadowElevation = if (hasTarget) maxShadowPx * bell else 0f
-                    ambientShadowColor = Color.Black.copy(alpha = 0.40f)
-                    spotShadowColor = Color.Black.copy(alpha = 0.50f)
+                    ambientShadowColor = Color.Black.copy(alpha = 0.36f)
+                    spotShadowColor = Color.Black.copy(alpha = 0.45f)
 
                     clip = true
                     shape = object : Shape {
@@ -528,17 +649,121 @@ fun AnimatedVisibilityScope.HyperOsRectMorphFrame(
                         )
                     }
 
-                    // Stay 100% solid while travelling; melt into the identical grid tile only in the
-                    // last few percent of the flight (no ghosting, no black voids).
-                    alpha = if (hasTarget) {
-                        ((1f - t) / 0.14f).coerceIn(0f, 1f)
-                    } else {
-                        (1f - t * 1.15f).coerceIn(0f, 1f)
+                    // Keep the morphing photo or album-with-cover 100% solid throughout the flight
+                    // (since the source slot is vacated and the visuals match pixel-for-pixel!).
+                    // Only crossfade softly at the very end when morphing without a cover overlay
+                    // (e.g. Collection collages) or when the target tile is scrolled off-screen.
+                    alpha = when {
+                        !hasTarget -> (1f - t).coerceIn(0f, 1f)
+                        canSolidlyHandOff -> 1f
+                        else -> ((1f - t) / 0.14f).coerceIn(0f, 1f)
                     }
                 }
         ) {
             content(isMorphing)
+
+            if (isMorphing && albumCoverInfo != null) {
+                AlbumCoverMorphOverlay(
+                    coverInfo = albumCoverInfo,
+                    morphProgressState = morphProgressState,
+                    targetKey = targetKey,
+                    originTracker = originTracker,
+                    fallbackToLastBounds = fallbackToLastBounds,
+                    frameSizeRef = frameSizeRef,
+                    modifier = Modifier.align(Alignment.TopCenter)
+                )
+            }
         }
+    }
+}
+
+/**
+ * Seamless album cover crossfade drawn strictly inside [HyperOsRectMorphFrame] while an album is
+ * expanding out of or collapsing back into its rounded cover card on Home/Collections.
+ * Uses the exact Coil memory-cache key as `FolderCoverArtwork` so frame 0 is synchronous & crisp.
+ */
+@Composable
+private fun AlbumCoverMorphOverlay(
+    coverInfo: AlbumCoverMorphInfo,
+    morphProgressState: State<Float>,
+    targetKey: String?,
+    originTracker: AlbumTransitionOriginTracker,
+    fallbackToLastBounds: Boolean,
+    frameSizeRef: FloatArray,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val imageLoader = LocalGalleryImageLoader.current
+    val coverRequest = remember(coverInfo) {
+        if (coverInfo.isLocal) {
+            val uriStr = coverInfo.coverThumbnailLink ?: return@remember null
+            ImageRequest.Builder(context)
+                .data(LocalThumbnailRequest(uriStr, coverInfo.coverIsVideo))
+                .size(420)
+                .precision(Precision.INEXACT)
+                .allowRgb565(true)
+                .memoryCacheKey(DriveConstants.stableThumbMemoryKey(coverInfo.coverItemId))
+                .placeholderMemoryCacheKey(DriveConstants.stableThumbMemoryKey(coverInfo.coverItemId))
+                .crossfade(false)
+                .build()
+        } else {
+            val url = DriveConstants.buildThumbnailUrl(
+                thumbnailLink = coverInfo.coverThumbnailLink,
+                fileId = coverInfo.coverItemId,
+                isUnmeteredWifi = coverInfo.isUnmeteredWifi,
+                isVideo = coverInfo.coverIsVideo,
+                sizeBytes = coverInfo.coverSizeBytes
+            ) ?: return@remember null
+            ImageRequest.Builder(context)
+                .data(url)
+                .size(420)
+                .precision(Precision.INEXACT)
+                .allowRgb565(true)
+                .memoryCacheKey(DriveConstants.stableThumbMemoryKey(coverInfo.coverItemId))
+                .placeholderMemoryCacheKey(DriveConstants.stableThumbMemoryKey(coverInfo.coverItemId))
+                .diskCacheKey(DriveConstants.thumbnailCacheKey(coverInfo.coverItemId, coverInfo.isUnmeteredWifi))
+                .crossfade(false)
+                .build()
+        }
+    } ?: return
+
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .aspectRatio(1f)
+            .graphicsLayer {
+                val t = morphProgressState.value.coerceIn(0f, 1f)
+                // 100% opaque right at the card (t >= 0.84), dissolving cleanly into the album grid
+                // between t = 0.84 and t = 0.28 so the transition feels like a single living card.
+                val coverAlpha = ((t - 0.28f) / 0.56f).coerceIn(0f, 1f)
+                alpha = coverAlpha
+                if (coverAlpha <= 0.002f) return@graphicsLayer
+
+                // Smoothly keep the cover filling the morphing clip height as it stretches from
+                // 1:1 square toward full screen so no bottom edge is ever exposed mid-crossfade.
+                val target = originTracker.boundsFor(targetKey, fallbackToLast = fallbackToLastBounds)
+                val coverSide = size.width
+                if (target != null && coverSide > 1f) {
+                    val parentW = frameSizeRef[0].takeIf { it > 1f } ?: coverSide
+                    val parentH = frameSizeRef[1].takeIf { it > 1f } ?: (coverSide * 2.25f)
+                    val curW = (parentW + (target.width - parentW) * t).coerceAtLeast(1f)
+                    val curH = (parentH + (target.height - parentH) * t).coerceAtLeast(1f)
+                    val uScale = max(curW / parentW, curH / parentH).coerceIn(0.02f, 6f)
+                    val localH = (curH / uScale).coerceAtLeast(coverSide)
+                    val extra = (localH / coverSide).coerceIn(1f, 3f)
+                    transformOrigin = TransformOrigin(0.5f, 0f)
+                    scaleX = extra
+                    scaleY = extra
+                }
+            }
+    ) {
+        AsyncImage(
+            model = coverRequest,
+            imageLoader = imageLoader,
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.fillMaxSize()
+        )
     }
 }
 

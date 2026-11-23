@@ -162,6 +162,7 @@ fun MediaGridItem(
     )
 
     val handleClick: () -> Unit = {
+        originTracker.recordTappedMediaItem(item)
         tileBoundsRef[0]?.let { rect ->
             originTracker.recordBounds(
                 key = "media_${item.id}",
@@ -205,6 +206,7 @@ fun MediaGridItem(
                 )
             }
             .graphicsLayer {
+                alpha = if (originTracker.activeMorphKey == "media_${item.id}") 0f else 1f
                 if (pressScale != 1f) {
                     scaleX = pressScale
                     scaleY = pressScale
