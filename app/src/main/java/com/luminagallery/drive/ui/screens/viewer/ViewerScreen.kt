@@ -1391,7 +1391,10 @@ private fun SamsungFilmstripScrubber(
                 )
                 val sideMargin by animateDpAsState(
                     targetValue = if (isCurrent) 8.dp else 0.dp,
-                    animationSpec = OneUiMotion.snappySpring(),
+                    animationSpec = spring(
+                        dampingRatio = Spring.DampingRatioNoBouncy,
+                        stiffness = 480f
+                    ),
                     label = "stripGap"
                 )
 
@@ -1425,15 +1428,19 @@ private fun SamsungFilmstripScrubber(
                     }
                 }
 
+                val safeSideMargin = sideMargin.coerceAtLeast(0.dp)
+                val safeTileWidth = tileWidth.coerceAtLeast(1.dp)
+                val safeTileHeight = tileHeight.coerceAtLeast(1.dp)
+
                 Box(
                     modifier = Modifier
-                        .padding(horizontal = sideMargin)
+                        .padding(horizontal = safeSideMargin)
                         .height(54.dp)
-                        .width(tileWidth),
+                        .width(safeTileWidth),
                     contentAlignment = Alignment.Center
                 ) {
                     val safeDuration = videoDurationMs.coerceAtLeast(1L)
-                    val tileWidthPx = with(density) { tileWidth.toPx() }.coerceAtLeast(1f)
+                    val tileWidthPx = with(density) { safeTileWidth.toPx() }.coerceAtLeast(1f)
 
                     val scrubModifier = if (isVideoActive) {
                         Modifier
@@ -1456,8 +1463,8 @@ private fun SamsungFilmstripScrubber(
 
                     Box(
                         modifier = Modifier
-                            .width(tileWidth)
-                            .height(tileHeight)
+                            .width(safeTileWidth)
+                            .height(safeTileHeight)
                             .clip(RoundedCornerShape(if (isCurrent) 4.dp else 2.dp))
                             .background(Color(0xFF1C1C20))
                             .then(scrubModifier)
