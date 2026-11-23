@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.luminagallery.drive.domain.model.AlbumSortMode
@@ -60,7 +61,8 @@ class PreferencesManager(private val context: Context) {
             prefetchAdjacentMedia = prefs[KEY_PREFETCH_ADJACENT] ?: true,
             wifiOnlyHighRes = prefs[KEY_WIFI_ONLY_HIGH_RES] ?: true,
             externalGalleryPackage = prefs[KEY_EXTERNAL_GALLERY_PACKAGE].orEmpty(),
-            externalGalleryLabel = prefs[KEY_EXTERNAL_GALLERY_LABEL].orEmpty()
+            externalGalleryLabel = prefs[KEY_EXTERNAL_GALLERY_LABEL].orEmpty(),
+            autoCheckUpdates = prefs[KEY_AUTO_CHECK_UPDATES] ?: true
         ).also { latestPreferences = it }
     }
 
@@ -192,6 +194,34 @@ class PreferencesManager(private val context: Context) {
         }
     }
 
+    suspend fun setAutoCheckUpdates(enabled: Boolean) {
+        context.galleryDataStore.edit { prefs ->
+            prefs[KEY_AUTO_CHECK_UPDATES] = enabled
+        }
+    }
+
+    suspend fun getDismissedUpdateSha(): String =
+        context.galleryDataStore.data.map { it[KEY_DISMISSED_UPDATE_SHA].orEmpty() }.first()
+
+    suspend fun setDismissedUpdateSha(commitSha: String) {
+        context.galleryDataStore.edit { prefs ->
+            if (commitSha.isBlank()) {
+                prefs.remove(KEY_DISMISSED_UPDATE_SHA)
+            } else {
+                prefs[KEY_DISMISSED_UPDATE_SHA] = commitSha.trim()
+            }
+        }
+    }
+
+    suspend fun getLastUpdateCheckEpochMs(): Long =
+        context.galleryDataStore.data.map { it[KEY_LAST_UPDATE_CHECK_MS] ?: 0L }.first()
+
+    suspend fun setLastUpdateCheckEpochMs(epochMs: Long) {
+        context.galleryDataStore.edit { prefs ->
+            prefs[KEY_LAST_UPDATE_CHECK_MS] = epochMs
+        }
+    }
+
     val recentSearchesFlow: Flow<List<String>> = context.galleryDataStore.data.map { prefs ->
         val raw = prefs[KEY_RECENT_SEARCHES].orEmpty()
         if (raw.isBlank()) emptyList() else raw.split("\n").map { it.trim() }.filter { it.isNotEmpty() }
@@ -251,6 +281,9 @@ class PreferencesManager(private val context: Context) {
         private val KEY_WIFI_ONLY_HIGH_RES = booleanPreferencesKey("wifi_only_high_res")
         private val KEY_EXTERNAL_GALLERY_PACKAGE = stringPreferencesKey("external_gallery_package")
         private val KEY_EXTERNAL_GALLERY_LABEL = stringPreferencesKey("external_gallery_label")
+        private val KEY_AUTO_CHECK_UPDATES = booleanPreferencesKey("auto_check_updates")
+        private val KEY_DISMISSED_UPDATE_SHA = stringPreferencesKey("dismissed_update_sha")
+        private val KEY_LAST_UPDATE_CHECK_MS = longPreferencesKey("last_update_check_ms")
         private val KEY_RECENT_SEARCHES = stringPreferencesKey("recent_searches")
     }
 }

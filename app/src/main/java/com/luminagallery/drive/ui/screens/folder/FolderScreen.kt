@@ -244,7 +244,7 @@ fun FolderScreen(
     }
 
     val hasSidebarContent = uiState.sidebarNodes.isNotEmpty()
-    // Just like Samsung Gallery: while browsing a folder-of-folders (e.g. MakkumAll or MijnDingetjes)
+    // Just like Samsung Gallery: while browsing a folder-of-folders (nested container albums)
     // with no direct photos, show a full-width 3-column album grid without the left sidebar!
     val isFolderContainerOnly = uiState.viewMode == FolderViewMode.HIERARCHY &&
         uiState.subfolders.isNotEmpty() &&

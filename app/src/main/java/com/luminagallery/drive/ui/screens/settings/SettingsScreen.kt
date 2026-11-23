@@ -84,6 +84,7 @@ import com.google.android.gms.auth.api.identity.Identity
 import com.luminagallery.drive.BuildConfig
 import com.luminagallery.drive.LocalAppContainer
 import com.luminagallery.drive.R
+import com.luminagallery.drive.data.repository.AppUpdateState
 import com.luminagallery.drive.data.repository.InstalledGalleryApp
 import com.luminagallery.drive.domain.model.AlbumSortMode
 import com.luminagallery.drive.domain.model.MainTab
@@ -111,6 +112,7 @@ fun SettingsScreen(
     onNavigateBack: () -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val updateState by viewModel.updateState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val appContainer = LocalAppContainer.current
     val haptic = LocalHapticFeedback.current
@@ -515,6 +517,48 @@ fun SettingsScreen(
             // 5. GENERAL & ABOUT
             item(key = "section_about") {
                 OneUiSettingsSection(title = "General") {
+                    OneUiToggleRow(
+                        title = "Auto-check for updates",
+                        subtitle = "Show a popup when a newer build is pushed to GitHub",
+                        checked = prefs.autoCheckUpdates,
+                        onCheckedChange = viewModel::setAutoCheckUpdates
+                    )
+
+                    OneUiDivider()
+
+                    val isCheckingUpdate = updateState is AppUpdateState.Checking
+                    val updateSubtitle = when (val u = updateState) {
+                        is AppUpdateState.Checking -> "Checking GitHub for newer commits…"
+                        is AppUpdateState.Available -> "Update #${u.update.shortSha} available · tap to install"
+                        is AppUpdateState.Downloading -> "Downloading update… ${(u.progress * 100f).toInt()}%"
+                        is AppUpdateState.ReadyToInstall -> "Update #${u.update.shortSha} ready · tap to install"
+                        is AppUpdateState.UpToDate -> "Up to date · version ${BuildConfig.VERSION_NAME}"
+                        is AppUpdateState.Error -> u.message
+                        AppUpdateState.Idle -> "Version ${BuildConfig.VERSION_NAME} · tap to check GitHub"
+                    }
+                    val highlightUpdate = updateState is AppUpdateState.Available ||
+                        updateState is AppUpdateState.Downloading ||
+                        updateState is AppUpdateState.ReadyToInstall
+
+                    OneUiActionRow(
+                        title = "Check for updates",
+                        subtitle = updateSubtitle,
+                        subtitleAccent = highlightUpdate,
+                        enabled = !isCheckingUpdate && updateState !is AppUpdateState.Downloading,
+                        trailingContent = if (isCheckingUpdate) {
+                            {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        } else null,
+                        onClick = viewModel::checkForUpdatesManually
+                    )
+
+                    OneUiDivider()
+
                     OneUiActionRow(
                         title = "Reset settings to defaults",
                         subtitle = "Restore display, viewer, and sync preferences",

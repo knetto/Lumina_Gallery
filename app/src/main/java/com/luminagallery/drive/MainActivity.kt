@@ -16,8 +16,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.luminagallery.drive.domain.model.ThemeMode
 import com.luminagallery.drive.domain.model.UserPreferences
+import com.luminagallery.drive.ui.components.AppUpdateDialogHost
 import com.luminagallery.drive.ui.navigation.LuminaNavGraph
 import com.luminagallery.drive.ui.theme.LuminaTheme
+import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
 
@@ -64,11 +66,19 @@ class MainActivity : ComponentActivity() {
                     themeMode = preferences.themeMode,
                     dynamicColor = preferences.dynamicColor
                 ) {
+                    LaunchedEffect(Unit) {
+                        // Wait 2 seconds after launch so cold start stays instant, then silently check GitHub
+                        delay(2_000L)
+                        appContainer.appUpdateManager.checkForUpdate(manual = false)
+                    }
+
                     LuminaNavGraph(
                         externalViewUri = externalRequest?.first?.toString(),
                         externalViewMime = externalRequest?.second,
                         onConsumedExternalView = { externalViewRequestState.value = null }
                     )
+
+                    AppUpdateDialogHost(appUpdateManager = appContainer.appUpdateManager)
                 }
             }
         }

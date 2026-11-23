@@ -10,6 +10,8 @@ import com.luminagallery.drive.data.local.PreferencesManager
 import com.luminagallery.drive.data.remote.NetworkMonitor
 import com.luminagallery.drive.data.remote.auth.CredentialStore
 import com.luminagallery.drive.data.remote.auth.ServiceAccountTokenManager
+import com.luminagallery.drive.data.repository.AppUpdateManager
+import com.luminagallery.drive.data.repository.AppUpdateState
 import com.luminagallery.drive.data.repository.CoilCacheManager
 import com.luminagallery.drive.data.repository.GalleryExtrasRepository
 import com.luminagallery.drive.data.repository.GalleryRepository
@@ -62,9 +64,12 @@ class SettingsViewModel(
     private val repository: GalleryRepository,
     private val extrasRepository: GalleryExtrasRepository,
     private val offlineMediaManager: OfflineMediaManager,
+    private val appUpdateManager: AppUpdateManager,
     private val syncUseCase: SyncGalleryUseCase,
     networkMonitor: NetworkMonitor
 ) : ViewModel() {
+
+    val updateState: StateFlow<AppUpdateState> = appUpdateManager.state
 
     private val isClearingCacheFlow = MutableStateFlow(false)
     private val snackbarFlow = MutableStateFlow<String?>(null)
@@ -328,6 +333,26 @@ class SettingsViewModel(
         }
     }
 
+    fun setAutoCheckUpdates(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesManager.setAutoCheckUpdates(enabled)
+        }
+    }
+
+    fun checkForUpdatesManually() {
+        viewModelScope.launch {
+            when (val result = appUpdateManager.checkForUpdate(manual = true)) {
+                is AppUpdateState.UpToDate -> {
+                    snackbarFlow.value = "You're already on the latest GitHub build"
+                }
+                is AppUpdateState.Error -> {
+                    snackbarFlow.value = result.message
+                }
+                else -> Unit
+            }
+        }
+    }
+
     fun resetSettingsToDefaults() {
         viewModelScope.launch {
             val defaults = UserPreferences()
@@ -349,6 +374,7 @@ class SettingsViewModel(
             preferencesManager.setPrefetchAdjacentMedia(defaults.prefetchAdjacentMedia)
             preferencesManager.setWifiOnlyHighRes(defaults.wifiOnlyHighRes)
             preferencesManager.setExternalGallery(defaults.externalGalleryPackage, defaults.externalGalleryLabel)
+            preferencesManager.setAutoCheckUpdates(defaults.autoCheckUpdates)
             preferencesManager.setBackgroundSyncEnabled(defaults.backgroundSyncEnabled)
             DriveSyncScheduler.setBackgroundSyncEnabled(appContext, false)
             preferencesManager.setMaxCacheSizeMb(defaults.maxCacheSizeMb)
@@ -397,6 +423,7 @@ class SettingsViewModel(
             repository = container.galleryRepository,
             extrasRepository = container.galleryExtrasRepository,
             offlineMediaManager = container.offlineMediaManager,
+            appUpdateManager = container.appUpdateManager,
             syncUseCase = container.syncGalleryUseCase,
             networkMonitor = container.networkMonitor
         ) as T

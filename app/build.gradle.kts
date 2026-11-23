@@ -21,8 +21,16 @@ android {
         applicationId = "com.luminagallery.drive"
         minSdk = 26
         targetSdk = 37
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.1.0"
+
+        val baseCommitEpochMs = providers.exec {
+            commandLine("git", "log", "-1", "--format=%ct")
+            isIgnoreExitValue = true
+        }.standardOutput.asText.map { raw ->
+            (raw.trim().toLongOrNull() ?: 0L) * 1000L
+        }.getOrElse(0L)
+        buildConfigField("long", "BASE_COMMIT_EPOCH_MS", "${baseCommitEpochMs}L")
 
         vectorDrawables {
             useSupportLibrary = true

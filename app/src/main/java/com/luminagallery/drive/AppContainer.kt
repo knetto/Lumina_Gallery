@@ -13,6 +13,7 @@ import com.luminagallery.drive.data.remote.auth.CredentialStore
 import com.luminagallery.drive.data.remote.auth.DriveAuthInterceptor
 import com.luminagallery.drive.data.remote.auth.ServiceAccountTokenManager
 import com.luminagallery.drive.data.repository.AlbumOrganizationRepository
+import com.luminagallery.drive.data.repository.AppUpdateManager
 import com.luminagallery.drive.data.repository.CoilCacheManager
 import com.luminagallery.drive.data.repository.GalleryExtrasRepository
 import com.luminagallery.drive.data.repository.GalleryRepository
@@ -107,6 +108,12 @@ class AppContainer(context: Context) {
         context = appContext,
         driveApi = driveApiService,
         offlineMediaManager = offlineMediaManager
+    )
+
+    val appUpdateManager: AppUpdateManager = AppUpdateManager(
+        context = appContext,
+        preferencesManager = preferencesManager,
+        networkMonitor = networkMonitor
     )
 
     val syncGalleryUseCase: SyncGalleryUseCase = SyncGalleryUseCase(galleryRepository)

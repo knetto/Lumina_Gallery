@@ -352,5 +352,6 @@ data class UserPreferences(
     val prefetchAdjacentMedia: Boolean = true,
     val wifiOnlyHighRes: Boolean = true,
     val externalGalleryPackage: String = "",
-    val externalGalleryLabel: String = ""
+    val externalGalleryLabel: String = "",
+    val autoCheckUpdates: Boolean = true
 )
