@@ -105,10 +105,14 @@ fun FolderCard(
 
     val originTracker = LocalAlbumTransitionOrigin.current
     val hostView = LocalView.current
-    val cardPivotRef = remember { floatArrayOf(0.5f, 0.5f) }
+    val coverBoundsRef = remember { arrayOf<androidx.compose.ui.geometry.Rect?>(null) }
 
     val wrappedOnClick = {
-        originTracker.record(folder.id, cardPivotRef[0], cardPivotRef[1])
+        val vw = hostView.width.toFloat()
+        val vh = hostView.height.toFloat()
+        coverBoundsRef[0]?.let { rect ->
+            originTracker.recordBounds(folder.id, rect, vw, vh, markAsLast = true)
+        }
         onClick()
     }
 
@@ -130,21 +134,23 @@ fun FolderCard(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .onGloballyPositioned { coords ->
-                val vw = hostView.width.toFloat()
-                val vh = hostView.height.toFloat()
-                if (vw > 0f && vh > 0f) {
-                    val b = coords.boundsInRoot()
-                    cardPivotRef[0] = b.center.x / vw
-                    cardPivotRef[1] = b.center.y / vh
-                }
-            }
             .hoverable(interactionSource = interactionSource)
             .then(clickMod)
     ) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
+                .onGloballyPositioned { coords ->
+                    val rect = coords.boundsInRoot()
+                    coverBoundsRef[0] = rect
+                    originTracker.recordBounds(
+                        key = folder.id,
+                        boundsInRoot = rect,
+                        rootWidth = hostView.width.toFloat(),
+                        rootHeight = hostView.height.toFloat(),
+                        markAsLast = false
+                    )
+                }
                 .graphicsLayer {
                     scaleX = coverScale
                     scaleY = coverScale

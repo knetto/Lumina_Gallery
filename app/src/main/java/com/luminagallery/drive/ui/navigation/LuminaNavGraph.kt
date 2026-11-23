@@ -3,7 +3,6 @@ package com.luminagallery.drive.ui.navigation
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -23,6 +22,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavDestination.Companion.hasRoute
@@ -36,6 +36,7 @@ import com.luminagallery.drive.data.local.LocalMediaRepository
 import com.luminagallery.drive.domain.model.MediaType
 import com.luminagallery.drive.domain.model.SpecialGalleryFilter
 import com.luminagallery.drive.ui.components.AlbumTransitionOriginTracker
+import com.luminagallery.drive.ui.components.HyperOsRectMorphFrame
 import com.luminagallery.drive.ui.components.HyperOsTransitionFrame
 import com.luminagallery.drive.ui.components.LocalAlbumTransitionOrigin
 import com.luminagallery.drive.ui.components.OneUiMotion
@@ -123,7 +124,6 @@ data class CompareRoute(
 private const val KEY_LAST_VIEWED_ITEM_ID = "last_viewed_item_id"
 private val FluidOpenEasing = OneUiMotion.FluidEasing
 private val HyperOsBackEasing = OneUiMotion.HyperOsBackEasing
-private val BackFadeCommitEasing = OneUiMotion.BackFadeCommitEasing
 
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
@@ -173,9 +173,11 @@ fun LuminaNavGraph(
                     slideInHorizontally(tween(300, easing = FluidOpenEasing)) { it }
                 },
                 exitTransition = {
+                    // Never run card-morph on a screen moving to background behind a newly pushed child route
+                    originTracker.setMorphEnabled(initialState.id, false)
                     when {
                         targetState.destination.hasRoute<ViewerRoute>() -> {
-                            scaleOut(tween(260, easing = FluidOpenEasing), targetScale = 0.96f)
+                            scaleOut(tween(320, easing = FluidOpenEasing), targetScale = 0.965f)
                         }
                         targetState.destination.hasRoute<FolderRoute>() ||
                             targetState.destination.hasRoute<CollectionRoute>() -> {
@@ -187,8 +189,8 @@ fun LuminaNavGraph(
                                 }
                             }.getOrNull()
                             scaleOut(
-                                animationSpec = tween(280, easing = FluidOpenEasing),
-                                targetScale = 1.04f,
+                                animationSpec = tween(340, easing = FluidOpenEasing),
+                                targetScale = 1.035f,
                                 transformOrigin = originTracker.originFor(key)
                             )
                         }
@@ -200,15 +202,17 @@ fun LuminaNavGraph(
                     }
                 },
                 popEnterTransition = {
+                    // Never run card-morph on a screen returning from background as a child route pops above it
+                    originTracker.setMorphEnabled(targetState.id, false)
                     when {
                         initialState.destination.hasRoute<ViewerRoute>() -> {
-                            // Underlying grid stays 100% solid while smoothly settling from 0.95 -> 1.0
-                            scaleIn(tween(270, easing = HyperOsBackEasing), initialScale = 0.95f)
+                            // Underlying grid stays 100% solid while smoothly settling from 0.96 -> 1.0
+                            scaleIn(tween(330, easing = HyperOsBackEasing), initialScale = 0.96f)
                         }
                         initialState.destination.hasRoute<FolderRoute>() ||
                             initialState.destination.hasRoute<CollectionRoute>() -> {
-                            // Underlying Home/Albums stays 100% solid with smooth HyperOS depth settle
-                            scaleIn(tween(280, easing = HyperOsBackEasing), initialScale = 0.95f)
+                            // Underlying Home/Albums stays 100% solid as album card shrinks right into its cover!
+                            scaleIn(tween(330, easing = HyperOsBackEasing), initialScale = 0.96f)
                         }
                         else -> {
                             // Linear 1:1 finger-tracked iOS/HyperOS parallax reveal underneath!
@@ -334,24 +338,15 @@ fun LuminaNavGraph(
                     }
                 }
 
-                // Xiaomi HyperOS / Apple Photos fluid zoom-bloom & rounded-card return for Collections
+                // True Xiaomi HyperOS Rect-to-Rect Morph for Collections (shrinks right into the exact tapped cover!)
                 composable<CollectionRoute>(
                     enterTransition = {
-                        val key = runCatching { targetState.toRoute<CollectionRoute>().collectionId }.getOrNull()
-                        scaleIn(
-                            animationSpec = tween(280, easing = FluidOpenEasing),
-                            initialScale = 0.84f,
-                            transformOrigin = originTracker.originFor(key)
-                        ) + fadeIn(tween(140, easing = LinearOutSlowInEasing))
+                        originTracker.setMorphEnabled(targetState.id, true)
+                        fadeIn(tween(340, easing = LinearEasing), initialAlpha = 0.99f)
                     },
                     popExitTransition = {
-                        val key = runCatching { initialState.toRoute<CollectionRoute>().collectionId }.getOrNull()
-                        scaleOut(
-                            animationSpec = tween(280, easing = HyperOsBackEasing),
-                            targetScale = 0.78f,
-                            transformOrigin = originTracker.originFor(key)
-                        ) + slideOutHorizontally(tween(280, easing = HyperOsBackEasing)) { it / 12 } +
-                            fadeOut(tween(280, easing = BackFadeCommitEasing))
+                        originTracker.setMorphEnabled(initialState.id, true)
+                        fadeOut(tween(330, easing = LinearEasing), targetAlpha = 0.99f)
                     }
                 ) { backStackEntry ->
                     val route = backStackEntry.toRoute<CollectionRoute>()
@@ -363,7 +358,13 @@ fun LuminaNavGraph(
                             container = container
                         )
                     )
-                    HyperOsTransitionFrame {
+                    HyperOsRectMorphFrame(
+                        entryId = backStackEntry.id,
+                        targetKey = route.collectionId,
+                        targetCornerRadius = 18.dp,
+                        verticalCropBias = 0.16f,
+                        backdropMaxAlpha = 0.28f
+                    ) {
                         CollectionScreen(
                             viewModel = collectionViewModel,
                             onNavigateBack = { navController.popBackStack() },
@@ -389,24 +390,15 @@ fun LuminaNavGraph(
                     }
                 }
 
-                // Xiaomi HyperOS / Apple Photos fluid zoom-bloom & rounded-card return for Albums
+                // True Xiaomi HyperOS Rect-to-Rect Morph for Albums (expands out of & shrinks directly into the exact tapped album card!)
                 composable<FolderRoute>(
                     enterTransition = {
-                        val key = runCatching { targetState.toRoute<FolderRoute>().folderId }.getOrNull()
-                        scaleIn(
-                            animationSpec = tween(280, easing = FluidOpenEasing),
-                            initialScale = 0.84f,
-                            transformOrigin = originTracker.originFor(key)
-                        ) + fadeIn(tween(140, easing = LinearOutSlowInEasing))
+                        originTracker.setMorphEnabled(targetState.id, true)
+                        fadeIn(tween(340, easing = LinearEasing), initialAlpha = 0.99f)
                     },
                     popExitTransition = {
-                        val key = runCatching { initialState.toRoute<FolderRoute>().folderId }.getOrNull()
-                        scaleOut(
-                            animationSpec = tween(280, easing = HyperOsBackEasing),
-                            targetScale = 0.78f,
-                            transformOrigin = originTracker.originFor(key)
-                        ) + slideOutHorizontally(tween(280, easing = HyperOsBackEasing)) { it / 12 } +
-                            fadeOut(tween(280, easing = BackFadeCommitEasing))
+                        originTracker.setMorphEnabled(initialState.id, true)
+                        fadeOut(tween(330, easing = LinearEasing), targetAlpha = 0.99f)
                     }
                 ) { backStackEntry ->
                     val route = backStackEntry.toRoute<FolderRoute>()
@@ -419,11 +411,20 @@ fun LuminaNavGraph(
                         )
                     )
 
+                    val activeFolderId by folderViewModel.uiState
+                        .collectAsStateWithLifecycle()
+
                     val lastViewedItemId by backStackEntry.savedStateHandle
                         .getStateFlow<String?>(KEY_LAST_VIEWED_ITEM_ID, null)
                         .collectAsStateWithLifecycle()
 
-                    HyperOsTransitionFrame {
+                    HyperOsRectMorphFrame(
+                        entryId = backStackEntry.id,
+                        targetKey = activeFolderId.folderId.ifBlank { route.folderId },
+                        targetCornerRadius = 18.dp,
+                        verticalCropBias = 0.16f,
+                        backdropMaxAlpha = 0.28f
+                    ) {
                         FolderScreen(
                             viewModel = folderViewModel,
                             lastViewedItemId = lastViewedItemId,
@@ -499,26 +500,24 @@ fun LuminaNavGraph(
                     }
                 }
 
-                // Xiaomi HyperOS / Apple Photos rounded-card zoom-back for full-screen Viewer
+                // True Xiaomi HyperOS / Apple Photos Rect-to-Rect Morph for full-screen Viewer
+                // (expands directly out of the tapped thumbnail & shrinks straight back into the active photo's tile!)
                 composable<ViewerRoute>(
                     enterTransition = {
-                        val key = runCatching { "media_${targetState.toRoute<ViewerRoute>().initialItemId}" }.getOrNull()
-                        scaleIn(
-                            animationSpec = tween(250, easing = FluidOpenEasing),
-                            initialScale = 0.84f,
-                            transformOrigin = originTracker.originFor(key)
-                        ) + fadeIn(tween(140, easing = LinearOutSlowInEasing))
+                        originTracker.setMorphEnabled(targetState.id, true)
+                        fadeIn(tween(340, easing = LinearEasing), initialAlpha = 0.99f)
                     },
-                    exitTransition = { fadeOut(tween(150)) },
-                    popEnterTransition = { scaleIn(tween(240, easing = HyperOsBackEasing), initialScale = 0.96f) },
+                    exitTransition = {
+                        originTracker.setMorphEnabled(initialState.id, false)
+                        fadeOut(tween(150))
+                    },
+                    popEnterTransition = {
+                        originTracker.setMorphEnabled(targetState.id, false)
+                        scaleIn(tween(240, easing = HyperOsBackEasing), initialScale = 0.96f)
+                    },
                     popExitTransition = {
-                        val activeKey = activeViewerItemId?.let { "media_$it" }
-                            ?: runCatching { "media_${initialState.toRoute<ViewerRoute>().initialItemId}" }.getOrNull()
-                        scaleOut(
-                            animationSpec = tween(270, easing = HyperOsBackEasing),
-                            targetScale = 0.76f,
-                            transformOrigin = originTracker.originForOrCenter(activeKey)
-                        ) + fadeOut(tween(270, easing = BackFadeCommitEasing))
+                        originTracker.setMorphEnabled(initialState.id, true)
+                        fadeOut(tween(330, easing = LinearEasing), targetAlpha = 0.99f)
                     }
                 ) { backStackEntry ->
                     val route = backStackEntry.toRoute<ViewerRoute>()
@@ -545,11 +544,20 @@ fun LuminaNavGraph(
                             container = container
                         )
                     )
-                    HyperOsTransitionFrame {
+                    val targetPhotoKey = "media_${activeViewerItemId ?: route.initialItemId}"
+                    HyperOsRectMorphFrame(
+                        entryId = backStackEntry.id,
+                        targetKey = targetPhotoKey,
+                        targetCornerRadius = 4.dp,
+                        verticalCropBias = 0.5f,
+                        backdropMaxAlpha = 0.96f,
+                        fallbackToLastBounds = false
+                    ) { rectMorphProgress ->
                         ViewerScreen(
                             viewModel = viewerViewModel,
                             sharedTransitionScope = this@SharedTransitionLayout,
                             animatedVisibilityScope = this@composable,
+                            rectMorphProgress = rectMorphProgress,
                             onActiveItemChanged = { activeId ->
                                 activeViewerItemId = activeId
                                 navController.previousBackStackEntry

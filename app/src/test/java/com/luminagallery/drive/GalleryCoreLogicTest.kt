@@ -1,8 +1,11 @@
 package com.luminagallery.drive
 
+import androidx.compose.ui.geometry.Rect
 import com.luminagallery.drive.ui.components.AlbumTransitionOriginTracker
 import com.luminagallery.drive.ui.components.FormatUtils
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.security.MessageDigest
@@ -16,6 +19,25 @@ class GalleryCoreLogicTest {
         val origin = tracker.originFor("album_edge")
         assertTrue(origin.pivotFractionX in 0.12f..0.88f)
         assertTrue(origin.pivotFractionY in 0.12f..0.88f)
+    }
+
+    @Test
+    fun albumTransitionOriginTracker_recordsAndResolvesExactTileBounds() {
+        val tracker = AlbumTransitionOriginTracker()
+        val rect = Rect(left = 300f, top = 600f, right = 600f, bottom = 900f)
+        tracker.recordBounds("media_42", rect, rootWidth = 1080f, rootHeight = 2400f, markAsLast = true)
+        val resolved = tracker.boundsFor("media_42")
+        assertNotNull(resolved)
+        assertEquals(rect, resolved)
+        val fallback = tracker.boundsFor("unknown_key", fallbackToLast = true)
+        assertEquals(rect, fallback)
+
+        // Ensure per-entry morph gating defaults off and toggles cleanly for open/close vs background push
+        assertFalse(tracker.isMorphEnabled("entry_folder_1"))
+        tracker.setMorphEnabled("entry_folder_1", true)
+        assertTrue(tracker.isMorphEnabled("entry_folder_1"))
+        tracker.setMorphEnabled("entry_folder_1", false)
+        assertFalse(tracker.isMorphEnabled("entry_folder_1"))
     }
 
     @Test

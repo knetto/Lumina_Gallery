@@ -34,11 +34,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.RoundRect
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Outline
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import coil3.ImageLoader
 import coil3.request.ImageRequest
@@ -216,7 +224,21 @@ class AlbumTransitionOriginTracker {
     var lastOrigin: TransformOrigin = TransformOrigin.Center
         private set
 
-    private val originByKey = HashMap<String, TransformOrigin>(16)
+    var lastBounds: Rect? = null
+        private set
+
+    private val originByKey = HashMap<String, TransformOrigin>(32)
+    private val boundsByKey = HashMap<String, Rect>(128)
+    private val morphEnabledByEntryId = HashMap<String, Boolean>(16)
+
+    fun setMorphEnabled(entryId: String, enabled: Boolean) {
+        if (morphEnabledByEntryId.size > 64) {
+            morphEnabledByEntryId.clear()
+        }
+        morphEnabledByEntryId[entryId] = enabled
+    }
+
+    fun isMorphEnabled(entryId: String): Boolean = morphEnabledByEntryId[entryId] ?: false
 
     fun record(key: String, normalizedX: Float, normalizedY: Float) {
         val origin = TransformOrigin(
@@ -227,14 +249,209 @@ class AlbumTransitionOriginTracker {
         originByKey[key] = origin
     }
 
+    fun recordBounds(key: String, boundsInRoot: Rect, rootWidth: Float, rootHeight: Float, markAsLast: Boolean = false) {
+        if (boundsInRoot.width < 4f || boundsInRoot.height < 4f) return
+        boundsByKey[key] = boundsInRoot
+        if (rootWidth > 0f && rootHeight > 0f) {
+            val origin = TransformOrigin(
+                pivotFractionX = (boundsInRoot.center.x / rootWidth).coerceIn(0.08f, 0.92f),
+                pivotFractionY = (boundsInRoot.center.y / rootHeight).coerceIn(0.08f, 0.92f)
+            )
+            originByKey[key] = origin
+            if (markAsLast) {
+                lastOrigin = origin
+                lastBounds = boundsInRoot
+            }
+        } else if (markAsLast) {
+            lastBounds = boundsInRoot
+        }
+    }
+
     fun originFor(key: String?): TransformOrigin =
         if (key != null) originByKey[key] ?: lastOrigin else lastOrigin
 
     fun originForOrCenter(key: String?): TransformOrigin =
         if (key != null) originByKey[key] ?: TransformOrigin.Center else TransformOrigin.Center
+
+    fun boundsFor(key: String?, fallbackToLast: Boolean = false): Rect? {
+        if (key != null) {
+            boundsByKey[key]?.let { return it }
+        }
+        return if (fallbackToLast) lastBounds else null
+    }
 }
 
 val LocalAlbumTransitionOrigin = staticCompositionLocalOf { AlbumTransitionOriginTracker() }
+
+/**
+ * True Xiaomi HyperOS / Apple iOS Photos geometric Rect-to-Rect Morph Frame:
+ *  - On Open (`PreEnter -> Visible`): physically expands directly OUT of the exact pixel
+ *    bounding rectangle (`targetBounds`) of the tapped album card or photo tile up to full screen.
+ *  - On Back Swipe / Close (`Visible -> PostExit`): tracks Android Predictive Back 1:1 and
+ *    physically shrinks, crops, rounds, and flies ALL THE WAY DOWN into the exact pixel
+ *    bounding rectangle of the tapped (or currently active) album card or photo tile!
+ *  - Runs 100% inside the GPU `graphicsLayer` draw phase at 120Hz with zero tile-hiding
+ *    black holes and zero runtime overhead when settled (`Visible`).
+ */
+@Composable
+fun AnimatedVisibilityScope.HyperOsRectMorphFrame(
+    entryId: String,
+    targetKey: String?,
+    targetCornerRadius: Dp = 18.dp,
+    verticalCropBias: Float = 0.5f,
+    backdropMaxAlpha: Float = 0.28f,
+    fallbackToLastBounds: Boolean = true,
+    content: @Composable (morphProgress: Float) -> Unit
+) {
+    val originTracker = LocalAlbumTransitionOrigin.current
+    val density = LocalDensity.current
+    val targetCornerPx = with(density) { targetCornerRadius.toPx() }
+    val midFlightCornerPx = with(density) { 36.dp.toPx() }
+    val maxShadowPx = with(density) { 20.dp.toPx() }
+
+    // 0f = full screen (Visible), 1f = completely shrunk inside targetRect (PreEnter or PostExit)
+    val rawMorphProgress by transition.animateFloat(
+        transitionSpec = {
+            if (targetState == EnterExitState.Visible) {
+                // Opening: snappy Xiaomi HyperOS / Apple exponential bloom out of the tapped card
+                tween(durationMillis = 340, easing = OneUiMotion.FluidEasing)
+            } else {
+                // Closing / Predictive Back: smooth finger-tracked shrink right back into the card!
+                tween(durationMillis = 330, easing = OneUiMotion.HyperOsBackEasing)
+            }
+        },
+        label = "hyperOsRectMorphProgress"
+    ) { state ->
+        when (state) {
+            EnterExitState.Visible -> 0f
+            EnterExitState.PreEnter, EnterExitState.PostExit -> 1f
+        }
+    }
+
+    val isExiting = transition.targetState == EnterExitState.PostExit ||
+        transition.currentState == EnterExitState.PostExit
+
+    // Gate morph strictly to fresh-open & pop-close transitions so pushing a child screen
+    // (e.g. Folder -> Viewer) NEVER shrinks the parent album into its card in the background!
+    val morphEnabled = originTracker.isMorphEnabled(entryId)
+    val effectiveMorphProgress = if (morphEnabled) rawMorphProgress.coerceIn(0f, 1f) else 0f
+    val isMorphing = effectiveMorphProgress > 0.002f
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        // Full-screen depth / theater backdrop BEHIND the morphing window:
+        // Clears smoothly across the entire screen while the crisp photo or album card flies home.
+        if (isMorphing && backdropMaxAlpha > 0f) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        alpha = ((1f - effectiveMorphProgress) * backdropMaxAlpha).coerceIn(0f, 1f)
+                    }
+                    .background(Color.Black)
+            )
+        }
+
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    if (!originTracker.isMorphEnabled(entryId)) return@graphicsLayer
+                    val t = rawMorphProgress.coerceIn(0f, 1f)
+                    if (t <= 0.002f) return@graphicsLayer
+
+                    val w = size.width
+                    val h = size.height
+                    if (w <= 1f || h <= 1f) return@graphicsLayer
+
+                    // Live lookup so even if the underlying grid just scrolled to a newly swiped photo
+                    // on frame 1 of Predictive Back, we immediately lock onto its exact pixel Rect!
+                    val targetRect = originTracker.boundsFor(
+                        key = targetKey,
+                        fallbackToLast = fallbackToLastBounds
+                    )
+
+                    val dst = targetRect?.takeIf {
+                        it.width >= 16f && it.height >= 16f &&
+                            it.bottom > -h * 0.25f && it.top < h * 1.25f &&
+                            it.right > -w * 0.25f && it.left < w * 1.25f
+                    } ?: Rect(
+                        left = w * 0.34f,
+                        top = h * 0.36f,
+                        right = w * 0.66f,
+                        bottom = h * 0.36f + w * 0.32f
+                    )
+
+                    val curL = dst.left * t
+                    val curT = dst.top * t
+                    val curR = w + (dst.right - w) * t
+                    val curB = h + (dst.bottom - h) * t
+
+                    val curW = (curR - curL).coerceAtLeast(1f)
+                    val curH = (curB - curT).coerceAtLeast(1f)
+                    val curCx = (curL + curR) * 0.5f
+                    val curCy = (curT + curB) * 0.5f
+
+                    // Uniform aspect-preserving scale covering the morphing window (zero stretching!)
+                    val uniformScale = maxOf(curW / w, curH / h).coerceIn(0.08f, 1f)
+
+                    // Exact local clip window that projects pixel-for-pixel onto Rect(curL, curT, curR, curB)
+                    val localClipW = (curW / uniformScale).coerceIn(1f, w)
+                    val localClipH = (curH / uniformScale).coerceIn(1f, h)
+                    val localLeft = (w - localClipW) * 0.5f
+                    val localTop = (h - localClipH) * verticalCropBias.coerceIn(0f, 1f)
+                    val localCy = localTop + localClipH * 0.5f
+
+                    scaleX = uniformScale
+                    scaleY = uniformScale
+                    translationX = curCx - (w * 0.5f)
+                    translationY = curCy - (h * 0.5f) - (localCy - (h * 0.5f)) * uniformScale
+
+                    // Smoothly round screen corners mid-flight (OLED bezel 36.dp -> exact card corner radius)
+                    val visualCornerPx = if (t < 0.45f) {
+                        val f = (t / 0.45f).coerceIn(0f, 1f)
+                        midFlightCornerPx * f
+                    } else {
+                        val f = ((t - 0.45f) / 0.55f).coerceIn(0f, 1f)
+                        midFlightCornerPx + (targetCornerPx - midFlightCornerPx) * f
+                    }
+                    val localRadius = (visualCornerPx / uniformScale).coerceAtLeast(0f)
+
+                    // Soft 3D HyperOS elevation shadow peaking mid-flight & landing flush at 0.dp
+                    val shadowBell = kotlin.math.sin(t * kotlin.math.PI.toFloat()).coerceIn(0f, 1f)
+                    shadowElevation = maxShadowPx * shadowBell
+                    ambientShadowColor = Color.Black.copy(alpha = 0.55f)
+                    spotShadowColor = Color.Black.copy(alpha = 0.65f)
+
+                    clip = true
+                    shape = object : Shape {
+                        override fun createOutline(
+                            size: Size,
+                            layoutDirection: LayoutDirection,
+                            density: Density
+                        ): Outline = Outline.Rounded(
+                            RoundRect(
+                                left = localLeft,
+                                top = localTop,
+                                right = localLeft + localClipW,
+                                bottom = localTop + localClipH,
+                                cornerRadius = CornerRadius(localRadius, localRadius)
+                            )
+                        )
+                    }
+
+                    // Keep screen 100% solid while shrinking into the target box, melting seamlessly
+                    // into the real card/tile underneath only during the final 22% of the travel!
+                    alpha = if (isExiting) {
+                        ((1f - t) / 0.22f).coerceIn(0f, 1f)
+                    } else {
+                        ((1f - t) / 0.18f).coerceIn(0f, 1f)
+                    }
+                }
+        ) {
+            content(effectiveMorphProgress)
+        }
+    }
+}
 
 /**
  * Xiaomi HyperOS & Apple iOS transition frame synchronized 1:1 with Navigation Compose's

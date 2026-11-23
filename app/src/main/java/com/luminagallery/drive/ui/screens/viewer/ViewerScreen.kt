@@ -172,6 +172,7 @@ fun ViewerScreen(
     viewModel: ViewerViewModel,
     sharedTransitionScope: SharedTransitionScope,
     animatedVisibilityScope: AnimatedVisibilityScope,
+    rectMorphProgress: Float = 0f,
     onActiveItemChanged: (String) -> Unit,
     onOpenEditor: (itemId: String, sourceUri: String, displayName: String, isLocal: Boolean) -> Unit = { _, _, _, _ -> },
     onDismiss: () -> Unit
@@ -368,8 +369,13 @@ fun ViewerScreen(
         }
     }
 
-    val backgroundAlpha = (1f - dismissDragFraction * 0.85f).coerceIn(0.12f, 1f)
-    val showChromeNow = chromeVisible && dismissDragFraction < 0.05f
+    // Sync chrome & inner black box with Xiaomi HyperOS rect-to-rect morph:
+    // During open/close morph, HyperOsRectMorphFrame draws the full-screen black backdrop behind
+    // the flying photo, so fading the inner black box eliminates black letterbox bars around
+    // landscape photos and lets the pure photo shrink straight into its exact thumbnail tile!
+    val morphInnerBgFactor = (1f - rectMorphProgress * 6f).coerceIn(0f, 1f)
+    val backgroundAlpha = ((1f - dismissDragFraction * 0.85f) * morphInnerBgFactor).coerceIn(0f, 1f)
+    val showChromeNow = chromeVisible && dismissDragFraction < 0.05f && rectMorphProgress < 0.02f
 
     Box(
         modifier = Modifier
@@ -385,7 +391,7 @@ fun ViewerScreen(
                 showFilmstrip -> 118.dp
                 else -> 60.dp
             },
-            animationSpec = tween(durationMillis = 200),
+            animationSpec = tween(durationMillis = if (rectMorphProgress > 0.002f) 110 else 200),
             label = "mediaBottomClearance"
         )
 

@@ -44,9 +44,10 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
@@ -94,8 +95,8 @@ fun MediaGridItem(
     val context = LocalContext.current
     val imageLoader = LocalGalleryImageLoader.current
     val originTracker = LocalAlbumTransitionOrigin.current
-    val displayMetrics = context.resources.displayMetrics
-    val tileCenter = remember { floatArrayOf(0.5f, 0.5f) }
+    val hostView = LocalView.current
+    val tileBoundsRef = remember { arrayOf<androidx.compose.ui.geometry.Rect?>(null) }
 
     // Avoid allocating selection spring animations per tile during normal 120Hz scrolling
     val insetPadding = if (isSelectionMode) {
@@ -161,7 +162,15 @@ fun MediaGridItem(
     )
 
     val handleClick: () -> Unit = {
-        originTracker.record("media_${item.id}", tileCenter[0], tileCenter[1])
+        tileBoundsRef[0]?.let { rect ->
+            originTracker.recordBounds(
+                key = "media_${item.id}",
+                boundsInRoot = rect,
+                rootWidth = hostView.width.toFloat(),
+                rootHeight = hostView.height.toFloat(),
+                markAsLast = true
+            )
+        }
         onClick()
     }
 
@@ -185,11 +194,15 @@ fun MediaGridItem(
             .fillMaxWidth()
             .aspectRatio(1f)
             .onGloballyPositioned { coords ->
-                val bounds = coords.boundsInWindow()
-                val w = displayMetrics.widthPixels.toFloat().coerceAtLeast(1f)
-                val h = displayMetrics.heightPixels.toFloat().coerceAtLeast(1f)
-                tileCenter[0] = bounds.center.x / w
-                tileCenter[1] = bounds.center.y / h
+                val rect = coords.boundsInRoot()
+                tileBoundsRef[0] = rect
+                originTracker.recordBounds(
+                    key = "media_${item.id}",
+                    boundsInRoot = rect,
+                    rootWidth = hostView.width.toFloat(),
+                    rootHeight = hostView.height.toFloat(),
+                    markAsLast = false
+                )
             }
             .graphicsLayer {
                 if (pressScale != 1f) {
