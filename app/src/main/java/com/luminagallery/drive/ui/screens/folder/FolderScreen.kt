@@ -12,6 +12,10 @@ import androidx.compose.animation.Crossfade
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.expandVertically
@@ -22,6 +26,7 @@ import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -97,6 +102,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -136,7 +142,7 @@ import com.luminagallery.drive.ui.screens.stories.StorySlideshowDialog
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-private val SidebarEasing = OneUiMotion.DecelerateEasing
+private val SidebarEasing = OneUiMotion.FluidEasing
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalSharedTransitionApi::class)
 @Composable
@@ -244,6 +250,9 @@ fun FolderScreen(
     }
 
     val hasSidebarContent = uiState.sidebarNodes.isNotEmpty()
+    val sidebarAlbumOrder = remember(uiState.sidebarNodes) {
+        flattenSidebarAlbumOrder(uiState.sidebarNodes)
+    }
     // Just like Samsung Gallery: while browsing a folder-of-folders (nested container albums)
     // with no direct photos, show a full-width 3-column album grid without the left sidebar!
     val isFolderContainerOnly = uiState.viewMode == FolderViewMode.HIERARCHY &&
@@ -263,20 +272,36 @@ fun FolderScreen(
             Column {
                 TopAppBar(
                     title = {
-                        Column {
-                            Text(
-                                text = uiState.folderName,
-                                style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.SemiBold),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Text(
-                                text = mediaBreakdownSubtitle,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
+                        AnimatedContent(
+                            targetState = uiState.folderId to uiState.folderName,
+                            transitionSpec = {
+                                val fromIdx = sidebarAlbumOrder.indexOf(initialState.first)
+                                val toIdx = sidebarAlbumOrder.indexOf(targetState.first)
+                                val dir = if (fromIdx >= 0 && toIdx >= 0 && toIdx < fromIdx) -1 else 1
+                                (slideInVertically(tween(260, easing = OneUiMotion.FluidEasing)) { dir * 18 } +
+                                    fadeIn(tween(200, easing = OneUiMotion.FluidEasing)))
+                                    .togetherWith(
+                                        slideOutVertically(tween(170, easing = OneUiMotion.FluidEasing)) { -dir * 14 } +
+                                            fadeOut(tween(130))
+                                    )
+                            },
+                            label = "folderTitleTransition"
+                        ) { (_, titleText) ->
+                            Column {
+                                Text(
+                                    text = titleText,
+                                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.SemiBold),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = mediaBreakdownSubtitle,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
                         }
                     },
                     navigationIcon = {
@@ -475,6 +500,9 @@ fun FolderScreen(
                         activeFolderId = uiState.folderId,
                         isUnmeteredWifi = uiState.isUnmeteredWifi,
                         onSelectAlbum = { id, name ->
+                            if (id != uiState.folderId) {
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            }
                             val cached = if (LocalMediaRepository.isLocalFolderId(id)) {
                                 appContainer.localMediaRepository.getCachedAlbumMedia(id)
                             } else {
@@ -576,10 +604,27 @@ fun FolderScreen(
                         AnimatedContent(
                             targetState = uiState.folderId,
                             transitionSpec = {
-                                (scaleIn(tween(180, easing = OneUiMotion.AlbumExpandEasing), initialScale = 0.985f) +
-                                    fadeIn(tween(140, easing = OneUiMotion.AlbumExpandEasing)))
+                                val fromIdx = sidebarAlbumOrder.indexOf(initialState)
+                                val toIdx = sidebarAlbumOrder.indexOf(targetState)
+                                val dir = if (fromIdx >= 0 && toIdx >= 0 && toIdx < fromIdx) -1 else 1
+                                // Apple iPadOS / Xiaomi HyperOS directional fluid glide + subtle depth bloom
+                                (slideInVertically(
+                                    animationSpec = tween(290, easing = OneUiMotion.FluidEasing)
+                                ) { h -> dir * (h / 14).coerceIn(28, 72) } +
+                                    scaleIn(
+                                        animationSpec = tween(290, easing = OneUiMotion.FluidEasing),
+                                        initialScale = 0.965f
+                                    ) +
+                                    fadeIn(tween(220, easing = OneUiMotion.FluidEasing)))
                                     .togetherWith(
-                                        fadeOut(tween(100))
+                                        slideOutVertically(
+                                            animationSpec = tween(210, easing = OneUiMotion.FluidEasing)
+                                        ) { h -> -dir * (h / 22).coerceIn(16, 44) } +
+                                            scaleOut(
+                                                animationSpec = tween(210, easing = OneUiMotion.FluidEasing),
+                                                targetScale = 0.975f
+                                            ) +
+                                            fadeOut(tween(150))
                                     )
                             },
                             label = "albumSwitchTransition"
@@ -1030,62 +1075,107 @@ private fun SidebarNodeView(
     val nodeId = node.gridItem.itemId
 
     if (!isGroup) {
-        // Leaf Album (Local album or leaf Drive folder)
+        // Leaf Album (Local album or leaf Drive folder) with fluid Apple/HyperOS selection physics
         val entry = node.gridItem as? AlbumGridItem.AlbumEntry ?: return
         val isActive = entry.folder.id == activeFolderId
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .oneUiClickable(
-                    pressedScale = 0.92f,
-                    hoveredScale = 1.035f,
-                    onClick = { onSelectAlbum(entry.folder.id, entry.folder.name) }
+        val activeScale by animateFloatAsState(
+            targetValue = if (isActive) 1.035f else 1.0f,
+            animationSpec = OneUiMotion.fluidSpring(),
+            label = "sidebarActiveScale"
+        )
+        val activeAlpha by animateFloatAsState(
+            targetValue = if (isActive) 1f else 0.78f,
+            animationSpec = tween(220, easing = OneUiMotion.FluidEasing),
+            label = "sidebarActiveAlpha"
+        )
+        val borderAlpha by animateFloatAsState(
+            targetValue = if (isActive) 1f else 0f,
+            animationSpec = tween(220, easing = OneUiMotion.FluidEasing),
+            label = "sidebarBorderAlpha"
+        )
+        val indicatorHeight by animateDpAsState(
+            targetValue = if (isActive) 22.dp else 0.dp,
+            animationSpec = spring(
+                dampingRatio = Spring.DampingRatioNoBouncy,
+                stiffness = 440f
+            ),
+            label = "sidebarPillHeight"
+        )
+
+        Box(modifier = Modifier.fillMaxWidth()) {
+            // Subtle Apple/HyperOS active indicator bar on the left edge
+            val safePillHeight = indicatorHeight.coerceAtLeast(0.dp)
+            if (safePillHeight > 0.5.dp) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.CenterStart)
+                        .padding(bottom = 22.dp)
+                        .width(3.dp)
+                        .height(safePillHeight)
+                        .clip(RoundedCornerShape(50))
+                        .background(MaterialTheme.colorScheme.primary)
                 )
-                .padding(horizontal = 2.dp, vertical = 2.dp)
-        ) {
-            Box(
+            }
+
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .aspectRatio(1f)
-                    .clip(RoundedCornerShape(18.dp))
-            ) {
-                FolderCoverArtwork(
-                    folder = entry.folder,
-                    isUnmeteredWifi = isUnmeteredWifi,
-                    showDriveBadge = !entry.folder.isLocal,
-                    modifier = Modifier.fillMaxSize()
-                )
-                if (isActive) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .border(
-                                width = 2.dp,
-                                color = Color(0xFFE6C8C4),
-                                shape = RoundedCornerShape(18.dp)
-                            )
+                    .graphicsLayer {
+                        scaleX = activeScale
+                        scaleY = activeScale
+                        alpha = activeAlpha
+                    }
+                    .oneUiClickable(
+                        pressedScale = 0.92f,
+                        hoveredScale = 1.035f,
+                        onClick = { onSelectAlbum(entry.folder.id, entry.folder.name) }
                     )
+                    .padding(start = 5.dp, end = 2.dp, top = 2.dp, bottom = 2.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(1f)
+                        .clip(RoundedCornerShape(18.dp))
+                ) {
+                    FolderCoverArtwork(
+                        folder = entry.folder,
+                        isUnmeteredWifi = isUnmeteredWifi,
+                        showDriveBadge = !entry.folder.isLocal,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                    if (borderAlpha > 0.01f) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .border(
+                                    width = 2.dp,
+                                    color = MaterialTheme.colorScheme.primary.copy(alpha = borderAlpha * 0.92f),
+                                    shape = RoundedCornerShape(18.dp)
+                                )
+                        )
+                    }
                 }
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = entry.folder.name,
+                    fontSize = 11.sp,
+                    lineHeight = 13.sp,
+                    fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Normal,
+                    color = if (isActive) Color.White else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.88f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(horizontal = 2.dp)
+                )
+                Text(
+                    text = entry.folder.mediaCount.toString(),
+                    fontSize = 10.sp,
+                    lineHeight = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    modifier = Modifier.padding(horizontal = 2.dp, vertical = 1.dp)
+                )
             }
-            Spacer(Modifier.height(4.dp))
-            Text(
-                text = entry.folder.name,
-                fontSize = 11.sp,
-                lineHeight = 13.sp,
-                fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Normal,
-                color = if (isActive) Color.White else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.88f),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(horizontal = 2.dp)
-            )
-            Text(
-                text = entry.folder.mediaCount.toString(),
-                fontSize = 10.sp,
-                lineHeight = 12.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                modifier = Modifier.padding(horizontal = 2.dp, vertical = 1.dp)
-            )
         }
         return
     }
@@ -1122,9 +1212,11 @@ private fun SidebarNodeView(
         AnimatedContent(
             targetState = isExpanded,
             transitionSpec = {
-                (fadeIn(tween(200, easing = SidebarEasing)) + expandVertically(tween(220, easing = SidebarEasing)))
+                (fadeIn(tween(240, easing = OneUiMotion.FluidEasing)) +
+                    expandVertically(tween(280, easing = OneUiMotion.FluidEasing)))
                     .togetherWith(
-                        fadeOut(tween(140)) + shrinkVertically(tween(180, easing = SidebarEasing))
+                        fadeOut(tween(150)) +
+                            shrinkVertically(tween(220, easing = OneUiMotion.FluidEasing))
                     )
             },
             label = "sidebarGroupExpand_$nodeId"
@@ -1242,6 +1334,21 @@ private fun collectAutoExpandIds(startNode: SidebarAlbumNode): Set<String> {
         }
     }
     return ids
+}
+
+private fun flattenSidebarAlbumOrder(nodes: List<SidebarAlbumNode>): List<String> {
+    val result = ArrayList<String>(nodes.size * 2)
+    fun visit(list: List<SidebarAlbumNode>) {
+        for (node in list) {
+            if (node.children.isEmpty()) {
+                result.add(node.gridItem.itemId)
+            } else {
+                visit(node.children)
+            }
+        }
+    }
+    visit(nodes)
+    return result
 }
 
 @Composable

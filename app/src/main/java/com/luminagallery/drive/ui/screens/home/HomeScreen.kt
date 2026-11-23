@@ -139,7 +139,7 @@ import com.luminagallery.drive.ui.components.SamsungMenuBottomSheet
 import com.luminagallery.drive.ui.components.SetupCredentialsCard
 import com.luminagallery.drive.ui.screens.stories.StoriesTabContent
 
-private val OneUiTabEasing = OneUiMotion.DecelerateEasing
+private val OneUiTabEasing = OneUiMotion.FluidEasing
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalSharedTransitionApi::class)
 @Composable
@@ -421,22 +421,22 @@ fun HomeScreen(
                         transitionSpec = {
                             val direction = if (targetState.ordinal >= initialState.ordinal) 1 else -1
                             (slideInHorizontally(
-                                animationSpec = tween(310, easing = OneUiTabEasing)
-                            ) { width -> direction * (width / 16) } +
+                                animationSpec = tween(300, easing = OneUiTabEasing)
+                            ) { width -> direction * (width / 12) } +
                                 scaleIn(
-                                    animationSpec = tween(310, easing = OneUiTabEasing),
-                                    initialScale = 0.965f
+                                    animationSpec = tween(300, easing = OneUiTabEasing),
+                                    initialScale = 0.972f
                                 ) +
-                                fadeIn(animationSpec = tween(240, easing = OneUiTabEasing)))
+                                fadeIn(animationSpec = tween(220, easing = OneUiTabEasing)))
                                 .togetherWith(
                                     slideOutHorizontally(
-                                        animationSpec = tween(220, easing = OneUiTabEasing)
-                                    ) { width -> -direction * (width / 22) } +
+                                        animationSpec = tween(210, easing = OneUiTabEasing)
+                                    ) { width -> -direction * (width / 18) } +
                                         scaleOut(
-                                            animationSpec = tween(220, easing = OneUiTabEasing),
-                                            targetScale = 0.975f
+                                            animationSpec = tween(210, easing = OneUiTabEasing),
+                                            targetScale = 0.98f
                                         ) +
-                                        fadeOut(animationSpec = tween(160))
+                                        fadeOut(animationSpec = tween(150))
                                 )
                         },
                         label = "homeTabTransition",

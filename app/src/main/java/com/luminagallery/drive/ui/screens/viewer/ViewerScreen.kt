@@ -111,12 +111,14 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -1523,6 +1525,7 @@ private fun ZoomablePhotoPage(
     val context = LocalContext.current
     val appContainer = LocalAppContainer.current
     val imageLoader = LocalGalleryImageLoader.current
+    val haptic = LocalHapticFeedback.current
     val coroutineScope = rememberCoroutineScope()
 
     val scaleAnim = remember(item.id) { Animatable(1f) }
@@ -1635,7 +1638,8 @@ private fun ZoomablePhotoPage(
         return Offset(x.coerceIn(-maxX, maxX), y.coerceIn(-maxY, maxY))
     }
 
-    val dismissFraction = (abs(dismissOffsetY.value) / 420f).coerceIn(0f, 1f)
+    // Only downward drag scales & dims for dismiss — upward swipe for Details keeps photo rock-solid!
+    val dismissFraction = (dismissOffsetY.value / 420f).coerceIn(0f, 1f)
     val dismissScale = 1f - (dismissFraction * 0.22f)
 
     Box(
@@ -1682,7 +1686,9 @@ private fun ZoomablePhotoPage(
             .pointerInput(item.id) {
                 awaitEachGesture {
                     awaitFirstDown(requireUnconsumed = false)
-                    var isVerticalDismissDrag = false
+                    var verticalDragMode = 0 // 0 = undecided, 1 = swipe down dismiss, -1 = swipe up details
+                    var swipeUpAccumulatedPx = 0f
+                    var detailsTriggered = false
                     var gestureStartedZoomed = scaleAnim.value > 1.02f
 
                     do {
@@ -1690,7 +1696,7 @@ private fun ZoomablePhotoPage(
                         val pressedPointers = event.changes.count { it.pressed }
 
                         if (pressedPointers >= 2) {
-                            isVerticalDismissDrag = false
+                            verticalDragMode = 0
                             val zoomChange = event.calculateZoom()
                             val panChange = event.calculatePan()
                             val centroid = event.calculateCentroid()
@@ -1738,52 +1744,62 @@ private fun ZoomablePhotoPage(
                                     event.changes.forEach { if (it.positionChanged()) it.consume() }
                                 }
                             } else if (!gestureStartedZoomed) {
-                                if (!isVerticalDismissDrag &&
+                                if (verticalDragMode == 0 &&
                                     abs(pan.y) > 8f &&
                                     abs(pan.y) > abs(pan.x) * 1.35f
                                 ) {
-                                    isVerticalDismissDrag = true
+                                    verticalDragMode = if (pan.y > 0f) 1 else -1
                                 }
-                                if (isVerticalDismissDrag) {
-                                    val rawY = dismissOffsetY.value + pan.y
-                                    val newY = if (!latestSwipeDown && rawY > 0f) 0f else rawY
-                                    coroutineScope.launch {
-                                        dismissOffsetY.snapTo(newY)
+                                when (verticalDragMode) {
+                                    1 -> {
+                                        // Smooth downward dismiss gesture (photo follows finger smoothly)
+                                        val newY = if (latestSwipeDown) {
+                                            (dismissOffsetY.value + pan.y).coerceAtLeast(0f)
+                                        } else {
+                                            0f
+                                        }
+                                        coroutineScope.launch {
+                                            dismissOffsetY.snapTo(newY)
+                                        }
+                                        onVerticalDismissProgress((newY / 420f).coerceIn(0f, 1f))
+                                        event.changes.forEach { if (it.positionChanged()) it.consume() }
                                     }
-                                    onVerticalDismissProgress((abs(newY) / 420f).coerceIn(0f, 1f))
-                                    event.changes.forEach { if (it.positionChanged()) it.consume() }
+                                    -1 -> {
+                                        // Silky swipe-up for Details: photo stays rock-solid (zero awkward shift!)
+                                        swipeUpAccumulatedPx += -pan.y
+                                        if (!detailsTriggered && swipeUpAccumulatedPx > 95f) {
+                                            detailsTriggered = true
+                                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                            onSwipeUpForDetails()
+                                        }
+                                        event.changes.forEach { if (it.positionChanged()) it.consume() }
+                                    }
                                 }
                             }
                         }
                     } while (event.changes.any { it.pressed })
 
-                    if (isVerticalDismissDrag) {
+                    if (verticalDragMode == 1) {
                         val dismissThresholdPx = (containerSize.height * 0.16f).coerceAtLeast(210f)
-                        val swipeUpThresholdPx = 150f
-                        when {
-                            latestSwipeDown && dismissOffsetY.value > dismissThresholdPx -> {
-                                onVerticalDismissProgress(0f)
-                                onDismiss()
-                            }
-                            dismissOffsetY.value < -swipeUpThresholdPx -> {
-                                coroutineScope.launch {
-                                    dismissOffsetY.animateTo(0f, spring())
-                                    onVerticalDismissProgress(0f)
-                                }
-                                onSwipeUpForDetails()
-                            }
-                            else -> {
-                                coroutineScope.launch {
-                                    dismissOffsetY.animateTo(
-                                        0f,
-                                        spring(
-                                            dampingRatio = Spring.DampingRatioNoBouncy,
-                                            stiffness = Spring.StiffnessMedium
-                                        )
+                        if (latestSwipeDown && dismissOffsetY.value > dismissThresholdPx) {
+                            onVerticalDismissProgress(0f)
+                            onDismiss()
+                        } else {
+                            coroutineScope.launch {
+                                dismissOffsetY.animateTo(
+                                    0f,
+                                    spring(
+                                        dampingRatio = Spring.DampingRatioNoBouncy,
+                                        stiffness = Spring.StiffnessMedium
                                     )
-                                    onVerticalDismissProgress(0f)
-                                }
+                                )
+                                onVerticalDismissProgress(0f)
                             }
+                        }
+                    } else if (verticalDragMode == -1) {
+                        if (!detailsTriggered && swipeUpAccumulatedPx > 55f) {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            onSwipeUpForDetails()
                         }
                     } else if (scaleAnim.value < 1.05f) {
                         onZoomStateChanged(false)

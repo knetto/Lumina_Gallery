@@ -55,6 +55,15 @@ object OneUiMotion {
     /** Samsung One UI 7 / 8 album depth-zoom easing: instantaneous launch with long velvety settle. */
     val AlbumExpandEasing = CubicBezierEasing(0.20f, 0.96f, 0.28f, 1.0f)
 
+    /** Apple iOS / Xiaomi HyperOS signature quintic-out fluid curve: instant touch response, silky settle. */
+    val FluidEasing = CubicBezierEasing(0.22f, 1f, 0.36f, 1f)
+
+    /** Critically damped Apple/HyperOS fluid spring (zero jarring bounce, silky settle). */
+    fun <T> fluidSpring() = spring<T>(
+        dampingRatio = 0.90f,
+        stiffness = 380f
+    )
+
     /** Snappy yet silky spring used for press bounce, filmstrip expansion & micro-interactions. */
     fun <T> snappySpring() = spring<T>(
         dampingRatio = 0.78f,

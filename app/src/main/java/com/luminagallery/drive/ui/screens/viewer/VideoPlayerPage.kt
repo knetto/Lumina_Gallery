@@ -48,9 +48,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -152,6 +154,7 @@ fun VideoPlayerPage(
     val appContainer = LocalAppContainer.current
     val imageLoader = LocalGalleryImageLoader.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    val haptic = LocalHapticFeedback.current
     val coroutineScope = rememberCoroutineScope()
     val dismissOffsetY = remember(item.id) { Animatable(0f) }
 
@@ -352,28 +355,31 @@ fun VideoPlayerPage(
         }
     }
 
-    val dismissFraction = (abs(dismissOffsetY.value) / 420f).coerceIn(0f, 1f)
+    val dismissFraction = (dismissOffsetY.value / 420f).coerceIn(0f, 1f)
     val dismissScale = 1f - (dismissFraction * 0.22f)
 
     Box(
         modifier = modifier
             .fillMaxSize()
             .pointerInput(item.id, swipeDownToDismiss) {
+                var swipeUpAccumulated = 0f
+                var detailsFired = false
                 detectVerticalDragGestures(
+                    onDragStart = {
+                        swipeUpAccumulated = 0f
+                        detailsFired = false
+                    },
                     onDragEnd = {
                         when {
                             swipeDownToDismiss && dismissOffsetY.value > 210f -> {
                                 onVerticalDismissProgress(0f)
                                 onDismiss()
                             }
-                            dismissOffsetY.value < -150f -> {
-                                coroutineScope.launch {
-                                    dismissOffsetY.animateTo(0f, spring())
-                                    onVerticalDismissProgress(0f)
-                                }
+                            !detailsFired && swipeUpAccumulated > 55f -> {
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                 onSwipeUpForDetails()
                             }
-                            else -> {
+                            dismissOffsetY.value > 0f -> {
                                 coroutineScope.launch {
                                     dismissOffsetY.animateTo(
                                         0f,
@@ -388,17 +394,28 @@ fun VideoPlayerPage(
                         }
                     },
                     onDragCancel = {
-                        coroutineScope.launch {
-                            dismissOffsetY.animateTo(0f, spring())
-                            onVerticalDismissProgress(0f)
+                        if (dismissOffsetY.value > 0f) {
+                            coroutineScope.launch {
+                                dismissOffsetY.animateTo(0f, spring(dampingRatio = Spring.DampingRatioNoBouncy))
+                                onVerticalDismissProgress(0f)
+                            }
                         }
                     },
                     onVerticalDrag = { change, dragAmount ->
                         change.consume()
-                        val rawUpdated = dismissOffsetY.value + dragAmount
-                        val updated = if (!swipeDownToDismiss && rawUpdated > 0f) 0f else rawUpdated
-                        coroutineScope.launch { dismissOffsetY.snapTo(updated) }
-                        onVerticalDismissProgress((abs(updated) / 420f).coerceIn(0f, 1f))
+                        if (dragAmount < 0f && dismissOffsetY.value <= 0f) {
+                            // Keep video completely stationary when swiping up for Details
+                            swipeUpAccumulated += -dragAmount
+                            if (!detailsFired && swipeUpAccumulated > 95f) {
+                                detailsFired = true
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                onSwipeUpForDetails()
+                            }
+                        } else if (swipeDownToDismiss) {
+                            val updated = (dismissOffsetY.value + dragAmount).coerceAtLeast(0f)
+                            coroutineScope.launch { dismissOffsetY.snapTo(updated) }
+                            onVerticalDismissProgress((updated / 420f).coerceIn(0f, 1f))
+                        }
                     }
                 )
             }
