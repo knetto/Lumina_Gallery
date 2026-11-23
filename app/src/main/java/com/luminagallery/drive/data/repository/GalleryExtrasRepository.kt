@@ -2,6 +2,7 @@ package com.luminagallery.drive.data.repository
 
 import androidx.compose.runtime.Immutable
 import com.luminagallery.drive.data.local.GalleryDatabase
+import com.luminagallery.drive.data.local.HiddenLockedFolderManager
 import com.luminagallery.drive.data.local.LocalMediaRepository
 import com.luminagallery.drive.data.local.entity.AlbumViewPrefEntity
 import com.luminagallery.drive.data.local.entity.CustomAlbumCoverEntity
@@ -55,7 +56,8 @@ data class LocationScanProgress(
  */
 class GalleryExtrasRepository(
     database: GalleryDatabase,
-    private val localMediaRepository: LocalMediaRepository
+    private val localMediaRepository: LocalMediaRepository,
+    private val hiddenFolderManager: HiddenLockedFolderManager
 ) {
     private val extrasDao = database.galleryExtrasDao()
     private val locationScanMutex = Mutex()
@@ -338,16 +340,112 @@ class GalleryExtrasRepository(
             }
         }
 
+    suspend fun getLockedAlbum(albumId: String): LockedAlbumEntity? =
+        withContext(Dispatchers.IO) { extrasDao.getLockedAlbum(albumId) }
+
     suspend fun setAlbumLocked(albumId: String, locked: Boolean) =
         withContext(Dispatchers.IO) {
             if (locked) {
-                extrasDao.upsertLockedAlbum(LockedAlbumEntity(albumId, System.currentTimeMillis()))
+                val existing = extrasDao.getLockedAlbum(albumId)
+                extrasDao.upsertLockedAlbum(
+                    existing ?: LockedAlbumEntity(albumId = albumId, lockedAtEpochMs = System.currentTimeMillis())
+                )
                 latestLockedAlbumIds = latestLockedAlbumIds + albumId
             } else {
                 extrasDao.removeLockedAlbum(albumId)
                 latestLockedAlbumIds = latestLockedAlbumIds - albumId
             }
         }
+
+    /**
+     * Locks an album and (for local albums when [hideOnDisk] is true & All files access is granted)
+     * renames its folder to a dot-prefixed hidden folder with `.nomedia` so File Explorer and other
+     * gallery apps stop showing it. Returns `true` if hidden on disk, `false` if in-app lock only.
+     */
+    suspend fun lockAlbum(
+        albumId: String,
+        albumName: String,
+        isLocal: Boolean,
+        items: List<MediaItem>,
+        hideOnDisk: Boolean
+    ): Result<Boolean> = withContext(Dispatchers.IO) {
+        runCatching {
+            val now = System.currentTimeMillis()
+            if (isLocal && hideOnDisk && hiddenFolderManager.hasAllFilesAccess()) {
+                val relPath = items.firstOrNull { it.isLocal }?.storagePath
+                val moveRes = hiddenFolderManager.hideFolderOnDisk(
+                    albumId = albumId,
+                    albumName = albumName,
+                    originalRelativePath = relPath,
+                    items = items
+                )
+                if (moveRes.isSuccess) {
+                    val moved = moveRes.getOrThrow()
+                    extrasDao.upsertLockedAlbum(
+                        LockedAlbumEntity(
+                            albumId = albumId,
+                            lockedAtEpochMs = now,
+                            isHiddenOnDisk = true,
+                            hiddenDirPath = moved.hiddenDirPath,
+                            originalDirPath = moved.originalDirPath,
+                            displayName = moved.displayName,
+                            originalRelativePath = moved.originalRelativePath
+                        )
+                    )
+                    latestLockedAlbumIds = latestLockedAlbumIds + albumId
+                    localMediaRepository.notifyPermissionChanged()
+                    return@runCatching true
+                }
+            }
+            extrasDao.upsertLockedAlbum(
+                LockedAlbumEntity(
+                    albumId = albumId,
+                    lockedAtEpochMs = now,
+                    isHiddenOnDisk = false,
+                    displayName = albumName
+                )
+            )
+            latestLockedAlbumIds = latestLockedAlbumIds + albumId
+            localMediaRepository.notifyPermissionChanged()
+            false
+        }
+    }
+
+    /**
+     * Unlocks an album and (if it was hidden on disk via `.folder` + `.nomedia`) restores its
+     * original folder name, removes `.nomedia`, and triggers MediaScanner so File Explorer &
+     * other galleries see it immediately.
+     */
+    suspend fun unlockAlbum(albumId: String): Result<Boolean> = withContext(Dispatchers.IO) {
+        runCatching {
+            val existing = extrasDao.getLockedAlbum(albumId)
+            var restoredFromDisk = false
+            if (existing != null && existing.isHiddenOnDisk) {
+                hiddenFolderManager.unhideFolderOnDisk(existing).getOrThrow()
+                restoredFromDisk = true
+            }
+            extrasDao.removeLockedAlbum(albumId)
+            latestLockedAlbumIds = latestLockedAlbumIds - albumId
+            localMediaRepository.notifyPermissionChanged()
+            restoredFromDisk
+        }
+    }
+
+    /**
+     * Rediscovers any `.lumina_locked` dot-folders on storage (e.g. after app reinstall or data wipe)
+     * and re-registers them in `locked_albums` so locked folders automatically reappear.
+     */
+    suspend fun discoverAndRegisterHiddenLockedFolders() = withContext(Dispatchers.IO) {
+        val discovered = hiddenFolderManager.discoverHiddenFoldersOnDisk()
+        if (discovered.isEmpty()) return@withContext
+        val existingIds = extrasDao.getAllLockedAlbumIds().toHashSet()
+        val toAdd = discovered.filter { it.albumId !in existingIds }
+        if (toAdd.isNotEmpty()) {
+            extrasDao.upsertLockedAlbums(toAdd)
+            latestLockedAlbumIds = latestLockedAlbumIds + toAdd.map { it.albumId }
+            localMediaRepository.notifyPermissionChanged()
+        }
+    }
 
     suspend fun toggleFavoriteStory(storyId: String, currentlyFavorited: Boolean) =
         withContext(Dispatchers.IO) {

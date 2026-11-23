@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.compose.runtime.staticCompositionLocalOf
 import coil3.ImageLoader
 import com.luminagallery.drive.data.local.GalleryDatabase
+import com.luminagallery.drive.data.local.HiddenLockedFolderManager
 import com.luminagallery.drive.data.local.LocalMediaRepository
 import com.luminagallery.drive.data.local.PreferencesManager
 import com.luminagallery.drive.data.remote.DriveApiService
@@ -49,7 +50,12 @@ class AppContainer(context: Context) {
     val networkMonitor: NetworkMonitor = NetworkMonitor(appContext)
 
     val database: GalleryDatabase = GalleryDatabase.build(appContext)
-    val localMediaRepository: LocalMediaRepository = LocalMediaRepository(appContext)
+    val hiddenLockedFolderManager: HiddenLockedFolderManager = HiddenLockedFolderManager(appContext)
+    val localMediaRepository: LocalMediaRepository = LocalMediaRepository(
+        context = appContext,
+        extrasDao = database.galleryExtrasDao(),
+        hiddenFolderManager = hiddenLockedFolderManager
+    )
     val preferencesManager: PreferencesManager = PreferencesManager(appContext)
 
     val coilCacheManager: CoilCacheManager = CoilCacheManager(
@@ -67,6 +73,7 @@ class AppContainer(context: Context) {
             if (savedCacheMb != PreferencesManager.DEFAULT_CACHE_MB) {
                 coilCacheManager.updateMaxCacheSizeMb(savedCacheMb)
             }
+            runCatching { galleryExtrasRepository.discoverAndRegisterHiddenLockedFolders() }
         }
     }
 
@@ -78,7 +85,8 @@ class AppContainer(context: Context) {
 
     val galleryExtrasRepository: GalleryExtrasRepository = GalleryExtrasRepository(
         database = database,
-        localMediaRepository = localMediaRepository
+        localMediaRepository = localMediaRepository,
+        hiddenFolderManager = hiddenLockedFolderManager
     )
 
     val albumOrganizationRepository: AlbumOrganizationRepository = AlbumOrganizationRepository(

@@ -135,6 +135,11 @@ fun SettingsScreen(
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
+    LaunchedEffect(resumeTick) {
+        if (resumeTick > 0 && appContainer.hiddenLockedFolderManager.hasAllFilesAccess()) {
+            appContainer.galleryExtrasRepository.discoverAndRegisterHiddenLockedFolders()
+        }
+    }
 
     var activePicker by remember { mutableStateOf<SettingsPickerSheet?>(null) }
     var showCloudProfileDialog by remember { mutableStateOf(false) }
@@ -431,6 +436,30 @@ fun SettingsScreen(
                             )
                         }
                     )
+
+                    if (appContainer.hiddenLockedFolderManager.requiresAllFilesPermission()) {
+                        OneUiDivider()
+                        val hasAllFilesAccess = remember(resumeTick) {
+                            appContainer.hiddenLockedFolderManager.hasAllFilesAccess()
+                        }
+                        OneUiActionRow(
+                            title = "Hide locked folders from File Explorer",
+                            subtitle = if (hasAllFilesAccess) {
+                                "Active · locked local albums hidden as .folder + .nomedia"
+                            } else {
+                                "Grant All files access once to hide locked albums from File Explorer & other galleries"
+                            },
+                            subtitleAccent = !hasAllFilesAccess,
+                            showChevron = true,
+                            onClick = {
+                                runCatching {
+                                    context.startActivity(
+                                        appContainer.hiddenLockedFolderManager.buildAllFilesAccessIntent()
+                                    )
+                                }
+                            }
+                        )
+                    }
 
                     if (appContainer.localMediaRepository.supportsManageMediaPermission()) {
                         OneUiDivider()

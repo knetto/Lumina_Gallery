@@ -58,8 +58,17 @@ interface GalleryExtrasDao {
     @Query("SELECT albumId FROM locked_albums")
     fun observeLockedAlbumIds(): Flow<List<String>>
 
+    @Query("SELECT * FROM locked_albums")
+    fun observeLockedAlbums(): Flow<List<LockedAlbumEntity>>
+
     @Query("SELECT albumId FROM locked_albums")
     suspend fun getAllLockedAlbumIds(): List<String>
+
+    @Query("SELECT * FROM locked_albums")
+    suspend fun getAllLockedAlbums(): List<LockedAlbumEntity>
+
+    @Query("SELECT * FROM locked_albums WHERE albumId = :albumId LIMIT 1")
+    suspend fun getLockedAlbum(albumId: String): LockedAlbumEntity?
 
     @Upsert
     suspend fun upsertLockedAlbum(album: LockedAlbumEntity)

@@ -20,6 +20,8 @@ import android.provider.MediaStore
 import android.provider.Settings
 import androidx.core.content.ContextCompat
 import androidx.exifinterface.media.ExifInterface
+import com.luminagallery.drive.data.local.dao.GalleryExtrasDao
+import com.luminagallery.drive.data.local.entity.LockedAlbumEntity
 import com.luminagallery.drive.domain.model.CleanOutCategory
 import com.luminagallery.drive.domain.model.CleanOutGroup
 import com.luminagallery.drive.domain.model.DriveFolder
@@ -39,6 +41,7 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.shareIn
@@ -57,7 +60,11 @@ import kotlin.math.roundToInt
  * Queries on-device Android MediaStore albums, photos, videos, RAW files, Trash, Favorites,
  * Locations (EXIF GPS + Geocoder), and Smart Clean-Out insights in real time.
  */
-class LocalMediaRepository(private val context: Context) {
+class LocalMediaRepository(
+    private val context: Context,
+    private val extrasDao: GalleryExtrasDao? = null,
+    private val hiddenFolderManager: HiddenLockedFolderManager = HiddenLockedFolderManager(context)
+) {
 
     private val repoScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val permissionRefreshTrigger = MutableStateFlow(0)
@@ -105,11 +112,21 @@ class LocalMediaRepository(private val context: Context) {
         val albums: List<DriveFolder>
     )
 
-    private val sharedIndexedLocalMedia: Flow<IndexedLocalMedia> = sharedMediaStoreTriggers
+    private val lockedAlbumsFlow: Flow<List<LockedAlbumEntity>> =
+        extrasDao?.observeLockedAlbums() ?: flowOf(emptyList())
+
+    private val sharedIndexedLocalMedia: Flow<IndexedLocalMedia> = combine(
+        sharedMediaStoreTriggers,
+        lockedAlbumsFlow
+    ) { _, lockedAlbums -> lockedAlbums }
         .conflate()
-        .map {
+        .map { lockedAlbums ->
             val allItems = if (!hasMediaPermission()) emptyList() else queryLocalMedia(trashedOnly = false)
-            if (allItems.isEmpty()) {
+            val diskHiddenAlbums = lockedAlbums.filter {
+                it.isHiddenOnDisk && !it.hiddenDirPath.isNullOrBlank()
+            }
+
+            if (allItems.isEmpty() && diskHiddenAlbums.isEmpty()) {
                 latestAllMedia = emptyList()
                 latestVideosMedia = emptyList()
                 latestMediaByBucket = emptyMap()
@@ -125,7 +142,8 @@ class LocalMediaRepository(private val context: Context) {
                 if (item.isVideo) videos.add(item)
             }
 
-            val albums = grouped.map { (bucketId, items) ->
+            val albumsById = LinkedHashMap<String, DriveFolder>()
+            for ((bucketId, items) in grouped) {
                 val newest = items.first()
                 val fullStoragePath = newest.storagePath
                     ?.trim()
@@ -138,7 +156,7 @@ class LocalMediaRepository(private val context: Context) {
                     ?.takeIf { it.isNotBlank() }
                     ?: fullStoragePath?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
                     ?: "Device Folder"
-                DriveFolder(
+                albumsById[bucketId] = DriveFolder(
                     id = bucketId,
                     parentId = null,
                     name = folderName,
@@ -153,7 +171,17 @@ class LocalMediaRepository(private val context: Context) {
                     coverSizeBytes = newest.sizeBytes,
                     relativePath = fullStoragePath ?: folderName
                 )
-            }.sortedWith(
+            }
+
+            // Mount hidden locked .folders directly from disk (invisible to MediaStore & File Explorer,
+            // kept out of `allItems`/`videos` so they never leak into Pictures, Search, or Stories!)
+            for (entity in diskHiddenAlbums) {
+                val hiddenItems = hiddenFolderManager.scanHiddenFolderMedia(entity)
+                grouped[entity.albumId] = hiddenItems.toMutableList()
+                albumsById[entity.albumId] = hiddenFolderManager.buildHiddenAlbumFolder(entity, hiddenItems)
+            }
+
+            val albums = albumsById.values.sortedWith(
                 compareBy<DriveFolder> { albumPriority(it.name) }
                     .thenByDescending { it.modifiedTimeEpochMs }
             )
@@ -610,18 +638,26 @@ class LocalMediaRepository(private val context: Context) {
         toTrash: Boolean = true
     ): Result<Int> = withContext(Dispatchers.IO) {
         runCatching {
-            require(Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                "Trash requires Android 11 or newer"
+            val (hiddenItems, mediaStoreItems) = items.partition {
+                HiddenLockedFolderManager.isHiddenFileUri(it.localContentUri)
             }
             var count = 0
-            val values = ContentValues().apply {
-                put(MediaStore.MediaColumns.IS_TRASHED, if (toTrash) 1 else 0)
+            if (hiddenItems.isNotEmpty() && toTrash) {
+                count += hiddenFolderManager.deleteHiddenFilesDirectly(hiddenItems).getOrThrow()
             }
-            for (item in items) {
-                if (!item.isLocal || item.localContentUri.isNullOrBlank()) continue
-                val uri = Uri.parse(item.localContentUri)
-                val updated = context.contentResolver.update(uri, values, null, null)
-                if (updated > 0) count++
+            if (mediaStoreItems.isNotEmpty()) {
+                require(Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    "Trash requires Android 11 or newer"
+                }
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.IS_TRASHED, if (toTrash) 1 else 0)
+                }
+                for (item in mediaStoreItems) {
+                    if (!item.isLocal || item.localContentUri.isNullOrBlank()) continue
+                    val uri = Uri.parse(item.localContentUri)
+                    val updated = context.contentResolver.update(uri, values, null, null)
+                    if (updated > 0) count++
+                }
             }
             if (count == 0) {
                 throw IllegalStateException("Android did not allow direct media trash")
@@ -632,14 +668,20 @@ class LocalMediaRepository(private val context: Context) {
 
     /**
      * Permanently deletes local items directly without Android's system dialog when `MANAGE_MEDIA`
-     * is granted.
+     * is granted (or when items reside in a disk-hidden locked `.folder`).
      */
     suspend fun deleteLocalItemsPermanentlyDirectly(
         items: List<MediaItem>
     ): Result<Int> = withContext(Dispatchers.IO) {
         runCatching {
+            val (hiddenItems, mediaStoreItems) = items.partition {
+                HiddenLockedFolderManager.isHiddenFileUri(it.localContentUri)
+            }
             var count = 0
-            for (item in items) {
+            if (hiddenItems.isNotEmpty()) {
+                count += hiddenFolderManager.deleteHiddenFilesDirectly(hiddenItems).getOrThrow()
+            }
+            for (item in mediaStoreItems) {
                 if (!item.isLocal || item.localContentUri.isNullOrBlank()) continue
                 val uri = Uri.parse(item.localContentUri)
                 val deleted = context.contentResolver.delete(uri, null, null)

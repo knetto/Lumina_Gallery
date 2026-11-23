@@ -47,7 +47,7 @@ import com.luminagallery.drive.data.local.entity.SyncStateEntity
         AlbumViewPrefEntity::class,
         LockedAlbumEntity::class
     ],
-    version = 9,
+    version = 10,
     exportSchema = true
 )
 abstract class GalleryDatabase : RoomDatabase() {
@@ -252,6 +252,16 @@ abstract class GalleryDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `locked_albums` ADD COLUMN `isHiddenOnDisk` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `locked_albums` ADD COLUMN `hiddenDirPath` TEXT")
+                db.execSQL("ALTER TABLE `locked_albums` ADD COLUMN `originalDirPath` TEXT")
+                db.execSQL("ALTER TABLE `locked_albums` ADD COLUMN `displayName` TEXT")
+                db.execSQL("ALTER TABLE `locked_albums` ADD COLUMN `originalRelativePath` TEXT")
+            }
+        }
+
         fun build(context: Context): GalleryDatabase =
             Room.databaseBuilder(
                 context.applicationContext,
@@ -266,7 +276,8 @@ abstract class GalleryDatabase : RoomDatabase() {
                     MIGRATION_5_6,
                     MIGRATION_6_7,
                     MIGRATION_7_8,
-                    MIGRATION_8_9
+                    MIGRATION_8_9,
+                    MIGRATION_9_10
                 )
                 .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
                 .fallbackToDestructiveMigration(dropAllTables = true)

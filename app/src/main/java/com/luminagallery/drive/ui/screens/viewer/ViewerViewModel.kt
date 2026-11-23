@@ -278,19 +278,25 @@ class ViewerViewModel(
 
     fun requestTrashLocalItem(item: MediaItem) {
         if (!item.isLocal) return
-        if (localMediaRepository.canManageMediaDirectly()) {
+        val isHiddenFile = com.luminagallery.drive.data.local.HiddenLockedFolderManager
+            .isHiddenFileUri(item.localContentUri)
+        if (isHiddenFile || localMediaRepository.canManageMediaDirectly()) {
             viewModelScope.launch {
                 localMediaRepository.trashLocalItemsDirectly(listOf(item), toTrash = true)
                     .onSuccess {
                         localMediaRepository.notifyPermissionChanged()
-                        snackbarFlow.value = "Moved to trash"
+                        snackbarFlow.value = if (isHiddenFile) "Deleted permanently" else "Moved to trash"
                     }
-                    .onFailure {
-                        val sender = localMediaRepository.buildTrashIntentSender(listOf(item))
-                        if (sender != null) {
-                            pendingTrashFlow.value = sender
+                    .onFailure { err ->
+                        if (isHiddenFile) {
+                            snackbarFlow.value = err.localizedMessage ?: "Could not delete file"
                         } else {
-                            snackbarFlow.value = "Trash requires Android 11 or newer"
+                            val sender = localMediaRepository.buildTrashIntentSender(listOf(item))
+                            if (sender != null) {
+                                pendingTrashFlow.value = sender
+                            } else {
+                                snackbarFlow.value = "Trash requires Android 11 or newer"
+                            }
                         }
                     }
             }

@@ -1298,9 +1298,10 @@ class CloudProfileSyncManager(
                 extrasDao.upsertHiddenAlbums(hiddenToUpsert)
             }
 
-            // 4B. Authoritatively sync locked albums (Drive directly + local matched by path/name)
+            // 4B. Authoritatively sync locked albums while preserving any local disk-hidden `.folder` paths
+            val existingLockedById = extrasDao.getAllLockedAlbums().associateBy { it.albumId }
             extrasDao.clearAllLockedAlbums()
-            val lockedToUpsert = mutableListOf<LockedAlbumEntity>()
+            val lockedToUpsert = LinkedHashMap<String, LockedAlbumEntity>()
             for (locked in snapshot.lockedAlbums) {
                 if (locked.isLocal || LocalMediaRepository.isLocalFolderId(locked.albumId)) {
                     localLockedRules.add(locked)
@@ -1311,14 +1312,22 @@ class CloudProfileSyncManager(
                         localAlbums = localAlbums
                     )
                     if (matched != null) {
-                        lockedToUpsert.add(LockedAlbumEntity(albumId = matched, lockedAtEpochMs = now))
+                        val prev = existingLockedById[matched]
+                        lockedToUpsert[matched] = prev ?: LockedAlbumEntity(albumId = matched, lockedAtEpochMs = now)
                     }
                 } else {
-                    lockedToUpsert.add(LockedAlbumEntity(albumId = locked.albumId, lockedAtEpochMs = now))
+                    val prev = existingLockedById[locked.albumId]
+                    lockedToUpsert[locked.albumId] = prev ?: LockedAlbumEntity(albumId = locked.albumId, lockedAtEpochMs = now)
+                }
+            }
+            // Never forget a folder that is physically hidden on this device's disk
+            for ((id, entity) in existingLockedById) {
+                if (entity.isHiddenOnDisk && !entity.hiddenDirPath.isNullOrBlank() && id !in lockedToUpsert) {
+                    lockedToUpsert[id] = entity
                 }
             }
             if (lockedToUpsert.isNotEmpty()) {
-                extrasDao.upsertLockedAlbums(lockedToUpsert)
+                extrasDao.upsertLockedAlbums(lockedToUpsert.values.toList())
             }
 
             // 5. Authoritatively sync Google Drive favorites (preserving local on-device favorites)

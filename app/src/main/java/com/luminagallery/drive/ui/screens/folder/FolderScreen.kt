@@ -138,6 +138,7 @@ import com.luminagallery.drive.ui.components.MoveCopyToAlbumSheet
 import com.luminagallery.drive.ui.components.MultiSelectActionBar
 import com.luminagallery.drive.LocalAppContainer
 import com.luminagallery.drive.LocalGalleryImageLoader
+import com.luminagallery.drive.data.local.HiddenLockedFolderManager
 import com.luminagallery.drive.data.local.LocalMediaRepository
 import com.luminagallery.drive.ui.components.OneUiMotion
 import com.luminagallery.drive.ui.components.PinchZoomGridContainer
@@ -192,6 +193,32 @@ fun FolderScreen(
     var showTrashConfirmLocal by remember { mutableStateOf(false) }
     var showRenameAlbumDialog by remember { mutableStateOf(false) }
     var pendingAlbumRenameName by remember { mutableStateOf<String?>(null) }
+    var showAllFilesAccessLockDialog by remember { mutableStateOf(false) }
+    var pendingAllFilesAction by remember { mutableStateOf<String?>(null) }
+
+    val allFilesAccessLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) {
+        val action = pendingAllFilesAction
+        pendingAllFilesAction = null
+        val granted = appContainer.hiddenLockedFolderManager.hasAllFilesAccess()
+        when (action) {
+            "lock" -> {
+                if (granted) {
+                    viewModel.lockCurrentAlbum(hideOnDisk = true, onLocked = onNavigateBack)
+                } else {
+                    viewModel.showMessage("All files access not granted — album was not hidden")
+                }
+            }
+            "unlock" -> {
+                if (granted) {
+                    viewModel.unlockCurrentAlbum()
+                } else {
+                    viewModel.showMessage("Grant All files access to restore this hidden folder")
+                }
+            }
+        }
+    }
 
     SecureWindowEffect(enabled = uiState.isProtectedPrivateAlbum)
 
@@ -487,7 +514,7 @@ fun FolderScreen(
                                             )
                                         }
                                     }
-                                    if (uiState.isLocalAlbum && uiState.mediaItems.isNotEmpty()) {
+                                    if (uiState.isLocalAlbum && !uiState.isLockedAlbum && uiState.mediaItems.isNotEmpty()) {
                                         DropdownMenuItem(
                                             text = { Text("Rename album") },
                                             onClick = {
@@ -502,6 +529,8 @@ fun FolderScreen(
                                             showOverflowMenu = false
                                             val wantLock = !uiState.isLockedAlbum
                                             val albumTitle = uiState.folderName
+                                            val isLocal = uiState.isLocalAlbum
+                                            val folderId = uiState.folderId
                                             BiometricLockHelper.authenticate(
                                                 context = context,
                                                 title = if (wantLock) "Lock album" else "Unlock album",
@@ -511,8 +540,30 @@ fun FolderScreen(
                                                     "Verify your identity to unlock \"$albumTitle\""
                                                 },
                                                 onSuccess = {
-                                                    viewModel.setCurrentAlbumLocked(wantLock)
-                                                    if (wantLock) onNavigateBack()
+                                                    if (wantLock) {
+                                                        if (!isLocal || appContainer.hiddenLockedFolderManager.hasAllFilesAccess()) {
+                                                            viewModel.lockCurrentAlbum(
+                                                                hideOnDisk = isLocal,
+                                                                onLocked = onNavigateBack
+                                                            )
+                                                        } else {
+                                                            showAllFilesAccessLockDialog = true
+                                                        }
+                                                    } else {
+                                                        scope.launch {
+                                                            val entity = appContainer.galleryExtrasRepository.getLockedAlbum(folderId)
+                                                            if (entity?.isHiddenOnDisk == true &&
+                                                                !appContainer.hiddenLockedFolderManager.hasAllFilesAccess()
+                                                            ) {
+                                                                pendingAllFilesAction = "unlock"
+                                                                allFilesAccessLauncher.launch(
+                                                                    appContainer.hiddenLockedFolderManager.buildAllFilesAccessIntent()
+                                                                )
+                                                            } else {
+                                                                viewModel.unlockCurrentAlbum()
+                                                            }
+                                                        }
+                                                    }
                                                 },
                                                 onFailure = { err -> viewModel.showMessage(err) }
                                             )
@@ -975,11 +1026,14 @@ fun FolderScreen(
             uiState.mediaItems.filter { it.id in uiState.selectedIds }
         }
         if (itemsToTrash.isNotEmpty()) {
+            val hasHiddenLockedFiles = itemsToTrash.any {
+                HiddenLockedFolderManager.isHiddenFileUri(it.localContentUri)
+            }
             HyperOsTrashConfirmSheet(
                 items = itemsToTrash,
-                mode = TrashConfirmMode.MOVE_TO_TRASH,
-                canSkipSystemPrompt = appContainer.localMediaRepository.canManageMediaDirectly(),
-                supportsSkipPromptSetting = appContainer.localMediaRepository.supportsManageMediaPermission(),
+                mode = if (hasHiddenLockedFiles) TrashConfirmMode.DELETE_PERMANENTLY else TrashConfirmMode.MOVE_TO_TRASH,
+                canSkipSystemPrompt = hasHiddenLockedFiles || appContainer.localMediaRepository.canManageMediaDirectly(),
+                supportsSkipPromptSetting = !hasHiddenLockedFiles && appContainer.localMediaRepository.supportsManageMediaPermission(),
                 onOpenManageMediaSettings = {
                     appContainer.localMediaRepository.buildManageMediaSettingsIntent()?.let { intent ->
                         runCatching { context.startActivity(intent) }
@@ -992,6 +1046,45 @@ fun FolderScreen(
                 onDismiss = { showTrashConfirmLocal = false }
             )
         }
+    }
+
+    if (showAllFilesAccessLockDialog) {
+        AlertDialog(
+            onDismissRequest = { showAllFilesAccessLockDialog = false },
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            shape = RoundedCornerShape(26.dp),
+            title = { Text("Hide folder from File Explorer?") },
+            text = {
+                Text(
+                    text = "Grant All files access once so Lumina can hide \"${uiState.folderName}\" as a hidden .folder with .nomedia — making it invisible in File Explorer, other gallery apps, and photo pickers while keeping your files safe across reinstalls.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showAllFilesAccessLockDialog = false
+                        pendingAllFilesAction = "lock"
+                        allFilesAccessLauncher.launch(
+                            appContainer.hiddenLockedFolderManager.buildAllFilesAccessIntent()
+                        )
+                    }
+                ) {
+                    Text("Grant access")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showAllFilesAccessLockDialog = false
+                        viewModel.lockCurrentAlbum(hideOnDisk = false, onLocked = onNavigateBack)
+                    }
+                ) {
+                    Text("In-app lock only")
+                }
+            }
+        )
     }
 
     if (showCollagePdfSheet) {

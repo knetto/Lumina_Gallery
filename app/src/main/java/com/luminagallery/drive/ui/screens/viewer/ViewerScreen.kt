@@ -1063,11 +1063,13 @@ fun ViewerScreen(
     }
 
     trashConfirmItem?.let { itemToTrash ->
+        val isHiddenLockedFile = com.luminagallery.drive.data.local.HiddenLockedFolderManager
+            .isHiddenFileUri(itemToTrash.localContentUri)
         HyperOsTrashConfirmSheet(
             items = listOf(itemToTrash),
-            mode = TrashConfirmMode.MOVE_TO_TRASH,
-            canSkipSystemPrompt = appContainer.localMediaRepository.canManageMediaDirectly(),
-            supportsSkipPromptSetting = appContainer.localMediaRepository.supportsManageMediaPermission(),
+            mode = if (isHiddenLockedFile) TrashConfirmMode.DELETE_PERMANENTLY else TrashConfirmMode.MOVE_TO_TRASH,
+            canSkipSystemPrompt = isHiddenLockedFile || appContainer.localMediaRepository.canManageMediaDirectly(),
+            supportsSkipPromptSetting = !isHiddenLockedFile && appContainer.localMediaRepository.supportsManageMediaPermission(),
             onOpenManageMediaSettings = {
                 appContainer.localMediaRepository.buildManageMediaSettingsIntent()?.let { intent ->
                     runCatching { context.startActivity(intent) }

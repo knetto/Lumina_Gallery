@@ -1,6 +1,8 @@
 package com.luminagallery.drive.data.repository
 
 import android.content.Context
+import android.media.MediaMetadataRetriever
+import android.media.ThumbnailUtils
 import android.net.Uri
 import android.os.Build
 import android.os.CancellationSignal
@@ -22,6 +24,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import okio.buffer
 import okio.source
+import java.io.File
 import kotlin.coroutines.coroutineContext
 
 /**
@@ -54,6 +57,65 @@ class LocalMediaThumbnailFetcher(
 
     override suspend fun fetch(): FetchResult? {
         val uri = Uri.parse(data.contentUri)
+
+        // Direct file:// thumbnails (used for hidden locked .folders bypassed by MediaStore)
+        if (uri.scheme == "file") {
+            val file = uri.path?.let { File(it) } ?: return null
+            if (!file.exists()) return null
+            val targetSize = resolveTargetSize(options)
+            val signal = CancellationSignal()
+            val completionHandle = coroutineContext[Job]?.invokeOnCompletion { cause ->
+                if (cause != null) signal.cancel()
+            }
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val bmp = runCatching {
+                        if (data.isVideo) {
+                            ThumbnailUtils.createVideoThumbnail(file, targetSize, signal)
+                        } else {
+                            ThumbnailUtils.createImageThumbnail(file, targetSize, signal)
+                        }
+                    }.getOrNull()
+                    if (bmp != null) {
+                        return ImageFetchResult(
+                            image = bmp.asImage(),
+                            isSampled = true,
+                            dataSource = DataSource.DISK
+                        )
+                    }
+                } else if (data.isVideo) {
+                    val bmp = runCatching {
+                        val retriever = MediaMetadataRetriever()
+                        try {
+                            retriever.setDataSource(file.absolutePath)
+                            retriever.frameAtTime
+                        } finally {
+                            runCatching { retriever.release() }
+                        }
+                    }.getOrNull()
+                    if (bmp != null) {
+                        return ImageFetchResult(
+                            image = bmp.asImage(),
+                            isSampled = true,
+                            dataSource = DataSource.DISK
+                        )
+                    }
+                }
+            } catch (canceled: OperationCanceledException) {
+                throw CancellationException("Thumbnail load canceled", canceled)
+            } finally {
+                completionHandle?.dispose()
+            }
+            val stream = runCatching { file.inputStream() }.getOrNull() ?: return null
+            return SourceFetchResult(
+                source = ImageSource(
+                    source = stream.source().buffer(),
+                    fileSystem = options.fileSystem
+                ),
+                mimeType = null,
+                dataSource = DataSource.DISK
+            )
+        }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val targetSize = resolveTargetSize(options)

@@ -21,7 +21,12 @@ data class HiddenAlbumEntity(
 data class LockedAlbumEntity(
     @PrimaryKey
     val albumId: String,
-    val lockedAtEpochMs: Long
+    val lockedAtEpochMs: Long,
+    val isHiddenOnDisk: Boolean = false,
+    val hiddenDirPath: String? = null,
+    val originalDirPath: String? = null,
+    val displayName: String? = null,
+    val originalRelativePath: String? = null
 )
 
 @Entity(tableName = "favorite_stories")

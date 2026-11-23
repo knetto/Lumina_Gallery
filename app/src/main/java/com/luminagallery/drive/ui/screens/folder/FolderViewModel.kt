@@ -597,21 +597,32 @@ class FolderViewModel(
         if (!uiState.value.isLocalAlbum) return
         val selected = uiState.value.mediaItems.filter { it.id in selectedIdsFlow.value }
         if (selected.isEmpty()) return
-        if (localMediaRepository.canManageMediaDirectly()) {
+        val allHiddenFiles = selected.all {
+            com.luminagallery.drive.data.local.HiddenLockedFolderManager.isHiddenFileUri(it.localContentUri)
+        }
+        if (allHiddenFiles || localMediaRepository.canManageMediaDirectly()) {
             viewModelScope.launch {
                 localMediaRepository.trashLocalItemsDirectly(selected, toTrash = true)
                     .onSuccess { count ->
                         selectedIdsFlow.value = emptySet()
                         forceSelectionFlow.value = false
                         localMediaRepository.notifyPermissionChanged()
-                        snackbarFlow.value = if (count == 1) "Moved to trash" else "Moved $count items to trash"
-                    }
-                    .onFailure {
-                        val sender = localMediaRepository.buildTrashIntentSender(selected)
-                        if (sender != null) {
-                            pendingTrashFlow.value = sender
+                        snackbarFlow.value = if (allHiddenFiles) {
+                            if (count == 1) "Deleted permanently" else "Deleted $count items permanently"
                         } else {
-                            snackbarFlow.value = "Trash requires Android 11 or newer"
+                            if (count == 1) "Moved to trash" else "Moved $count items to trash"
+                        }
+                    }
+                    .onFailure { err ->
+                        if (allHiddenFiles) {
+                            snackbarFlow.value = err.localizedMessage ?: "Could not delete selected files"
+                        } else {
+                            val sender = localMediaRepository.buildTrashIntentSender(selected)
+                            if (sender != null) {
+                                pendingTrashFlow.value = sender
+                            } else {
+                                snackbarFlow.value = "Trash requires Android 11 or newer"
+                            }
                         }
                     }
             }
@@ -773,12 +784,45 @@ class FolderViewModel(
         return entries
     }
 
-    fun setCurrentAlbumLocked(locked: Boolean) {
+    fun lockCurrentAlbum(hideOnDisk: Boolean, onLocked: () -> Unit = {}) {
+        val state = uiState.value
         val (folderId, folderName) = activeFolderFlow.value
         if (folderId.isBlank()) return
         viewModelScope.launch {
-            extrasRepository.setAlbumLocked(folderId, locked)
-            snackbarFlow.value = if (locked) "Locked $folderName" else "Unlocked $folderName"
+            extrasRepository.lockAlbum(
+                albumId = folderId,
+                albumName = folderName,
+                isLocal = state.isLocalAlbum,
+                items = state.mediaItems,
+                hideOnDisk = hideOnDisk
+            ).onSuccess { hiddenOnDisk ->
+                snackbarFlow.value = if (hiddenOnDisk) {
+                    "Locked \"$folderName\" & hidden from File Explorer"
+                } else {
+                    "Locked \"$folderName\""
+                }
+                onLocked()
+            }.onFailure { err ->
+                snackbarFlow.value = err.localizedMessage ?: "Unable to lock album"
+            }
+        }
+    }
+
+    fun unlockCurrentAlbum() {
+        val (folderId, folderName) = activeFolderFlow.value
+        if (folderId.isBlank()) return
+        viewModelScope.launch {
+            extrasRepository.unlockAlbum(folderId)
+                .onSuccess { restoredFromDisk ->
+                    snackbarFlow.value = if (restoredFromDisk) {
+                        "Unlocked \"$folderName\" & restored to File Explorer"
+                    } else {
+                        "Unlocked \"$folderName\""
+                    }
+                }
+                .onFailure { err ->
+                    snackbarFlow.value = err.localizedMessage ?: "Unable to unlock album"
+                }
         }
     }
 

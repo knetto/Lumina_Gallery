@@ -50,6 +50,10 @@ class MediaExportManager(
                     if (stripLocation && !item.isVideo && !item.isRaw) {
                         val cleanFile = createExifStrippedLocalCopy(item, parsed)
                         uris.add(FileProvider.getUriForFile(context, authority, cleanFile))
+                    } else if (parsed.scheme == "file") {
+                        // Never expose raw file:// URIs to external share targets (Android 7+ FileUriExposedException)
+                        val shareCopy = copyLocalFileForShare(item, parsed)
+                        uris.add(FileProvider.getUriForFile(context, authority, shareCopy))
                     } else {
                         uris.add(parsed)
                     }
@@ -87,6 +91,18 @@ class MediaExportManager(
             }
         } ?: throw IOException("Unable to read ${item.name} for privacy share")
         stripExifFromFile(targetFile, item.mimeType)
+        return targetFile
+    }
+
+    private fun copyLocalFileForShare(item: MediaItem, srcUri: Uri): File {
+        val ext = item.name.substringAfterLast('.', "bin").lowercase()
+        val safeName = sanitizeFilename("share_${item.id.take(12)}_${System.currentTimeMillis()}.$ext")
+        val targetFile = File(shareDir, safeName)
+        context.contentResolver.openInputStream(srcUri)?.use { input ->
+            FileOutputStream(targetFile).use { output ->
+                input.copyTo(output, BUFFER_SIZE)
+            }
+        } ?: throw IOException("Unable to read ${item.name} for sharing")
         return targetFile
     }
 

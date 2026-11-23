@@ -2,6 +2,7 @@ package com.luminagallery.drive
 
 import androidx.compose.ui.geometry.Rect
 import com.google.android.gms.common.api.CommonStatusCodes
+import com.luminagallery.drive.data.local.HiddenLockedFolderManager
 import com.luminagallery.drive.data.remote.DriveScopes
 import com.luminagallery.drive.data.remote.auth.GoogleAuthHelper
 import com.luminagallery.drive.data.repository.CloudAlbumCollection
@@ -420,5 +421,18 @@ class GalleryCoreLogicTest {
             rawMessage = "17: API unavailable"
         )
         assertTrue(apiErr17.contains("17"))
+    }
+
+    @Test
+    fun hiddenLockedFolderManager_protectsSystemRootsAndAllowsAlbumFolders() {
+        val root = "/storage/emulated/0"
+        assertFalse(HiddenLockedFolderManager.isSafeFolderPathToHide("/storage/emulated/0", root))
+        assertFalse(HiddenLockedFolderManager.isSafeFolderPathToHide("/storage/emulated/0/DCIM", root))
+        assertFalse(HiddenLockedFolderManager.isSafeFolderPathToHide("/storage/emulated/0/Pictures", root))
+        assertFalse(HiddenLockedFolderManager.isSafeFolderPathToHide("/storage/emulated/0/Android/media", root))
+        assertTrue(HiddenLockedFolderManager.isSafeFolderPathToHide("/storage/emulated/0/DCIM/Private", root))
+        assertTrue(HiddenLockedFolderManager.isSafeFolderPathToHide("/storage/emulated/0/Pictures/Secret", root))
+        assertTrue(HiddenLockedFolderManager.isHiddenFileUri("file:///storage/emulated/0/DCIM/.Private/IMG_1.jpg"))
+        assertFalse(HiddenLockedFolderManager.isHiddenFileUri("content://media/external/images/media/42"))
     }
 }
