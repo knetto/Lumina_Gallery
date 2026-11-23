@@ -9,6 +9,7 @@ import com.luminagallery.drive.data.local.entity.FavoriteItemEntity
 import com.luminagallery.drive.data.local.entity.FavoriteStoryEntity
 import com.luminagallery.drive.data.local.entity.HiddenAlbumEntity
 import com.luminagallery.drive.data.local.entity.IgnoredCleanOutEntity
+import com.luminagallery.drive.data.local.entity.LockedAlbumEntity
 import com.luminagallery.drive.data.local.entity.MediaAnnotationEntity
 import com.luminagallery.drive.data.local.entity.OfflinePinnedEntity
 import com.luminagallery.drive.data.local.entity.PhotoLocationEntity
@@ -53,6 +54,24 @@ interface GalleryExtrasDao {
 
     @Query("DELETE FROM hidden_albums")
     suspend fun clearAllHiddenAlbums()
+
+    @Query("SELECT albumId FROM locked_albums")
+    fun observeLockedAlbumIds(): Flow<List<String>>
+
+    @Query("SELECT albumId FROM locked_albums")
+    suspend fun getAllLockedAlbumIds(): List<String>
+
+    @Upsert
+    suspend fun upsertLockedAlbum(album: LockedAlbumEntity)
+
+    @Upsert
+    suspend fun upsertLockedAlbums(albums: List<LockedAlbumEntity>)
+
+    @Query("DELETE FROM locked_albums WHERE albumId = :albumId")
+    suspend fun removeLockedAlbum(albumId: String)
+
+    @Query("DELETE FROM locked_albums")
+    suspend fun clearAllLockedAlbums()
 
     @Query("SELECT storyId FROM favorite_stories")
     fun observeFavoriteStoryIds(): Flow<List<String>>

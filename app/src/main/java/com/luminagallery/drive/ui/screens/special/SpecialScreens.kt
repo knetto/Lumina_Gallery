@@ -141,26 +141,32 @@ fun SpecialCollectionScreen(
         when (filter) {
             SpecialGalleryFilter.VIDEOS -> combine(
                 container.localMediaRepository.observeAllLocalMedia(),
-                container.galleryRepository.searchMedia("", MediaType.VIDEO, null, null)
-            ) { local, drive ->
-                (local.filter { it.isVideo } + drive).sortedByDescending { it.createdTimeEpochMs }
+                container.galleryRepository.searchMedia("", MediaType.VIDEO, null, null),
+                container.galleryExtrasRepository.lockedAlbumIdsFlow
+            ) { local, drive, lockedIds ->
+                (local.filter { it.isVideo } + drive)
+                    .filterNot { it.parentId in lockedIds }
+                    .sortedByDescending { it.createdTimeEpochMs }
             }
 
             SpecialGalleryFilter.FAVORITES -> combine(
                 container.localMediaRepository.observeAllLocalMedia(),
                 container.galleryRepository.searchMedia("", null, null, null),
-                container.galleryExtrasRepository.favoriteItemIdsFlow
-            ) { local, drive, favIds ->
+                container.galleryExtrasRepository.favoriteItemIdsFlow,
+                container.galleryExtrasRepository.lockedAlbumIdsFlow
+            ) { local, drive, favIds, lockedIds ->
                 (local + drive)
-                    .filter { it.id in favIds }
+                    .filter { it.id in favIds && it.parentId !in lockedIds }
                     .sortedByDescending { it.createdTimeEpochMs }
             }
 
             SpecialGalleryFilter.RECENT -> combine(
                 container.localMediaRepository.observeAllLocalMedia(),
-                container.galleryRepository.searchMedia("", null, null, null)
-            ) { local, drive ->
+                container.galleryRepository.searchMedia("", null, null, null),
+                container.galleryExtrasRepository.lockedAlbumIdsFlow
+            ) { local, drive, lockedIds ->
                 (local + drive)
+                    .filterNot { it.parentId in lockedIds }
                     .sortedByDescending { it.createdTimeEpochMs }
                     .take(300)
             }
@@ -449,6 +455,28 @@ fun LocationsScreen(
 
     val scanProgress by container.galleryExtrasRepository.locationProgressFlow
         .collectAsStateWithLifecycle()
+    val lockedAlbumIds by container.galleryExtrasRepository.lockedAlbumIdsFlow
+        .collectAsStateWithLifecycle(initialValue = container.galleryExtrasRepository.latestLockedAlbumIds)
+
+    val visibleLocationGroups = remember(scanProgress.groups, lockedAlbumIds) {
+        if (lockedAlbumIds.isEmpty()) {
+            scanProgress.groups
+        } else {
+            scanProgress.groups.mapNotNull { group ->
+                val allowedItems = group.items.filterNot { it.parentId in lockedAlbumIds }
+                val allowedGeo = group.geoItems.filterNot { it.item.parentId in lockedAlbumIds }
+                if (allowedItems.isEmpty()) {
+                    null
+                } else {
+                    group.copy(
+                        coverItem = allowedItems.first(),
+                        items = allowedItems,
+                        geoItems = allowedGeo
+                    )
+                }
+            }
+        }
+    }
 
     LaunchedEffect(permRetryTick) {
         val local = container.localMediaRepository.observeAllLocalMedia().first()
@@ -458,23 +486,23 @@ fun LocationsScreen(
     var selectedLocationKey by remember { mutableStateOf<String?>(null) }
     var mapSubViewGridOnly by remember { mutableStateOf(false) }
 
-    val selectedLocation = remember(scanProgress.groups, selectedLocationKey) {
-        selectedLocationKey?.let { key -> scanProgress.groups.firstOrNull { it.locationKey == key } }
+    val selectedLocation = remember(visibleLocationGroups, selectedLocationKey) {
+        selectedLocationKey?.let { key -> visibleLocationGroups.firstOrNull { it.locationKey == key } }
     }
 
     val isInCityDetail = selectedLocation != null
 
     // Group cities by Country (sorted by total photo count descending, like Samsung's "Netherlands")
-    val countrySections = remember(scanProgress.groups) {
-        scanProgress.groups
+    val countrySections = remember(visibleLocationGroups) {
+        visibleLocationGroups
             .groupBy { it.country.ifBlank { "Other" } }
             .entries
             .map { (country, cities) -> country to cities.sortedByDescending { it.items.size } }
             .sortedByDescending { (_, cities) -> cities.sumOf { it.items.size } }
     }
 
-    val allGeoItems = remember(scanProgress.groups) {
-        scanProgress.groups.flatMap { it.geoItems }
+    val allGeoItems = remember(visibleLocationGroups) {
+        visibleLocationGroups.flatMap { it.geoItems }
     }
     // Country with the most photo locations (e.g. Netherlands!) -> nicely centered on the top hero map!
     val topCountryGeoItems = remember(countrySections) {

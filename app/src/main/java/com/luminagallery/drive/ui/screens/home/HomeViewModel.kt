@@ -165,9 +165,11 @@ class HomeViewModel(
         combine(
             localMediaRepository.observeAllLocalMedia(),
             dayLocationsFlow,
-            preferencesManager.preferencesFlow
-        ) { pics, dayLocs, prefs ->
-            Triple(pics, dayLocs, prefs.showDayLocationHeaders)
+            preferencesManager.preferencesFlow,
+            extrasRepository.lockedAlbumIdsFlow
+        ) { pics, dayLocs, prefs, lockedIds ->
+            val visiblePics = if (lockedIds.isEmpty()) pics else pics.filterNot { it.parentId in lockedIds }
+            Triple(visiblePics, dayLocs, prefs.showDayLocationHeaders)
         },
         localMediaRepository.observeLocalAlbums(),
         organizationRepository.observeGridItems(parentCollectionId = null),
@@ -194,10 +196,16 @@ class HomeViewModel(
                 localMediaRepository.observeAllLocalMedia(),
                 repository.searchMedia("", null, null, null),
                 locationsFlow,
-                extrasRepository.favoriteStoryIdsFlow
-            ) { localPics, drivePics, locations, favStoryIds ->
+                extrasRepository.favoriteStoryIdsFlow,
+                extrasRepository.lockedAlbumIdsFlow
+            ) { localPics, drivePics, locations, favStoryIds, lockedIds ->
+                val allVisible = if (lockedIds.isEmpty()) {
+                    localPics + drivePics
+                } else {
+                    (localPics + drivePics).filterNot { it.parentId in lockedIds }
+                }
                 extrasRepository.generateStories(
-                    allMedia = (localPics + drivePics).sortedByDescending { it.createdTimeEpochMs },
+                    allMedia = allVisible.sortedByDescending { it.createdTimeEpochMs },
                     locations = locations,
                     favoriteStoryIds = favStoryIds
                 )

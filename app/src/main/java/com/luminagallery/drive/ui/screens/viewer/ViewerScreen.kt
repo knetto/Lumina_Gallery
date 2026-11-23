@@ -175,6 +175,7 @@ import com.luminagallery.drive.ui.components.LocalAlbumTransitionOrigin
 import com.luminagallery.drive.ui.components.LuminaSnackbarHost
 import com.luminagallery.drive.ui.components.MoveCopyToAlbumSheet
 import com.luminagallery.drive.ui.components.OneUiMotion
+import com.luminagallery.drive.ui.components.SecureWindowEffect
 import com.luminagallery.drive.ui.components.TrashConfirmMode
 import com.luminagallery.drive.ui.components.oneUiClickable
 import com.luminagallery.drive.ui.components.topViewerScrim
@@ -208,6 +209,12 @@ fun ViewerScreen(
 
     val offlineIds by appContainer.offlineMediaManager.offlineItemIdsFlow
         .collectAsStateWithLifecycle(initialValue = emptySet())
+    val lockedAlbumIds by appContainer.galleryExtrasRepository.lockedAlbumIdsFlow
+        .collectAsStateWithLifecycle(initialValue = appContainer.galleryExtrasRepository.latestLockedAlbumIds)
+    val isViewingLockedMedia = remember(uiState.items, lockedAlbumIds) {
+        lockedAlbumIds.isNotEmpty() && uiState.items.any { it.parentId in lockedAlbumIds }
+    }
+    SecureWindowEffect(enabled = isViewingLockedMedia)
 
     var chromeVisible by remember { mutableStateOf(true) }
     var isCurrentPageZoomed by remember { mutableStateOf(false) }

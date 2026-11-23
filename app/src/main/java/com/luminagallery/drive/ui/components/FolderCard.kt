@@ -27,6 +27,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.FolderOpen
+import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -109,6 +110,7 @@ fun FolderCard(
 
     val singleCoverMorphInfo = remember(
         folder.isLocal,
+        folder.isLocked,
         folder.subfolderCount,
         folder.previewCovers.size,
         folder.coverItemId,
@@ -119,7 +121,7 @@ fun FolderCard(
     ) {
         val isCollage = !folder.isLocal && folder.subfolderCount > 0 && folder.previewCovers.size >= 2
         val coverId = folder.coverItemId
-        if (isCollage || coverId.isNullOrBlank()) {
+        if (folder.isLocked || isCollage || coverId.isNullOrBlank()) {
             null
         } else {
             AlbumCoverMorphInfo(
@@ -234,6 +236,62 @@ fun FolderCoverArtwork(
     isSelectionMode: Boolean = false,
     isSelected: Boolean = false
 ) {
+    // Locked albums hide their photo cover behind a sleek private frosted lock card
+    if (folder.isLocked) {
+        Box(
+            modifier = modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+                .clip(FolderCoverShape)
+                .background(
+                    Brush.linearGradient(
+                        colors = listOf(
+                            MaterialTheme.colorScheme.surfaceContainerHigh,
+                            MaterialTheme.colorScheme.surfaceContainer
+                        )
+                    )
+                )
+                .border(
+                    width = 0.8.dp,
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f),
+                    shape = FolderCoverShape
+                )
+        ) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Lock,
+                    contentDescription = "Locked album",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+            if (showDriveBadge && !folder.isLocal) {
+                GoogleDriveBadge(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(6.dp),
+                    badgeSize = 24.dp
+                )
+            }
+            if (isSelectionMode) {
+                SamsungSelectionCheckbox(
+                    isSelected = isSelected,
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(7.dp)
+                )
+            }
+        }
+        return
+    }
+
     // Google Drive folders containing subfolders get Samsung's exact split-collage album group cover!
     if (!folder.isLocal && folder.subfolderCount > 0 && folder.previewCovers.size >= 2) {
         CollectionCoverArtwork(

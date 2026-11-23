@@ -1,5 +1,6 @@
 package com.luminagallery.drive.ui.navigation
 
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
@@ -42,6 +43,7 @@ import com.luminagallery.drive.data.local.LocalMediaRepository
 import com.luminagallery.drive.domain.model.MediaType
 import com.luminagallery.drive.domain.model.SpecialGalleryFilter
 import com.luminagallery.drive.ui.components.AlbumTransitionOriginTracker
+import com.luminagallery.drive.ui.components.BiometricLockHelper
 import com.luminagallery.drive.ui.components.HyperOsRectMorphFrame
 import com.luminagallery.drive.ui.components.HyperOsTransitionFrame
 import com.luminagallery.drive.ui.components.LocalAlbumTransitionOrigin
@@ -169,7 +171,10 @@ fun LuminaNavGraph(
     val navController = rememberNavController()
     val container = LocalAppContainer.current
     val imageLoader = LocalGalleryImageLoader.current
-    val appContext = LocalContext.current.applicationContext
+    val activityContext = LocalContext.current
+    val appContext = activityContext.applicationContext
+    val lockedAlbumIds by container.galleryExtrasRepository.lockedAlbumIdsFlow
+        .collectAsStateWithLifecycle(initialValue = container.galleryExtrasRepository.latestLockedAlbumIds)
     val originTracker = remember { AlbumTransitionOriginTracker() }
     var activeViewerItemId by remember { mutableStateOf<String?>(null) }
 
@@ -207,23 +212,41 @@ fun LuminaNavGraph(
     }
 
     fun prewarmFolderAndNavigate(folderId: String, folderName: String) {
-        pendingBackPops = 0
-        val prefs = container.preferencesManager.latestPreferences
-        val highRes = container.networkMonitor.networkState.value.isUnmeteredWifi || !prefs.wifiOnlyHighRes
-        val cachedItems = if (LocalMediaRepository.isLocalFolderId(folderId)) {
-            container.localMediaRepository.getCachedAlbumMedia(folderId)
-        } else {
-            container.galleryRepository.getCachedFolderMedia(folderId).orEmpty()
+        val navigateNow: () -> Unit = {
+            pendingBackPops = 0
+            val prefs = container.preferencesManager.latestPreferences
+            val highRes = container.networkMonitor.networkState.value.isUnmeteredWifi || !prefs.wifiOnlyHighRes
+            val cachedItems = if (LocalMediaRepository.isLocalFolderId(folderId)) {
+                container.localMediaRepository.getCachedAlbumMedia(folderId)
+            } else {
+                container.galleryRepository.getCachedFolderMedia(folderId).orEmpty()
+            }
+            if (cachedItems.isNotEmpty()) {
+                prefetchAlbumThumbnails(
+                    context = appContext,
+                    imageLoader = imageLoader,
+                    items = cachedItems,
+                    isUnmeteredWifi = highRes
+                )
+            }
+            navController.navigate(FolderRoute(folderId, folderName))
         }
-        if (cachedItems.isNotEmpty()) {
-            prefetchAlbumThumbnails(
-                context = appContext,
-                imageLoader = imageLoader,
-                items = cachedItems,
-                isUnmeteredWifi = highRes
+
+        val isLocked = folderId in lockedAlbumIds ||
+            folderId in container.galleryExtrasRepository.latestLockedAlbumIds
+        if (isLocked) {
+            BiometricLockHelper.authenticate(
+                context = activityContext,
+                title = "Unlock \"$folderName\"",
+                subtitle = "Verify your identity to open locked album",
+                onSuccess = navigateNow,
+                onFailure = { msg ->
+                    Toast.makeText(activityContext, msg, Toast.LENGTH_SHORT).show()
+                }
             )
+        } else {
+            navigateNow()
         }
-        navController.navigate(FolderRoute(folderId, folderName))
     }
 
     CompositionLocalProvider(LocalAlbumTransitionOrigin provides originTracker) {

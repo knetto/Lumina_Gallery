@@ -20,6 +20,7 @@ import com.luminagallery.drive.data.local.entity.FavoriteItemEntity
 import com.luminagallery.drive.data.local.entity.FavoriteStoryEntity
 import com.luminagallery.drive.data.local.entity.HiddenAlbumEntity
 import com.luminagallery.drive.data.local.entity.IgnoredCleanOutEntity
+import com.luminagallery.drive.data.local.entity.LockedAlbumEntity
 import com.luminagallery.drive.data.local.entity.MediaAnnotationEntity
 import com.luminagallery.drive.data.local.entity.OfflinePinnedEntity
 import com.luminagallery.drive.data.local.entity.PhotoLocationEntity
@@ -43,9 +44,10 @@ import com.luminagallery.drive.data.local.entity.SyncStateEntity
         MediaAnnotationEntity::class,
         OfflinePinnedEntity::class,
         PhotoOcrEntity::class,
-        AlbumViewPrefEntity::class
+        AlbumViewPrefEntity::class,
+        LockedAlbumEntity::class
     ],
-    version = 8,
+    version = 9,
     exportSchema = true
 )
 abstract class GalleryDatabase : RoomDatabase() {
@@ -236,6 +238,20 @@ abstract class GalleryDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `locked_albums` (
+                        `albumId` TEXT NOT NULL,
+                        `lockedAtEpochMs` INTEGER NOT NULL,
+                        PRIMARY KEY(`albumId`)
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
         fun build(context: Context): GalleryDatabase =
             Room.databaseBuilder(
                 context.applicationContext,
@@ -249,7 +265,8 @@ abstract class GalleryDatabase : RoomDatabase() {
                     MIGRATION_4_5,
                     MIGRATION_5_6,
                     MIGRATION_6_7,
-                    MIGRATION_7_8
+                    MIGRATION_7_8,
+                    MIGRATION_8_9
                 )
                 .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
                 .fallbackToDestructiveMigration(dropAllTables = true)

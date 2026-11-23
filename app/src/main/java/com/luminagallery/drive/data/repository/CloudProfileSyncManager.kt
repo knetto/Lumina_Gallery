@@ -14,6 +14,7 @@ import com.luminagallery.drive.data.local.entity.CustomAlbumCoverEntity
 import com.luminagallery.drive.data.local.entity.FavoriteItemEntity
 import com.luminagallery.drive.data.local.entity.FavoriteStoryEntity
 import com.luminagallery.drive.data.local.entity.HiddenAlbumEntity
+import com.luminagallery.drive.data.local.entity.LockedAlbumEntity
 import com.luminagallery.drive.data.local.entity.MediaAnnotationEntity
 import com.luminagallery.drive.data.local.entity.PinnedRootEntity
 import com.luminagallery.drive.data.remote.DriveConstants
@@ -70,6 +71,7 @@ data class CloudProfileSnapshot(
     val collections: List<CloudAlbumCollection> = emptyList(),
     val layouts: List<CloudAlbumLayout> = emptyList(),
     val hiddenAlbums: List<CloudHiddenAlbum> = emptyList(),
+    val lockedAlbums: List<CloudHiddenAlbum> = emptyList(),
     val driveFavoriteItemIds: List<String> = emptyList(),
     val favoriteStoryIds: List<String> = emptyList(),
     val customAlbumCovers: List<CloudCustomAlbumCover> = emptyList(),
@@ -92,6 +94,7 @@ data class CloudProfileSnapshot(
                 .sortedBy { it.id },
             layouts = layouts.sortedBy { it.itemId },
             hiddenAlbums = hiddenAlbums.sortedBy { it.albumId },
+            lockedAlbums = lockedAlbums.sortedBy { it.albumId },
             driveFavoriteItemIds = driveFavoriteItemIds.distinct().sorted(),
             favoriteStoryIds = favoriteStoryIds.distinct().sorted(),
             customAlbumCovers = customAlbumCovers.sortedBy { it.albumId },
@@ -208,6 +211,7 @@ data class CloudAlbumViewPref(
 data class PendingLocalCloudRules(
     val layouts: List<CloudAlbumLayout> = emptyList(),
     val hiddenAlbums: List<CloudHiddenAlbum> = emptyList(),
+    val lockedAlbums: List<CloudHiddenAlbum> = emptyList(),
     val customAlbumCovers: List<CloudCustomAlbumCover> = emptyList(),
     val mediaAnnotations: List<CloudMediaAnnotation> = emptyList(),
     val albumViewPrefs: List<CloudAlbumViewPref> = emptyList()
@@ -649,8 +653,9 @@ class CloudProfileSyncManager(
                     extrasDao.observeCustomAlbumCovers(),
                     combine(
                         extrasDao.observeAllAnnotations(),
-                        extrasDao.observeAllAlbumViewPrefs()
-                    ) { anns, viewPrefs -> anns to viewPrefs }
+                        extrasDao.observeAllAlbumViewPrefs(),
+                        extrasDao.observeLockedAlbumIds()
+                    ) { anns, viewPrefs, locked -> Triple(anns, viewPrefs, locked) }
                 ) { _, _, _, _, _ -> Unit }
             ) { _, _, _, _, _ -> Unit }
 
@@ -764,6 +769,7 @@ class CloudProfileSyncManager(
                     }.getOrNull() ?: return@collect
                     if (pending.layouts.isEmpty() &&
                         pending.hiddenAlbums.isEmpty() &&
+                        pending.lockedAlbums.isEmpty() &&
                         pending.customAlbumCovers.isEmpty() &&
                         pending.mediaAnnotations.isEmpty() &&
                         pending.albumViewPrefs.isEmpty()
@@ -781,6 +787,7 @@ class CloudProfileSyncManager(
         val existingCollectionIds = collectionDao.getAllCollections().mapTo(HashSet()) { it.id }
         val existingLayoutIds = collectionDao.getAllLayouts().mapTo(HashSet()) { it.itemId }
         val existingHiddenIds = extrasDao.getAllHiddenAlbumIds().toHashSet()
+        val existingLockedIds = extrasDao.getAllLockedAlbumIds().toHashSet()
         val existingCoverAlbumIds = extrasDao.getAllCustomAlbumCovers().mapTo(HashSet()) { it.albumId }
         val existingAnnotationIds = extrasDao.getAllAnnotations().mapTo(HashSet()) { it.itemId }
         val existingViewPrefIds = extrasDao.getAllAlbumViewPrefs().mapTo(HashSet()) { it.albumId }
@@ -821,6 +828,20 @@ class CloudProfileSyncManager(
             if (matchedBucketId !in existingHiddenIds) {
                 hiddenToInsert.add(HiddenAlbumEntity(albumId = matchedBucketId, hiddenAtEpochMs = now))
                 existingHiddenIds.add(matchedBucketId)
+            }
+        }
+
+        val lockedToInsert = mutableListOf<LockedAlbumEntity>()
+        for (rule in pending.lockedAlbums) {
+            val matchedBucketId = LocalAlbumCloudMatcher.resolveTargetBucketId(
+                savedBucketId = rule.albumId,
+                savedRelativePath = rule.localRelativePath,
+                savedFolderName = rule.localFolderName,
+                localAlbums = localAlbums
+            ) ?: continue
+            if (matchedBucketId !in existingLockedIds) {
+                lockedToInsert.add(LockedAlbumEntity(albumId = matchedBucketId, lockedAtEpochMs = now))
+                existingLockedIds.add(matchedBucketId)
             }
         }
 
@@ -918,6 +939,7 @@ class CloudProfileSyncManager(
 
         if (layoutsToInsert.isNotEmpty() ||
             hiddenToInsert.isNotEmpty() ||
+            lockedToInsert.isNotEmpty() ||
             coversToInsert.isNotEmpty() ||
             annotationsToInsert.isNotEmpty() ||
             viewPrefsToInsert.isNotEmpty()
@@ -926,6 +948,7 @@ class CloudProfileSyncManager(
             database.withTransaction {
                 if (layoutsToInsert.isNotEmpty()) collectionDao.upsertLayouts(layoutsToInsert)
                 if (hiddenToInsert.isNotEmpty()) extrasDao.upsertHiddenAlbums(hiddenToInsert)
+                if (lockedToInsert.isNotEmpty()) extrasDao.upsertLockedAlbums(lockedToInsert)
                 if (coversToInsert.isNotEmpty()) extrasDao.upsertCustomAlbumCovers(coversToInsert)
                 if (annotationsToInsert.isNotEmpty()) extrasDao.upsertAnnotations(annotationsToInsert)
                 if (viewPrefsToInsert.isNotEmpty()) extrasDao.upsertAlbumViewPrefs(viewPrefsToInsert)
@@ -954,6 +977,7 @@ class CloudProfileSyncManager(
         val collections = collectionDao.getAllCollections()
         val layouts = collectionDao.getAllLayouts()
         val hiddenIds = extrasDao.getAllHiddenAlbumIds()
+        val lockedIds = extrasDao.getAllLockedAlbumIds()
         val favIds = extrasDao.getAllFavoriteItemIds()
         val localAlbums = getCurrentLocalAlbums()
         val localById = localAlbums.associateBy { it.id }
@@ -967,6 +991,7 @@ class CloudProfileSyncManager(
         }
         val prevLayoutMetaById = previousPending.layouts.associateBy { it.itemId }
         val prevHiddenMetaById = previousPending.hiddenAlbums.associateBy { it.albumId }
+        val prevLockedMetaById = previousPending.lockedAlbums.associateBy { it.albumId }
 
         val validCollectionIds = collections.mapTo(HashSet()) { it.id }
 
@@ -1048,6 +1073,40 @@ class CloudProfileSyncManager(
             cloudHidden.add(oldHidden)
         }
 
+        val cloudLocked = mutableListOf<CloudHiddenAlbum>()
+        val coveredLockedIds = HashSet<String>()
+        val coveredLockedPaths = HashSet<String>()
+        for (id in lockedIds) {
+            val isLocal = LocalMediaRepository.isLocalFolderId(id)
+            val localAlbum = if (isLocal) localById[id] else null
+            val fallbackMeta = if (isLocal) prevLockedMetaById[id] else null
+            val relPath = localAlbum?.relativePath ?: fallbackMeta?.localRelativePath
+            val folderName = localAlbum?.name ?: fallbackMeta?.localFolderName
+            cloudLocked.add(
+                CloudHiddenAlbum(
+                    albumId = id,
+                    isLocal = isLocal,
+                    localRelativePath = relPath,
+                    localFolderName = folderName
+                )
+            )
+            coveredLockedIds.add(id)
+            LocalAlbumCloudMatcher.normalizeRelativePath(relPath)?.let { coveredLockedPaths.add(it) }
+        }
+        for (oldLocked in previousPending.lockedAlbums) {
+            if (oldLocked.albumId in coveredLockedIds) continue
+            val normPath = LocalAlbumCloudMatcher.normalizeRelativePath(oldLocked.localRelativePath)
+            if (normPath != null && normPath in coveredLockedPaths) continue
+            val matchedHere = LocalAlbumCloudMatcher.resolveTargetBucketId(
+                savedBucketId = oldLocked.albumId,
+                savedRelativePath = oldLocked.localRelativePath,
+                savedFolderName = oldLocked.localFolderName,
+                localAlbums = localAlbums
+            )
+            if (matchedHere != null) continue
+            cloudLocked.add(oldLocked)
+        }
+
         val driveFavs = favIds.filterNot { it.startsWith(LocalMediaRepository.LOCAL_ITEM_PREFIX) }
         val favStories = extrasDao.getAllFavoriteStoryIds()
         val localMediaById = localMediaRepository.getCachedAllMedia().associateBy { it.id }
@@ -1120,6 +1179,7 @@ class CloudProfileSyncManager(
             },
             layouts = cloudLayouts,
             hiddenAlbums = cloudHidden,
+            lockedAlbums = cloudLocked,
             driveFavoriteItemIds = driveFavs,
             favoriteStoryIds = favStories,
             customAlbumCovers = cloudCovers,
@@ -1143,6 +1203,7 @@ class CloudProfileSyncManager(
 
         val localLayoutRules = mutableListOf<CloudAlbumLayout>()
         val localHiddenRules = mutableListOf<CloudHiddenAlbum>()
+        val localLockedRules = mutableListOf<CloudHiddenAlbum>()
         val localCoverRules = mutableListOf<CloudCustomAlbumCover>()
         val localAnnotationRules = mutableListOf<CloudMediaAnnotation>()
         val localViewPrefRules = mutableListOf<CloudAlbumViewPref>()
@@ -1235,6 +1296,29 @@ class CloudProfileSyncManager(
             }
             if (hiddenToUpsert.isNotEmpty()) {
                 extrasDao.upsertHiddenAlbums(hiddenToUpsert)
+            }
+
+            // 4B. Authoritatively sync locked albums (Drive directly + local matched by path/name)
+            extrasDao.clearAllLockedAlbums()
+            val lockedToUpsert = mutableListOf<LockedAlbumEntity>()
+            for (locked in snapshot.lockedAlbums) {
+                if (locked.isLocal || LocalMediaRepository.isLocalFolderId(locked.albumId)) {
+                    localLockedRules.add(locked)
+                    val matched = LocalAlbumCloudMatcher.resolveTargetBucketId(
+                        savedBucketId = locked.albumId,
+                        savedRelativePath = locked.localRelativePath,
+                        savedFolderName = locked.localFolderName,
+                        localAlbums = localAlbums
+                    )
+                    if (matched != null) {
+                        lockedToUpsert.add(LockedAlbumEntity(albumId = matched, lockedAtEpochMs = now))
+                    }
+                } else {
+                    lockedToUpsert.add(LockedAlbumEntity(albumId = locked.albumId, lockedAtEpochMs = now))
+                }
+            }
+            if (lockedToUpsert.isNotEmpty()) {
+                extrasDao.upsertLockedAlbums(lockedToUpsert)
             }
 
             // 5. Authoritatively sync Google Drive favorites (preserving local on-device favorites)
@@ -1385,6 +1469,7 @@ class CloudProfileSyncManager(
         val pendingRules = PendingLocalCloudRules(
             layouts = localLayoutRules,
             hiddenAlbums = localHiddenRules,
+            lockedAlbums = localLockedRules,
             customAlbumCovers = localCoverRules,
             mediaAnnotations = localAnnotationRules,
             albumViewPrefs = localViewPrefRules
@@ -1423,6 +1508,9 @@ class CloudProfileSyncManager(
                 it.itemKind == AlbumGridItem.KIND_LOCAL || LocalMediaRepository.isLocalFolderId(it.itemId)
             },
             hiddenAlbums = snapshot.hiddenAlbums.filter {
+                it.isLocal || LocalMediaRepository.isLocalFolderId(it.albumId)
+            },
+            lockedAlbums = snapshot.lockedAlbums.filter {
                 it.isLocal || LocalMediaRepository.isLocalFolderId(it.albumId)
             },
             customAlbumCovers = snapshot.customAlbumCovers.filter { it.isAlbumLocal || it.coverIsLocal },

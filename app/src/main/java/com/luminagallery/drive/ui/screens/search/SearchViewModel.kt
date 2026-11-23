@@ -123,9 +123,15 @@ class SearchViewModel(
     // Combined offline index across phone media, cached Drive media, GPS cities, custom tags/notes, and ML Kit OCR text
     private val allSearchableMediaFlow = combine(
         localMediaRepository.observeAllLocalMedia(),
-        repository.searchMedia("", null, null, null)
-    ) { local, drive ->
-        (local + drive).sortedByDescending { it.createdTimeEpochMs }
+        repository.searchMedia("", null, null, null),
+        extrasRepository.lockedAlbumIdsFlow
+    ) { local, drive, lockedIds ->
+        val visible = if (lockedIds.isEmpty()) {
+            local + drive
+        } else {
+            (local + drive).filterNot { it.parentId in lockedIds }
+        }
+        visible.sortedByDescending { it.createdTimeEpochMs }
     }.flowOn(Dispatchers.Default)
 
     private val enrichmentFlow = combine(

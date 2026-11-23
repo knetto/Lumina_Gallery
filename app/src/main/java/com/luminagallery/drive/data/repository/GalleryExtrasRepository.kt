@@ -9,6 +9,7 @@ import com.luminagallery.drive.data.local.entity.FavoriteItemEntity
 import com.luminagallery.drive.data.local.entity.FavoriteStoryEntity
 import com.luminagallery.drive.data.local.entity.HiddenAlbumEntity
 import com.luminagallery.drive.data.local.entity.IgnoredCleanOutEntity
+import com.luminagallery.drive.data.local.entity.LockedAlbumEntity
 import com.luminagallery.drive.data.local.entity.MediaAnnotationEntity
 import com.luminagallery.drive.data.local.entity.PhotoLocationEntity
 import com.luminagallery.drive.data.local.entity.PhotoOcrEntity
@@ -72,8 +73,15 @@ class GalleryExtrasRepository(
         (dbFavs + sysFavs).toSet().also { latestFavoriteItemIds = it }
     }.flowOn(Dispatchers.Default)
 
+    @Volatile
+    var latestLockedAlbumIds: Set<String> = emptySet()
+        private set
+
     val hiddenAlbumIdsFlow: Flow<Set<String>> = extrasDao.observeHiddenAlbumIds()
         .map { it.toSet() }
+
+    val lockedAlbumIdsFlow: Flow<Set<String>> = extrasDao.observeLockedAlbumIds()
+        .map { list -> list.toSet().also { latestLockedAlbumIds = it } }
 
     val favoriteStoryIdsFlow: Flow<Set<String>> = extrasDao.observeFavoriteStoryIds()
         .map { it.toSet() }
@@ -327,6 +335,17 @@ class GalleryExtrasRepository(
                 extrasDao.removeHiddenAlbum(albumId)
             } else {
                 extrasDao.upsertHiddenAlbum(HiddenAlbumEntity(albumId, System.currentTimeMillis()))
+            }
+        }
+
+    suspend fun setAlbumLocked(albumId: String, locked: Boolean) =
+        withContext(Dispatchers.IO) {
+            if (locked) {
+                extrasDao.upsertLockedAlbum(LockedAlbumEntity(albumId, System.currentTimeMillis()))
+                latestLockedAlbumIds = latestLockedAlbumIds + albumId
+            } else {
+                extrasDao.removeLockedAlbum(albumId)
+                latestLockedAlbumIds = latestLockedAlbumIds - albumId
             }
         }
 

@@ -95,6 +95,8 @@ data class FolderUiState(
     val hasCompletedInitialLoad: Boolean = false,
     val isOnline: Boolean = true,
     val isUnmeteredWifi: Boolean = true,
+    val isLockedAlbum: Boolean = false,
+    val lockedAlbumIds: Set<String> = emptySet(),
     val isProtectedPrivateAlbum: Boolean = false,
     val favoriteItemIds: Set<String> = emptySet(),
     val selectedIds: Set<String> = emptySet(),
@@ -150,9 +152,12 @@ class FolderViewModel(
         mediaGroupByFlow,
         mediaSortFlow,
         showSidebarFlow,
-        extrasRepository.favoriteItemIdsFlow
-    ) { filter, groupBy, sort, sidebar, favIds ->
-        DisplayOptions(filter, groupBy, sort, sidebar, favIds)
+        combine(
+            extrasRepository.favoriteItemIdsFlow,
+            extrasRepository.lockedAlbumIdsFlow
+        ) { favIds, lockedIds -> favIds to lockedIds }
+    ) { filter, groupBy, sort, sidebar, (favIds, lockedIds) ->
+        DisplayOptions(filter, groupBy, sort, sidebar, favIds, lockedIds)
     }
 
     private val rawContentFlow = activeFolderFlow.flatMapLatest { (activeId, activeName) ->
@@ -195,10 +200,15 @@ class FolderViewModel(
                         repository.observeMediaInFolder(activeId),
                         displayOptionsFlow
                     ) { subfolders, directMedia, opts ->
+                        val markedSubfolders = if (opts.lockedIds.isEmpty()) {
+                            subfolders
+                        } else {
+                            subfolders.map { if (it.id in opts.lockedIds) it.copy(isLocked = true) else it }
+                        }
                         val processed = applyFilterAndSort(directMedia, opts.filter, opts.sort, opts.favoriteIds)
                         val entries = buildGroupedEntries(
                             mode = FolderViewMode.HIERARCHY,
-                            subfolders = subfolders,
+                            subfolders = markedSubfolders,
                             mediaItems = processed,
                             groupBy = opts.groupBy,
                             sort = opts.sort
@@ -208,7 +218,7 @@ class FolderViewModel(
                             folderName = activeName,
                             isLocal = false,
                             mode = FolderViewMode.HIERARCHY,
-                            subfolders = subfolders,
+                            subfolders = markedSubfolders,
                             mediaItems = processed,
                             unfilteredCount = directMedia.size,
                             gridEntries = entries,
@@ -258,8 +268,12 @@ class FolderViewModel(
         preferencesManager.preferencesFlow,
         isRefreshingFlow,
         hasLoadedOnceFlow,
-        combine(networkMonitor.networkState, extrasRepository.hiddenAlbumIdsFlow) { net, hidden -> net to hidden }
-    ) { crumbs, prefs, refreshing, loaded, (net, hiddenIds) ->
+        combine(
+            networkMonitor.networkState,
+            extrasRepository.hiddenAlbumIdsFlow,
+            extrasRepository.lockedAlbumIdsFlow
+        ) { net, hidden, locked -> Triple(net, hidden, locked) }
+    ) { crumbs, prefs, refreshing, loaded, (net, hiddenIds, lockedIds) ->
         FolderMeta(
             breadcrumbs = crumbs,
             gridColumns = prefs.gridColumns,
@@ -269,7 +283,8 @@ class FolderViewModel(
             isOnline = net.isOnline,
             isUnmeteredWifi = net.isUnmeteredWifi || !prefs.wifiOnlyHighRes,
             lockHiddenAlbums = prefs.lockHiddenAlbums,
-            hiddenAlbumIds = hiddenIds
+            hiddenAlbumIds = hiddenIds,
+            lockedAlbumIds = lockedIds
         )
     }
 
@@ -321,7 +336,10 @@ class FolderViewModel(
                 content.unfilteredCount > 0,
             isOnline = meta.isOnline,
             isUnmeteredWifi = meta.isUnmeteredWifi,
-            isProtectedPrivateAlbum = meta.lockHiddenAlbums && content.folderId in meta.hiddenAlbumIds,
+            isLockedAlbum = content.folderId in meta.lockedAlbumIds,
+            lockedAlbumIds = meta.lockedAlbumIds,
+            isProtectedPrivateAlbum = (content.folderId in meta.lockedAlbumIds) ||
+                (meta.lockHiddenAlbums && content.folderId in meta.hiddenAlbumIds),
             favoriteItemIds = content.favoriteIds,
             selectedIds = interaction.selectedIds,
             forceSelectionMode = interaction.forceSelectionMode,
@@ -755,12 +773,22 @@ class FolderViewModel(
         return entries
     }
 
+    fun setCurrentAlbumLocked(locked: Boolean) {
+        val (folderId, folderName) = activeFolderFlow.value
+        if (folderId.isBlank()) return
+        viewModelScope.launch {
+            extrasRepository.setAlbumLocked(folderId, locked)
+            snackbarFlow.value = if (locked) "Locked $folderName" else "Unlocked $folderName"
+        }
+    }
+
     private data class DisplayOptions(
         val filter: AlbumMediaFilter,
         val groupBy: AlbumMediaGroupBy,
         val sort: AlbumMediaSort,
         val showSidebar: Boolean,
-        val favoriteIds: Set<String>
+        val favoriteIds: Set<String>,
+        val lockedIds: Set<String> = emptySet()
     )
 
     private data class FolderContent(
@@ -788,7 +816,8 @@ class FolderViewModel(
         val isOnline: Boolean,
         val isUnmeteredWifi: Boolean,
         val lockHiddenAlbums: Boolean = false,
-        val hiddenAlbumIds: Set<String> = emptySet()
+        val hiddenAlbumIds: Set<String> = emptySet(),
+        val lockedAlbumIds: Set<String> = emptySet()
     )
 
     private data class FolderInteraction(

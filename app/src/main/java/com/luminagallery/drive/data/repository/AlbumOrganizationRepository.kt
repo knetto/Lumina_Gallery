@@ -90,19 +90,28 @@ class AlbumOrganizationRepository(
         collectionDao.observeAllLayouts(),
         combine(
             extrasRepository.hiddenAlbumIdsFlow,
+            extrasRepository.lockedAlbumIdsFlow,
             preferencesManager.preferencesFlow,
             extrasRepository.customAlbumCoversFlow
-        ) { hidden, prefs, covers ->
-            Triple(hidden, prefs.albumSortMode, covers)
+        ) { hidden, locked, prefs, covers ->
+            GridFilterBundle(hidden, locked, prefs.albumSortMode, covers)
         }
-    ) { localAlbums, driveRoots, collections, layouts, (hiddenIds, sortMode, customCovers) ->
+    ) { localAlbums, driveRoots, collections, layouts, bundle ->
+        val visibleLocal = applyCustomCovers(
+            localAlbums.filterNot { it.id in bundle.hiddenIds },
+            bundle.customCovers
+        ).map { if (it.id in bundle.lockedIds) it.copy(isLocked = true) else it }
+        val visibleDrive = applyCustomCovers(
+            driveRoots.filterNot { it.id in bundle.hiddenIds },
+            bundle.customCovers
+        ).map { if (it.id in bundle.lockedIds) it.copy(isLocked = true) else it }
         buildGridForParent(
             targetParentId = parentCollectionId,
-            localAlbums = applyCustomCovers(localAlbums.filterNot { it.id in hiddenIds }, customCovers),
-            driveRoots = applyCustomCovers(driveRoots.filterNot { it.id in hiddenIds }, customCovers),
+            localAlbums = visibleLocal,
+            driveRoots = visibleDrive,
             collections = collections,
             layouts = layouts,
-            sortMode = sortMode
+            sortMode = bundle.sortMode
         ).also { gridCacheByParent[parentCollectionId ?: ROOT_CACHE_KEY] = it }
     }.flowOn(Dispatchers.Default)
 
@@ -121,20 +130,28 @@ class AlbumOrganizationRepository(
         collectionDao.observeAllLayouts(),
         combine(
             extrasRepository.hiddenAlbumIdsFlow,
+            extrasRepository.lockedAlbumIdsFlow,
             preferencesManager.preferencesFlow,
             extrasRepository.customAlbumCoversFlow
-        ) { hidden, prefs, covers ->
-            Triple(hidden, prefs.albumSortMode, covers)
+        ) { hidden, locked, prefs, covers ->
+            GridFilterBundle(hidden, locked, prefs.albumSortMode, covers)
         }
-    ) { localAlbums, (driveRoots, driveByParent), collections, layouts, (hiddenIds, sortMode, customCovers) ->
-        val visibleLocal = applyCustomCovers(localAlbums.filterNot { it.id in hiddenIds }, customCovers)
-        val visibleDrive = applyCustomCovers(driveRoots.filterNot { it.id in hiddenIds }, customCovers)
+    ) { localAlbums, (driveRoots, driveByParent), collections, layouts, bundle ->
+        val visibleLocal = applyCustomCovers(
+            localAlbums.filterNot { it.id in bundle.hiddenIds },
+            bundle.customCovers
+        ).map { if (it.id in bundle.lockedIds) it.copy(isLocked = true) else it }
+        val visibleDrive = applyCustomCovers(
+            driveRoots.filterNot { it.id in bundle.hiddenIds },
+            bundle.customCovers
+        ).map { if (it.id in bundle.lockedIds) it.copy(isLocked = true) else it }
         val visited = HashSet<String>()
 
         fun buildDriveChildren(folderId: String): List<SidebarAlbumNode> {
             val subs = driveByParent[folderId].orEmpty()
             if (subs.isEmpty()) return emptyList()
-            return subs.mapIndexed { idx, sub ->
+            return subs.mapIndexed { idx, rawSub ->
+                val sub = if (rawSub.id in bundle.lockedIds) rawSub.copy(isLocked = true) else rawSub
                 val nested = if (visited.add(sub.id)) {
                     buildDriveChildren(sub.id).also { visited.remove(sub.id) }
                 } else {
@@ -154,7 +171,7 @@ class AlbumOrganizationRepository(
                 driveRoots = visibleDrive,
                 collections = collections,
                 layouts = layouts,
-                sortMode = sortMode
+                sortMode = bundle.sortMode
             )
             // Warm collection grid cache alongside sidebar tree so opening any collection is 0ms!
             gridCacheByParent[parentId ?: ROOT_CACHE_KEY] = gridItems
@@ -444,7 +461,7 @@ class AlbumOrganizationRepository(
             for (album in directAlbums) {
                 totalMedia += album.mediaCount
                 if (!album.isLocal) hasDrive = true
-                if (covers.size < 4) {
+                if (!album.isLocked && covers.size < 4) {
                     val primary = album.previewCovers.firstOrNull() ?: album.coverItemId?.let { id ->
                         AlbumCoverPreview(
                             itemId = id,
@@ -533,4 +550,11 @@ class AlbumOrganizationRepository(
         const val COLLECTION_PREFIX = "col_"
         private const val ROOT_CACHE_KEY = "__root__"
     }
+
+    private data class GridFilterBundle(
+        val hiddenIds: Set<String>,
+        val lockedIds: Set<String>,
+        val sortMode: AlbumSortMode,
+        val customCovers: Map<String, com.luminagallery.drive.data.local.entity.CustomAlbumCoverEntity>
+    )
 }

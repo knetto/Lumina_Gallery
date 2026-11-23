@@ -122,6 +122,7 @@ import com.luminagallery.drive.domain.model.FolderViewMode
 import com.luminagallery.drive.domain.model.GalleryStory
 import com.luminagallery.drive.domain.model.SidebarAlbumNode
 import com.luminagallery.drive.domain.model.StoryCategory
+import com.luminagallery.drive.ui.components.BiometricLockHelper
 import com.luminagallery.drive.ui.components.CollagePdfBottomSheet
 import com.luminagallery.drive.ui.components.CollectionCoverArtwork
 import com.luminagallery.drive.ui.components.ExifMetadataBottomSheet
@@ -495,6 +496,28 @@ fun FolderScreen(
                                             }
                                         )
                                     }
+                                    DropdownMenuItem(
+                                        text = { Text(if (uiState.isLockedAlbum) "Unlock" else "Lock") },
+                                        onClick = {
+                                            showOverflowMenu = false
+                                            val wantLock = !uiState.isLockedAlbum
+                                            val albumTitle = uiState.folderName
+                                            BiometricLockHelper.authenticate(
+                                                context = context,
+                                                title = if (wantLock) "Lock album" else "Unlock album",
+                                                subtitle = if (wantLock) {
+                                                    "Verify your identity to lock \"$albumTitle\""
+                                                } else {
+                                                    "Verify your identity to unlock \"$albumTitle\""
+                                                },
+                                                onSuccess = {
+                                                    viewModel.setCurrentAlbumLocked(wantLock)
+                                                    if (wantLock) onNavigateBack()
+                                                },
+                                                onFailure = { err -> viewModel.showMessage(err) }
+                                            )
+                                        }
+                                    )
                                     if (uiState.folderId in customCovers) {
                                         DropdownMenuItem(
                                             text = { Text("Reset album cover") },
@@ -548,23 +571,36 @@ fun FolderScreen(
                         activeFolderId = uiState.folderId,
                         isUnmeteredWifi = uiState.isUnmeteredWifi,
                         onSelectAlbum = { id, name ->
-                            if (id != uiState.folderId) {
-                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            val performSwitch: () -> Unit = {
+                                if (id != uiState.folderId) {
+                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                }
+                                val cached = if (LocalMediaRepository.isLocalFolderId(id)) {
+                                    appContainer.localMediaRepository.getCachedAlbumMedia(id)
+                                } else {
+                                    appContainer.galleryRepository.getCachedFolderMedia(id).orEmpty()
+                                }
+                                if (cached.isNotEmpty()) {
+                                    prefetchAlbumThumbnails(
+                                        context = context.applicationContext,
+                                        imageLoader = imageLoader,
+                                        items = cached,
+                                        isUnmeteredWifi = uiState.isUnmeteredWifi
+                                    )
+                                }
+                                viewModel.switchToAlbum(id, name)
                             }
-                            val cached = if (LocalMediaRepository.isLocalFolderId(id)) {
-                                appContainer.localMediaRepository.getCachedAlbumMedia(id)
-                            } else {
-                                appContainer.galleryRepository.getCachedFolderMedia(id).orEmpty()
-                            }
-                            if (cached.isNotEmpty()) {
-                                prefetchAlbumThumbnails(
-                                    context = context.applicationContext,
-                                    imageLoader = imageLoader,
-                                    items = cached,
-                                    isUnmeteredWifi = uiState.isUnmeteredWifi
+                            if (id != uiState.folderId && id in uiState.lockedAlbumIds) {
+                                BiometricLockHelper.authenticate(
+                                    context = context,
+                                    title = "Unlock \"$name\"",
+                                    subtitle = "Verify your identity to open locked album",
+                                    onSuccess = performSwitch,
+                                    onFailure = { err -> viewModel.showMessage(err) }
                                 )
+                            } else {
+                                performSwitch()
                             }
-                            viewModel.switchToAlbum(id, name)
                         }
                     )
                 }

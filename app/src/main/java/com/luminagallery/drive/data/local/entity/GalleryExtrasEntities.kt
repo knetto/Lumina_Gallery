@@ -17,6 +17,13 @@ data class HiddenAlbumEntity(
     val hiddenAtEpochMs: Long
 )
 
+@Entity(tableName = "locked_albums")
+data class LockedAlbumEntity(
+    @PrimaryKey
+    val albumId: String,
+    val lockedAtEpochMs: Long
+)
+
 @Entity(tableName = "favorite_stories")
 data class FavoriteStoryEntity(
     @PrimaryKey

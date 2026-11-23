@@ -8,6 +8,7 @@ import com.luminagallery.drive.data.repository.CloudAlbumCollection
 import com.luminagallery.drive.data.repository.CloudAlbumLayout
 import com.luminagallery.drive.data.repository.CloudAlbumViewPref
 import com.luminagallery.drive.data.repository.CloudCustomAlbumCover
+import com.luminagallery.drive.data.repository.CloudHiddenAlbum
 import com.luminagallery.drive.data.repository.CloudMediaAnnotation
 import com.luminagallery.drive.data.repository.CloudPinnedRoot
 import com.luminagallery.drive.data.repository.CloudPreferencesPayload
@@ -327,6 +328,14 @@ class GalleryCoreLogicTest {
         val codec = Json { ignoreUnknownKeys = true; encodeDefaults = true }
         val snap = CloudProfileSnapshot(
             preferences = CloudPreferencesPayload(stripLocationOnShare = true, lockHiddenAlbums = true),
+            lockedAlbums = listOf(
+                CloudHiddenAlbum(
+                    albumId = "local_bucket_private",
+                    isLocal = true,
+                    localRelativePath = "DCIM/Private",
+                    localFolderName = "Private"
+                )
+            ),
             favoriteStoryIds = listOf("story_trip_1"),
             customAlbumCovers = listOf(
                 CloudCustomAlbumCover(
