@@ -31,6 +31,9 @@ interface GalleryExtrasDao {
     @Query("DELETE FROM favorite_items WHERE itemId = :itemId")
     suspend fun removeFavoriteItem(itemId: String)
 
+    @Query("DELETE FROM favorite_items WHERE itemId NOT LIKE 'local_%'")
+    suspend fun clearDriveFavoriteItems()
+
     @Query("SELECT albumId FROM hidden_albums")
     fun observeHiddenAlbumIds(): Flow<List<String>>
 
@@ -45,6 +48,9 @@ interface GalleryExtrasDao {
 
     @Query("DELETE FROM hidden_albums WHERE albumId = :albumId")
     suspend fun removeHiddenAlbum(albumId: String)
+
+    @Query("DELETE FROM hidden_albums")
+    suspend fun clearAllHiddenAlbums()
 
     @Query("SELECT storyId FROM favorite_stories")
     fun observeFavoriteStoryIds(): Flow<List<String>>

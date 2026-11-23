@@ -23,6 +23,7 @@ import com.luminagallery.drive.data.repository.MediaExportManager
 import com.luminagallery.drive.data.repository.MotionPhotoDetector
 import com.luminagallery.drive.data.repository.OfflineMediaManager
 import com.luminagallery.drive.data.repository.VideoTrimmer
+import com.luminagallery.drive.data.repository.sync.DriveSyncScheduler
 import com.luminagallery.drive.domain.usecase.ExportMediaUseCase
 import com.luminagallery.drive.domain.usecase.ManageRootsUseCase
 import com.luminagallery.drive.domain.usecase.SyncGalleryUseCase
@@ -131,7 +132,11 @@ class AppContainer(context: Context) {
         okHttpClient = okHttpClient,
         json = json,
         onPinnedRootsRestored = {
-            syncGalleryUseCase.syncDeltaOrInitial(forceFullRescan = false)
+            syncGalleryUseCase.syncDeltaOrInitial(forceFullRescan = false, waitIfBusy = true)
+        },
+        onPreferencesRestored = { restored ->
+            coilCacheManager.updateMaxCacheSizeMb(restored.maxCacheSizeMb)
+            DriveSyncScheduler.setBackgroundSyncEnabled(appContext, restored.backgroundSyncEnabled)
         }
     )
 }

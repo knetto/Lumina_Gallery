@@ -30,8 +30,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -48,7 +50,9 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.IOException
 import java.net.URLEncoder
+import java.security.MessageDigest
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
 
 @Serializable
 data class CloudProfileSnapshot(
@@ -61,6 +65,29 @@ data class CloudProfileSnapshot(
     val hiddenAlbums: List<CloudHiddenAlbum> = emptyList(),
     val driveFavoriteItemIds: List<String> = emptyList()
 ) {
+    /**
+     * Canonical SHA-256 fingerprint of all meaningful profile data (excluding `updatedAtEpochMs`
+     * and non-semantic list ordering) so auto-backup skips echo uploads without ever dropping
+     * real edits made immediately after a restore.
+     */
+    fun contentFingerprint(json: Json): String {
+        val canonical = copy(
+            updatedAtEpochMs = 0L,
+            pinnedDriveRoots = pinnedDriveRoots
+                .map { it.copy(pinnedAtEpochMs = 0L) }
+                .sortedWith(compareBy<CloudPinnedRoot> { it.sortOrder }.thenBy { it.folderId }),
+            collections = collections
+                .map { it.copy(createdAtEpochMs = 0L) }
+                .sortedBy { it.id },
+            layouts = layouts.sortedBy { it.itemId },
+            hiddenAlbums = hiddenAlbums.sortedBy { it.albumId },
+            driveFavoriteItemIds = driveFavoriteItemIds.distinct().sorted()
+        )
+        val encoded = json.encodeToString(canonical).toByteArray(Charsets.UTF_8)
+        val digest = MessageDigest.getInstance("SHA-256").digest(encoded)
+        return digest.joinToString("") { "%02x".format(it) }
+    }
+
     companion object {
         const val CURRENT_SCHEMA_VERSION = 1
     }
@@ -215,10 +242,12 @@ class CloudProfileSyncManager(
     private val networkMonitor: NetworkMonitor,
     private val okHttpClient: OkHttpClient,
     private val json: Json,
-    private val onPinnedRootsRestored: suspend () -> Unit = {}
+    private val onPinnedRootsRestored: suspend () -> Unit = {},
+    private val onPreferencesRestored: suspend (UserPreferences) -> Unit = {}
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val syncMutex = Mutex()
+    private val sessionGeneration = AtomicLong(0L)
 
     private val pinnedRootDao = database.pinnedRootDao()
     private val collectionDao = database.albumCollectionDao()
@@ -228,12 +257,13 @@ class CloudProfileSyncManager(
     val status: StateFlow<CloudProfileSyncStatus> = _status.asStateFlow()
 
     @Volatile
-    private var suppressAutoBackupUntilMs: Long = 0L
+    private var lastSyncedFingerprint: String? = null
 
     @Volatile
     private var cachedAppDataFileId: String? = null
 
     private var autoObserverJob: Job? = null
+    private var networkFlushJob: Job? = null
     private var localReconcileJob: Job? = null
 
     init {
@@ -253,20 +283,26 @@ class CloudProfileSyncManager(
     fun startAutoSyncIfSignedIn() {
         if (!credentialStore.isGoogleSignInActive()) return
         ensureAutoBackupObserverRunning()
+        ensureNetworkFlushObserverRunning()
         scope.launch {
-            // Pull latest if cloud is newer (e.g. changed on another phone) without clobbering fresh edits
+            // Pull latest if cloud is newer (or flush dirty offline edits) without clobbering local work
             syncIfOnlineSilently()
         }
     }
 
     fun onSignedOut() {
+        sessionGeneration.incrementAndGet()
         autoObserverJob?.cancel()
         autoObserverJob = null
+        networkFlushJob?.cancel()
+        networkFlushJob = null
         cachedAppDataFileId = null
+        lastSyncedFingerprint = null
         _status.value = CloudProfileSyncStatus()
         scope.launch {
             preferencesManager.setLastCloudProfileSyncMs(0L)
             preferencesManager.setPendingLocalCloudRulesJson("")
+            preferencesManager.setCloudProfileDirty(false)
         }
     }
 
@@ -280,16 +316,24 @@ class CloudProfileSyncManager(
         if (!credentialStore.isGoogleSignInActive()) {
             return@withContext Result.success(CloudProfileRestoreSummary(restoredFromCloud = false))
         }
+        val gen = sessionGeneration.get()
         syncMutex.withLock {
+            if (sessionGeneration.get() != gen) {
+                return@withLock Result.success(CloudProfileRestoreSummary(restoredFromCloud = false))
+            }
             _status.value = _status.value.copy(isSyncing = true, lastError = null)
             runCatching {
                 val remote = fetchRemoteProfile()
+                if (sessionGeneration.get() != gen) {
+                    return@runCatching CloudProfileRestoreSummary(restoredFromCloud = false)
+                }
                 if (remote != null) {
                     val (fileId, snapshot) = remote
                     cachedAppDataFileId = fileId
                     val summary = applySnapshotLocally(snapshot)
                     val now = snapshot.updatedAtEpochMs.takeIf { it > 0L } ?: System.currentTimeMillis()
                     preferencesManager.setLastCloudProfileSyncMs(now)
+                    preferencesManager.setCloudProfileDirty(false)
                     _status.value = CloudProfileSyncStatus(
                         isSyncing = false,
                         lastSyncedEpochMs = now,
@@ -297,6 +341,7 @@ class CloudProfileSyncManager(
                         lastMessage = buildRestoreMessage(summary)
                     )
                     ensureAutoBackupObserverRunning()
+                    ensureNetworkFlushObserverRunning()
                     summary
                 } else {
                     // First time using account sync on this Google account — back up current setup!
@@ -308,10 +353,11 @@ class CloudProfileSyncManager(
                         lastMessage = "Backed up settings & albums to your Google account"
                     )
                     ensureAutoBackupObserverRunning()
+                    ensureNetworkFlushObserverRunning()
                     CloudProfileRestoreSummary(restoredFromCloud = false)
                 }
             }.onFailure { err ->
-                handleSyncFailure(err)
+                if (sessionGeneration.get() == gen) handleSyncFailure(err)
             }
         }
     }
@@ -322,22 +368,30 @@ class CloudProfileSyncManager(
             return@withContext Result.failure(IllegalStateException("Sign in with Google to back up your profile"))
         }
         if (!networkMonitor.networkState.value.isOnline) {
+            preferencesManager.setCloudProfileDirty(true)
             return@withContext Result.failure(IOException("No internet connection"))
         }
+        val gen = sessionGeneration.get()
         syncMutex.withLock {
+            if (sessionGeneration.get() != gen) {
+                return@withLock Result.failure(IllegalStateException("Signed out"))
+            }
             _status.value = _status.value.copy(isSyncing = true, lastError = null)
             runCatching {
                 val uploadedAt = uploadSnapshotLocked()
-                _status.value = CloudProfileSyncStatus(
-                    isSyncing = false,
-                    lastSyncedEpochMs = uploadedAt,
-                    needsScopeReconsent = false,
-                    lastMessage = "Backed up to Google account"
-                )
-                ensureAutoBackupObserverRunning()
+                if (sessionGeneration.get() == gen) {
+                    _status.value = CloudProfileSyncStatus(
+                        isSyncing = false,
+                        lastSyncedEpochMs = uploadedAt,
+                        needsScopeReconsent = false,
+                        lastMessage = "Backed up to Google account"
+                    )
+                    ensureAutoBackupObserverRunning()
+                    ensureNetworkFlushObserverRunning()
+                }
                 uploadedAt
             }.onFailure { err ->
-                handleSyncFailure(err)
+                if (sessionGeneration.get() == gen) handleSyncFailure(err)
             }
         }
     }
@@ -350,16 +404,24 @@ class CloudProfileSyncManager(
         if (!networkMonitor.networkState.value.isOnline) {
             return@withContext Result.failure(IOException("No internet connection"))
         }
+        val gen = sessionGeneration.get()
         syncMutex.withLock {
+            if (sessionGeneration.get() != gen) {
+                return@withLock Result.failure(IllegalStateException("Signed out"))
+            }
             _status.value = _status.value.copy(isSyncing = true, lastError = null)
             runCatching {
                 val remote = fetchRemoteProfile()
                     ?: throw IOException("No Lumina backup found on this Google account yet.")
+                if (sessionGeneration.get() != gen) {
+                    return@runCatching CloudProfileRestoreSummary(restoredFromCloud = false)
+                }
                 val (fileId, snapshot) = remote
                 cachedAppDataFileId = fileId
                 val summary = applySnapshotLocally(snapshot)
                 val now = snapshot.updatedAtEpochMs.takeIf { it > 0L } ?: System.currentTimeMillis()
                 preferencesManager.setLastCloudProfileSyncMs(now)
+                preferencesManager.setCloudProfileDirty(false)
                 _status.value = CloudProfileSyncStatus(
                     isSyncing = false,
                     lastSyncedEpochMs = now,
@@ -367,28 +429,38 @@ class CloudProfileSyncManager(
                     lastMessage = buildRestoreMessage(summary)
                 )
                 ensureAutoBackupObserverRunning()
+                ensureNetworkFlushObserverRunning()
                 summary
             }.onFailure { err ->
-                handleSyncFailure(err)
+                if (sessionGeneration.get() == gen) handleSyncFailure(err)
             }
         }
     }
 
     private suspend fun syncIfOnlineSilently() {
         if (!credentialStore.isGoogleSignInActive() || !networkMonitor.networkState.value.isOnline) return
+        val gen = sessionGeneration.get()
         syncMutex.withLock {
+            if (sessionGeneration.get() != gen) return@withLock
             runCatching {
                 val localLastSync = preferencesManager.getLastCloudProfileSyncMs()
+                val isDirty = preferencesManager.getCloudProfileDirty()
                 val remote = fetchRemoteProfile()
+                if (sessionGeneration.get() != gen) return@runCatching
+
                 if (remote != null) {
                     val (fileId, snapshot) = remote
                     cachedAppDataFileId = fileId
-                    val hasLocalCustomState = pinnedRootDao.getAll().isNotEmpty() ||
-                        collectionDao.getAllCollections().isNotEmpty()
-                    // Auto-restore if this install is fresh OR another phone pushed a newer snapshot
-                    if (!hasLocalCustomState || snapshot.updatedAtEpochMs > localLastSync + 2_000L) {
+                    val isFreshInstall = localLastSync == 0L &&
+                        pinnedRootDao.getAll().isEmpty() &&
+                        collectionDao.getAllCollections().isEmpty() &&
+                        collectionDao.getAllLayouts().isEmpty()
+
+                    // Auto-restore ONLY if truly fresh install OR another phone pushed a newer snapshot
+                    if (isFreshInstall || snapshot.updatedAtEpochMs > localLastSync + 2_000L) {
                         val summary = applySnapshotLocally(snapshot)
                         preferencesManager.setLastCloudProfileSyncMs(snapshot.updatedAtEpochMs)
+                        preferencesManager.setCloudProfileDirty(false)
                         _status.value = _status.value.copy(
                             isSyncing = false,
                             lastSyncedEpochMs = snapshot.updatedAtEpochMs,
@@ -399,14 +471,26 @@ class CloudProfileSyncManager(
                         if (summary.restoredPinnedRootsCount > 0) {
                             scope.launch { runCatching { onPinnedRootsRestored() } }
                         }
-                    } else if (localLastSync == 0L) {
-                        preferencesManager.setLastCloudProfileSyncMs(snapshot.updatedAtEpochMs)
+                    } else if (isDirty) {
+                        // Offline edits were made on this phone while remote didn't advance — push them now!
+                        val uploadedAt = uploadSnapshotLocked()
                         _status.value = _status.value.copy(
-                            lastSyncedEpochMs = snapshot.updatedAtEpochMs,
+                            isSyncing = false,
+                            lastSyncedEpochMs = uploadedAt,
+                            needsScopeReconsent = false,
+                            lastError = null
+                        )
+                    } else {
+                        if (localLastSync == 0L) {
+                            preferencesManager.setLastCloudProfileSyncMs(snapshot.updatedAtEpochMs)
+                        }
+                        lastSyncedFingerprint = buildLocalSnapshot().contentFingerprint(json)
+                        _status.value = _status.value.copy(
+                            lastSyncedEpochMs = snapshot.updatedAtEpochMs.coerceAtLeast(localLastSync),
                             needsScopeReconsent = false
                         )
                     }
-                } else if (localLastSync == 0L) {
+                } else if (localLastSync == 0L || isDirty) {
                     // Signed in previously before this feature existed — seed initial backup automatically!
                     val uploadedAt = uploadSnapshotLocked()
                     _status.value = _status.value.copy(
@@ -417,7 +501,7 @@ class CloudProfileSyncManager(
                     )
                 }
             }.onFailure { err ->
-                if (isInsufficientScopeError(err)) {
+                if (sessionGeneration.get() == gen && isInsufficientScopeError(err)) {
                     tokenManager.markAppDataScopeMissing()
                     _status.value = _status.value.copy(
                         isSyncing = false,
@@ -432,8 +516,10 @@ class CloudProfileSyncManager(
         if (autoObserverJob?.isActive == true) return
         autoObserverJob = scope.launch {
             val changeTrigger = combine(
-                preferencesManager.preferencesFlow,
-                pinnedRootDao.observePinnedIds(),
+                preferencesManager.preferencesFlow
+                    .map { it.toCloudPayload() }
+                    .distinctUntilChanged(),
+                pinnedRootDao.observeAll(),
                 collectionDao.observeAllCollections(),
                 collectionDao.observeAllLayouts(),
                 combine(
@@ -447,22 +533,80 @@ class CloudProfileSyncManager(
                 .debounce(AUTO_BACKUP_DEBOUNCE_MS)
                 .collect {
                     if (!credentialStore.isGoogleSignInActive()) return@collect
-                    if (!networkMonitor.networkState.value.isOnline) return@collect
-                    if (System.currentTimeMillis() < suppressAutoBackupUntilMs) return@collect
-                    if (_status.value.needsScopeReconsent) return@collect
+                    val gen = sessionGeneration.get()
+
+                    val candidate = runCatching { buildLocalSnapshot() }.getOrNull() ?: return@collect
+                    val candidateFp = candidate.contentFingerprint(json)
+                    if (candidateFp == lastSyncedFingerprint) return@collect
+
+                    if (!networkMonitor.networkState.value.isOnline || _status.value.needsScopeReconsent) {
+                        preferencesManager.setCloudProfileDirty(true)
+                        return@collect
+                    }
 
                     syncMutex.withLock {
-                        if (System.currentTimeMillis() < suppressAutoBackupUntilMs) return@withLock
+                        if (sessionGeneration.get() != gen) return@withLock
+                        val freshSnapshot = buildLocalSnapshot()
+                        if (freshSnapshot.contentFingerprint(json) == lastSyncedFingerprint) {
+                            preferencesManager.setCloudProfileDirty(false)
+                            return@withLock
+                        }
+                        runCatching {
+                            val uploadedAt = uploadSnapshotLocked(freshSnapshot)
+                            if (sessionGeneration.get() == gen) {
+                                _status.value = _status.value.copy(
+                                    isSyncing = false,
+                                    lastSyncedEpochMs = uploadedAt,
+                                    needsScopeReconsent = false,
+                                    lastError = null
+                                )
+                            }
+                        }.onFailure { err ->
+                            preferencesManager.setCloudProfileDirty(true)
+                            if (sessionGeneration.get() == gen && isInsufficientScopeError(err)) {
+                                tokenManager.markAppDataScopeMissing()
+                                _status.value = _status.value.copy(
+                                    isSyncing = false,
+                                    needsScopeReconsent = true
+                                )
+                            }
+                        }
+                    }
+                }
+        }
+    }
+
+    /**
+     * Automatically flushes edits made while offline the moment network connectivity returns.
+     */
+    private fun ensureNetworkFlushObserverRunning() {
+        if (networkFlushJob?.isActive == true) return
+        networkFlushJob = scope.launch {
+            networkMonitor.networkState
+                .map { it.isOnline }
+                .distinctUntilChanged()
+                .collect { isOnline ->
+                    if (!isOnline) return@collect
+                    if (!credentialStore.isGoogleSignInActive()) return@collect
+                    if (_status.value.needsScopeReconsent) return@collect
+                    if (!preferencesManager.getCloudProfileDirty()) return@collect
+
+                    val gen = sessionGeneration.get()
+                    syncMutex.withLock {
+                        if (sessionGeneration.get() != gen) return@withLock
+                        if (!preferencesManager.getCloudProfileDirty()) return@withLock
                         runCatching {
                             val uploadedAt = uploadSnapshotLocked()
-                            _status.value = _status.value.copy(
-                                isSyncing = false,
-                                lastSyncedEpochMs = uploadedAt,
-                                needsScopeReconsent = false,
-                                lastError = null
-                            )
+                            if (sessionGeneration.get() == gen) {
+                                _status.value = _status.value.copy(
+                                    isSyncing = false,
+                                    lastSyncedEpochMs = uploadedAt,
+                                    needsScopeReconsent = false,
+                                    lastError = null
+                                )
+                            }
                         }.onFailure { err ->
-                            if (isInsufficientScopeError(err)) {
+                            if (sessionGeneration.get() == gen && isInsufficientScopeError(err)) {
                                 tokenManager.markAppDataScopeMissing()
                                 _status.value = _status.value.copy(
                                     isSyncing = false,
@@ -546,10 +690,15 @@ class CloudProfileSyncManager(
         }
 
         if (layoutsToInsert.isNotEmpty() || hiddenToInsert.isNotEmpty()) {
-            suppressAutoBackupUntilMs = System.currentTimeMillis() + SUPPRESS_ECHO_MS
+            val wasClean = !preferencesManager.getCloudProfileDirty()
             database.withTransaction {
                 if (layoutsToInsert.isNotEmpty()) collectionDao.upsertLayouts(layoutsToInsert)
                 if (hiddenToInsert.isNotEmpty()) extrasDao.upsertHiddenAlbums(hiddenToInsert)
+            }
+            if (wasClean) {
+                lastSyncedFingerprint = runCatching {
+                    buildLocalSnapshot().contentFingerprint(json)
+                }.getOrNull()
             }
         }
     }
@@ -693,11 +842,11 @@ class CloudProfileSyncManager(
     }
 
     private suspend fun applySnapshotLocally(snapshot: CloudProfileSnapshot): CloudProfileRestoreSummary {
-        suppressAutoBackupUntilMs = System.currentTimeMillis() + SUPPRESS_ECHO_MS
-
-        // 1. Restore settings
+        // 1. Restore settings & immediately apply runtime side effects (cache size, background sync schedule)
         val currentPrefs = preferencesManager.getCurrentPreferences()
-        preferencesManager.applyCloudSyncedPreferences(snapshot.preferences.toUserPreferences(currentPrefs))
+        val restoredPrefs = snapshot.preferences.toUserPreferences(currentPrefs)
+        preferencesManager.applyCloudSyncedPreferences(restoredPrefs)
+        runCatching { onPreferencesRestored(restoredPrefs) }
 
         val localAlbums = getCurrentLocalAlbums()
         val now = System.currentTimeMillis()
@@ -708,13 +857,11 @@ class CloudProfileSyncManager(
         val localHiddenRules = mutableListOf<CloudHiddenAlbum>()
 
         database.withTransaction {
-            // 2. Restore pinned Google Drive album links (merge without wiping any new local ones)
-            val existingPinned = pinnedRootDao.getAll().mapTo(HashSet()) { it.folderId }
+            // 2. Authoritatively sync pinned Google Drive album links (propagates unpins too)
+            pinnedRootDao.clearAll()
             for (root in snapshot.pinnedDriveRoots) {
                 if (root.folderId.isBlank()) continue
-                if (root.folderId !in existingPinned) {
-                    restoredRootsCount++
-                }
+                restoredRootsCount++
                 pinnedRootDao.upsert(
                     PinnedRootEntity(
                         folderId = root.folderId,
@@ -725,60 +872,59 @@ class CloudProfileSyncManager(
                 )
             }
 
-            // 3. Restore album-in-album collections & custom ordering
-            if (snapshot.collections.isNotEmpty() || snapshot.layouts.isNotEmpty()) {
-                collectionDao.clearAllCollections()
-                collectionDao.clearAllLayouts()
+            // 3. Authoritatively sync album-in-album collections & custom ordering (propagates ungroups too)
+            collectionDao.clearAllCollections()
+            collectionDao.clearAllLayouts()
 
-                if (snapshot.collections.isNotEmpty()) {
-                    collectionDao.upsertCollections(
-                        snapshot.collections.map { col ->
-                            AlbumCollectionEntity(
-                                id = col.id,
-                                name = col.name,
-                                parentCollectionId = col.parentCollectionId,
-                                createdAtEpochMs = col.createdAtEpochMs.takeIf { it > 0L } ?: now
-                            )
-                        }
-                    )
-                }
-
-                val resolvedLayouts = LinkedHashMap<String, AlbumLayoutEntity>()
-                for (layout in snapshot.layouts) {
-                    val isLocal = layout.itemKind == AlbumGridItem.KIND_LOCAL ||
-                        LocalMediaRepository.isLocalFolderId(layout.itemId)
-                    if (isLocal) {
-                        localLayoutRules.add(layout)
-                        val matchedBucket = LocalAlbumCloudMatcher.resolveTargetBucketId(
-                            savedBucketId = layout.itemId,
-                            savedRelativePath = layout.localRelativePath,
-                            savedFolderName = layout.localFolderName,
-                            localAlbums = localAlbums
+            if (snapshot.collections.isNotEmpty()) {
+                collectionDao.upsertCollections(
+                    snapshot.collections.map { col ->
+                        AlbumCollectionEntity(
+                            id = col.id,
+                            name = col.name,
+                            parentCollectionId = col.parentCollectionId,
+                            createdAtEpochMs = col.createdAtEpochMs.takeIf { it > 0L } ?: now
                         )
-                        if (matchedBucket != null) {
-                            matchedLocalCount++
-                            resolvedLayouts[matchedBucket] = AlbumLayoutEntity(
-                                itemId = matchedBucket,
-                                itemKind = AlbumGridItem.KIND_LOCAL,
-                                parentCollectionId = layout.parentCollectionId,
-                                sortOrder = layout.sortOrder
-                            )
-                        }
-                    } else {
-                        resolvedLayouts[layout.itemId] = AlbumLayoutEntity(
-                            itemId = layout.itemId,
-                            itemKind = layout.itemKind,
+                    }
+                )
+            }
+
+            val resolvedLayouts = LinkedHashMap<String, AlbumLayoutEntity>()
+            for (layout in snapshot.layouts) {
+                val isLocal = layout.itemKind == AlbumGridItem.KIND_LOCAL ||
+                    LocalMediaRepository.isLocalFolderId(layout.itemId)
+                if (isLocal) {
+                    localLayoutRules.add(layout)
+                    val matchedBucket = LocalAlbumCloudMatcher.resolveTargetBucketId(
+                        savedBucketId = layout.itemId,
+                        savedRelativePath = layout.localRelativePath,
+                        savedFolderName = layout.localFolderName,
+                        localAlbums = localAlbums
+                    )
+                    if (matchedBucket != null) {
+                        matchedLocalCount++
+                        resolvedLayouts[matchedBucket] = AlbumLayoutEntity(
+                            itemId = matchedBucket,
+                            itemKind = AlbumGridItem.KIND_LOCAL,
                             parentCollectionId = layout.parentCollectionId,
                             sortOrder = layout.sortOrder
                         )
                     }
-                }
-                if (resolvedLayouts.isNotEmpty()) {
-                    collectionDao.upsertLayouts(resolvedLayouts.values.toList())
+                } else {
+                    resolvedLayouts[layout.itemId] = AlbumLayoutEntity(
+                        itemId = layout.itemId,
+                        itemKind = layout.itemKind,
+                        parentCollectionId = layout.parentCollectionId,
+                        sortOrder = layout.sortOrder
+                    )
                 }
             }
+            if (resolvedLayouts.isNotEmpty()) {
+                collectionDao.upsertLayouts(resolvedLayouts.values.toList())
+            }
 
-            // 4. Restore hidden albums (Drive directly + local matched by path/name)
+            // 4. Authoritatively sync hidden albums (Drive directly + local matched by path/name)
+            extrasDao.clearAllHiddenAlbums()
             val hiddenToUpsert = mutableListOf<HiddenAlbumEntity>()
             for (hidden in snapshot.hiddenAlbums) {
                 if (hidden.isLocal || LocalMediaRepository.isLocalFolderId(hidden.albumId)) {
@@ -800,7 +946,8 @@ class CloudProfileSyncManager(
                 extrasDao.upsertHiddenAlbums(hiddenToUpsert)
             }
 
-            // 5. Restore Google Drive favorites
+            // 5. Authoritatively sync Google Drive favorites (preserving local on-device favorites)
+            extrasDao.clearDriveFavoriteItems()
             if (snapshot.driveFavoriteItemIds.isNotEmpty()) {
                 extrasDao.upsertFavoriteItems(
                     snapshot.driveFavoriteItemIds.map { id ->
@@ -817,6 +964,11 @@ class CloudProfileSyncManager(
         )
         preferencesManager.setPendingLocalCloudRulesJson(json.encodeToString(pendingRules))
 
+        // Record exact resulting local fingerprint so auto-backup skips echo uploads without dropping real edits
+        lastSyncedFingerprint = runCatching {
+            buildLocalSnapshot().contentFingerprint(json)
+        }.getOrNull()
+
         return CloudProfileRestoreSummary(
             restoredFromCloud = true,
             restoredPinnedRootsCount = restoredRootsCount,
@@ -825,8 +977,10 @@ class CloudProfileSyncManager(
         )
     }
 
-    private suspend fun uploadSnapshotLocked(): Long {
-        val snapshot = buildLocalSnapshot()
+    private suspend fun uploadSnapshotLocked(
+        prebuiltSnapshot: CloudProfileSnapshot? = null
+    ): Long {
+        val snapshot = prebuiltSnapshot ?: buildLocalSnapshot()
         val payloadJson = json.encodeToString(snapshot)
         val existingId = cachedAppDataFileId ?: findRemoteProfileFileId()
         val fileId = if (!existingId.isNullOrBlank()) {
@@ -836,6 +990,7 @@ class CloudProfileSyncManager(
         }
         cachedAppDataFileId = fileId
         preferencesManager.setLastCloudProfileSyncMs(snapshot.updatedAtEpochMs)
+        preferencesManager.setCloudProfileDirty(false)
         val refreshedPending = PendingLocalCloudRules(
             layouts = snapshot.layouts.filter {
                 it.itemKind == AlbumGridItem.KIND_LOCAL || LocalMediaRepository.isLocalFolderId(it.itemId)
@@ -845,7 +1000,15 @@ class CloudProfileSyncManager(
             }
         )
         preferencesManager.setPendingLocalCloudRulesJson(json.encodeToString(refreshedPending))
+        lastSyncedFingerprint = snapshot.contentFingerprint(json)
         return snapshot.updatedAtEpochMs
+    }
+
+    private fun throwForHttpFailure(code: Int, errorBody: String, fallbackMessage: String): Nothing {
+        if (code == 403 && (isScopeDeniedErrorBody(errorBody) || (errorBody.isBlank() && !tokenManager.hasAppDataScope))) {
+            throw InsufficientAppDataScopeException()
+        }
+        throw IOException("$fallbackMessage (HTTP $code)")
     }
 
     private fun findRemoteProfileFileId(): String? {
@@ -853,9 +1016,9 @@ class CloudProfileSyncManager(
         val url = "${DriveConstants.BASE_URL}drive/v3/files?spaces=appDataFolder&q=$q&fields=files(id,modifiedTime)&pageSize=5"
         val req = Request.Builder().url(url).get().build()
         okHttpClient.newCall(req).execute().use { resp ->
-            if (resp.code == 403) throw InsufficientAppDataScopeException()
-            if (!resp.isSuccessful) throw IOException("Drive appDataFolder list failed (HTTP ${resp.code})")
-            val root = JSONObject(resp.body?.string().orEmpty())
+            val body = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) throwForHttpFailure(resp.code, body, "Drive appDataFolder list failed")
+            val root = JSONObject(body)
             val files = root.optJSONArray("files") ?: return null
             if (files.length() == 0) return null
             return files.getJSONObject(0).optString("id").takeIf { it.isNotBlank() }
@@ -871,9 +1034,8 @@ class CloudProfileSyncManager(
                 cachedAppDataFileId = null
                 return null
             }
-            if (resp.code == 403) throw InsufficientAppDataScopeException()
-            if (!resp.isSuccessful) throw IOException("Failed to download cloud profile (HTTP ${resp.code})")
             val body = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) throwForHttpFailure(resp.code, body, "Failed to download cloud profile")
             if (body.isBlank()) return null
             val parsed = json.decodeFromString<CloudProfileSnapshot>(body)
             return fileId to parsed
@@ -898,9 +1060,9 @@ class CloudProfileSyncManager(
             .post(multipartBody.toRequestBody("multipart/related; boundary=$boundary".toMediaType()))
             .build()
         okHttpClient.newCall(req).execute().use { resp ->
-            if (resp.code == 403) throw InsufficientAppDataScopeException()
-            if (!resp.isSuccessful) throw IOException("Failed to create cloud backup (HTTP ${resp.code})")
-            val obj = JSONObject(resp.body?.string().orEmpty())
+            val body = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) throwForHttpFailure(resp.code, body, "Failed to create cloud backup")
+            val obj = JSONObject(body)
             return obj.optString("id").takeIf { it.isNotBlank() }
                 ?: throw IOException("Drive returned empty file id for cloud backup")
         }
@@ -917,8 +1079,8 @@ class CloudProfileSyncManager(
                 cachedAppDataFileId = null
                 return createRemoteProfile(payloadJson)
             }
-            if (resp.code == 403) throw InsufficientAppDataScopeException()
-            if (!resp.isSuccessful) throw IOException("Failed to update cloud backup (HTTP ${resp.code})")
+            val body = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) throwForHttpFailure(resp.code, body, "Failed to update cloud backup")
             return fileId
         }
     }
@@ -940,9 +1102,7 @@ class CloudProfileSyncManager(
     }
 
     private fun isInsufficientScopeError(err: Throwable): Boolean =
-        err is InsufficientAppDataScopeException ||
-            err.message?.contains("403", ignoreCase = true) == true ||
-            err.message?.contains("insufficient", ignoreCase = true) == true
+        err is InsufficientAppDataScopeException
 
     private fun buildRestoreMessage(summary: CloudProfileRestoreSummary): String {
         val parts = mutableListOf<String>()
@@ -965,7 +1125,16 @@ class CloudProfileSyncManager(
     companion object {
         private const val PROFILE_FILE_NAME = "lumina_profile_v1.json"
         private const val AUTO_BACKUP_DEBOUNCE_MS = 3_500L
-        private const val SUPPRESS_ECHO_MS = 5_000L
+
+        internal fun isScopeDeniedErrorBody(errorBody: String): Boolean {
+            if (errorBody.isBlank()) return false
+            val lower = errorBody.lowercase()
+            return "access_token_scope_insufficient" in lower ||
+                "insufficientpermissions" in lower ||
+                "insufficient_scope" in lower ||
+                "insufficient authentication scopes" in lower ||
+                "request had insufficient authentication scopes" in lower
+        }
     }
 }
 

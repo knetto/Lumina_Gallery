@@ -57,6 +57,9 @@ interface PinnedRootDao {
     @Query("SELECT * FROM pinned_roots ORDER BY sortOrder ASC, pinnedAtEpochMs ASC")
     suspend fun getAll(): List<PinnedRootEntity>
 
+    @Query("SELECT * FROM pinned_roots ORDER BY sortOrder ASC, pinnedAtEpochMs ASC")
+    fun observeAll(): Flow<List<PinnedRootEntity>>
+
     @Query("SELECT folderId FROM pinned_roots")
     fun observePinnedIds(): Flow<List<String>>
 
@@ -65,6 +68,9 @@ interface PinnedRootDao {
 
     @Query("DELETE FROM pinned_roots WHERE folderId = :folderId")
     suspend fun deleteById(folderId: String)
+
+    @Query("DELETE FROM pinned_roots")
+    suspend fun clearAll()
 
     @Query("UPDATE pinned_roots SET lastSyncedEpochMs = :timestamp WHERE folderId = :folderId")
     suspend fun updateLastSynced(folderId: String, timestamp: Long)

@@ -225,8 +225,10 @@ class SettingsViewModel(
                     "Restored settings & layout from Google"
                 }
                 if (summary.restoredPinnedRootsCount > 0) {
-                    launch { syncUseCase.syncDeltaOrInitial(forceFullRescan = false) }
+                    launch { syncUseCase.syncDeltaOrInitial(forceFullRescan = false, waitIfBusy = true) }
                 }
+            } else if (!grantedAppDataScope) {
+                snackbarFlow.value = "Connected Google Drive · allow app data permission to enable backup"
             } else if (restoreResult.isSuccess) {
                 snackbarFlow.value = if (!resolvedEmail.isNullOrBlank()) {
                     "Signed in as $resolvedEmail · Account backup active"
@@ -273,7 +275,7 @@ class SettingsViewModel(
                         "Restored settings & layout from Google"
                     }
                     if (summary.restoredPinnedRootsCount > 0) {
-                        launch { syncUseCase.syncDeltaOrInitial(forceFullRescan = false) }
+                        launch { syncUseCase.syncDeltaOrInitial(forceFullRescan = false, waitIfBusy = true) }
                     }
                 }
                 .onFailure { err ->

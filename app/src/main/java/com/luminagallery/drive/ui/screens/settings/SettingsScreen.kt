@@ -87,6 +87,7 @@ import com.luminagallery.drive.R
 import com.luminagallery.drive.data.repository.AppUpdateState
 import com.luminagallery.drive.data.repository.InstalledGalleryApp
 import com.luminagallery.drive.domain.model.AlbumSortMode
+import com.luminagallery.drive.domain.model.CredentialSource
 import com.luminagallery.drive.domain.model.MainTab
 import com.luminagallery.drive.domain.model.ServiceAccountState
 import com.luminagallery.drive.domain.model.ThemeMode
@@ -188,6 +189,7 @@ fun SettingsScreen(
     val prefs = uiState.preferences
     val configuredAccount = uiState.serviceAccountState as? ServiceAccountState.Configured
     val isSignedIn = configuredAccount != null
+    val isGoogleAccount = configuredAccount?.source == CredentialSource.GOOGLE_SIGN_IN
 
     Scaffold(
         modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
@@ -272,7 +274,7 @@ fun SettingsScreen(
                     val cloudSync = uiState.cloudProfileSyncStatus
                     val cloudProfileSubtitle = when {
                         cloudSync.isSyncing -> "Syncing settings & album layout…"
-                        !isSignedIn -> "Sign in with Google to sync settings, Drive links & nested albums"
+                        !isGoogleAccount -> "Sign in with a Google account to sync settings, Drive links & nested albums"
                         cloudSync.needsScopeReconsent -> "Tap to grant backup permission (one-time Google prompt)"
                         cloudSync.lastSyncedEpochMs > 0L ->
                             "Backed up · ${FormatUtils.formatLastSync(cloudSync.lastSyncedEpochMs)}"
@@ -281,9 +283,9 @@ fun SettingsScreen(
                     OneUiActionRow(
                         title = "Account backup & restore",
                         subtitle = cloudProfileSubtitle,
-                        subtitleAccent = cloudSync.isSyncing || cloudSync.needsScopeReconsent,
+                        subtitleAccent = cloudSync.isSyncing || (isGoogleAccount && cloudSync.needsScopeReconsent),
                         enabled = !cloudSync.isSyncing,
-                        showChevron = isSignedIn && !cloudSync.needsScopeReconsent && !cloudSync.isSyncing,
+                        showChevron = isGoogleAccount && !cloudSync.needsScopeReconsent && !cloudSync.isSyncing,
                         trailingContent = if (cloudSync.isSyncing) {
                             {
                                 CircularProgressIndicator(
@@ -294,7 +296,7 @@ fun SettingsScreen(
                             }
                         } else null,
                         onClick = {
-                            if (!isSignedIn || cloudSync.needsScopeReconsent) {
+                            if (!isGoogleAccount || cloudSync.needsScopeReconsent) {
                                 startGoogleSignIn()
                             } else {
                                 showCloudProfileDialog = true

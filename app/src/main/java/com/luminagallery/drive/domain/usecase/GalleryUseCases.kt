@@ -9,8 +9,11 @@ import com.luminagallery.drive.domain.model.MediaItem
 class SyncGalleryUseCase(
     private val repository: GalleryRepository
 ) {
-    suspend fun syncDeltaOrInitial(forceFullRescan: Boolean = false): Result<Unit> =
-        repository.performSmartSync(forceFullRescan = forceFullRescan)
+    suspend fun syncDeltaOrInitial(
+        forceFullRescan: Boolean = false,
+        waitIfBusy: Boolean = false
+    ): Result<Unit> =
+        repository.performSmartSync(forceFullRescan = forceFullRescan, waitIfBusy = waitIfBusy)
 
     suspend fun syncFolder(folderId: String): Result<List<String>> =
         repository.syncFolderChildren(folderId)

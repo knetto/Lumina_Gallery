@@ -618,6 +618,8 @@ class HomeViewModel(
                         "Restored settings & layout from Google"
                     }
                 }
+                !grantedAppDataScope ->
+                    "Connected Google Drive · enable backup permission in Settings"
                 !resolvedEmail.isNullOrBlank() -> "Signed in as $resolvedEmail"
                 else -> "Connected to Google Drive"
             }
@@ -627,7 +629,7 @@ class HomeViewModel(
                 openRootPicker(initialTab = 1)
             } else {
                 isDriveSheetOpenFlow.value = false
-                triggerSmartSync()
+                triggerSmartSync(waitIfBusy = true)
             }
         }
     }
@@ -651,10 +653,13 @@ class HomeViewModel(
         }
     }
 
-    fun triggerSmartSync(forceFullRescan: Boolean = false) {
+    fun triggerSmartSync(forceFullRescan: Boolean = false, waitIfBusy: Boolean = false) {
         if (credentialStore.state.value !is ServiceAccountState.Configured) return
         viewModelScope.launch {
-            syncUseCase.syncDeltaOrInitial(forceFullRescan = forceFullRescan)
+            syncUseCase.syncDeltaOrInitial(
+                forceFullRescan = forceFullRescan,
+                waitIfBusy = waitIfBusy
+            )
                 .onFailure { err ->
                     snackbarFlow.value = err.message ?: "Sync failed"
                 }

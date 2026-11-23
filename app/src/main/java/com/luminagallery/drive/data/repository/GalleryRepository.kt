@@ -362,12 +362,17 @@ class GalleryRepository(
      * Performs delta sync via `changes.list` once an initial scan has recorded a `startPageToken`,
      * or executes an initial tree scan of all pinned roots if none has completed yet.
      */
-    suspend fun performSmartSync(forceFullRescan: Boolean = false): Result<Unit> =
+    suspend fun performSmartSync(
+        forceFullRescan: Boolean = false,
+        waitIfBusy: Boolean = false
+    ): Result<Unit> =
         withContext(Dispatchers.IO) {
             if (!networkMonitor.isOnline()) {
                 return@withContext Result.success(Unit)
             }
-            if (!syncMutex.tryLock()) {
+            if (waitIfBusy) {
+                syncMutex.lock()
+            } else if (!syncMutex.tryLock()) {
                 return@withContext Result.success(Unit)
             }
             isSyncingFlow.value = true
@@ -381,9 +386,14 @@ class GalleryRepository(
 
                 if (shouldRunDelta) {
                     runDeltaSyncLocked(state.changesStartPageToken)
-                    // Ensure any pinned root with unindexed children gets its full tree scanned
+                    // Ensure any pinned root (including ones just restored from cloud) has its
+                    // own folder node in drive_items (for breadcrumbs) and its full tree indexed
                     val pinnedRoots = pinnedRootDao.getAll()
                     for (root in pinnedRoots) {
+                        if (itemDao.getById(root.folderId) == null) {
+                            runCatching { driveApi.getFile(root.folderId) }.getOrNull()
+                                ?.let { itemDao.upsert(DriveMapper.dtoToEntity(it)) }
+                        }
                         if (itemDao.getChildCount(root.folderId) == 0) {
                             syncFolderTree(root.folderId)
                         }

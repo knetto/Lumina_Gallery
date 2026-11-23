@@ -6,6 +6,7 @@ import com.luminagallery.drive.data.repository.CloudAlbumLayout
 import com.luminagallery.drive.data.repository.CloudPinnedRoot
 import com.luminagallery.drive.data.repository.CloudPreferencesPayload
 import com.luminagallery.drive.data.repository.CloudProfileSnapshot
+import com.luminagallery.drive.data.repository.CloudProfileSyncManager
 import com.luminagallery.drive.data.repository.LocalAlbumCloudMatcher
 import com.luminagallery.drive.domain.model.AlbumGridItem
 import com.luminagallery.drive.domain.model.DriveFolder
@@ -16,6 +17,7 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -209,5 +211,52 @@ class GalleryCoreLogicTest {
         val encoded = codec.encodeToString(original)
         val decoded = codec.decodeFromString<CloudProfileSnapshot>(encoded)
         assertEquals(original, decoded)
+    }
+
+    @Test
+    fun cloudProfileSnapshot_contentFingerprintIgnoresTimestampsAndOrderButDetectsRealChanges() {
+        val codec = Json {
+            ignoreUnknownKeys = true
+            encodeDefaults = true
+        }
+        val base = CloudProfileSnapshot(
+            updatedAtEpochMs = 1_000L,
+            preferences = CloudPreferencesPayload(gridColumns = 4),
+            pinnedDriveRoots = listOf(
+                CloudPinnedRoot("drive_b", "Trips", pinnedAtEpochMs = 100L, sortOrder = 1),
+                CloudPinnedRoot("drive_a", "Family", pinnedAtEpochMs = 200L, sortOrder = 0)
+            ),
+            collections = listOf(
+                CloudAlbumCollection("col_1", "Travel", null, createdAtEpochMs = 50L)
+            ),
+            driveFavoriteItemIds = listOf("f2", "f1")
+        )
+        // Same logical state with different timestamps & list order
+        val equivalent = base.copy(
+            updatedAtEpochMs = 9_999L,
+            pinnedDriveRoots = base.pinnedDriveRoots.reversed().map { it.copy(pinnedAtEpochMs = 999L) },
+            collections = base.collections.map { it.copy(createdAtEpochMs = 888L) },
+            driveFavoriteItemIds = listOf("f1", "f2", "f1")
+        )
+        assertEquals(base.contentFingerprint(codec), equivalent.contentFingerprint(codec))
+
+        // Unpinning a Drive album or changing a setting MUST alter the fingerprint
+        val afterUnpin = base.copy(pinnedDriveRoots = base.pinnedDriveRoots.take(1))
+        val afterPrefChange = base.copy(preferences = base.preferences.copy(gridColumns = 3))
+        assertNotEquals(base.contentFingerprint(codec), afterUnpin.contentFingerprint(codec))
+        assertNotEquals(base.contentFingerprint(codec), afterPrefChange.contentFingerprint(codec))
+    }
+
+    @Test
+    fun cloudProfileSyncManager_distinguishesScopeDenied403FromRateLimit403() {
+        val scopeError = """{"error":{"code":403,"message":"Request had insufficient authentication scopes.","status":"PERMISSION_DENIED","details":[{"reason":"ACCESS_TOKEN_SCOPE_INSUFFICIENT"}]}}"""
+        val legacyScopeError = """{"error":{"errors":[{"reason":"insufficientPermissions"}],"code":403}}"""
+        val rateLimitError = """{"error":{"errors":[{"reason":"userRateLimitExceeded"}],"code":403,"message":"User rate limit exceeded."}}"""
+        val quotaError = """{"error":{"errors":[{"reason":"storageQuotaExceeded"}],"code":403}}"""
+
+        assertTrue(CloudProfileSyncManager.isScopeDeniedErrorBody(scopeError))
+        assertTrue(CloudProfileSyncManager.isScopeDeniedErrorBody(legacyScopeError))
+        assertFalse(CloudProfileSyncManager.isScopeDeniedErrorBody(rateLimitError))
+        assertFalse(CloudProfileSyncManager.isScopeDeniedErrorBody(quotaError))
     }
 }

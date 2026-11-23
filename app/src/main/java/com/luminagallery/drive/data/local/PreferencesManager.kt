@@ -307,6 +307,15 @@ class PreferencesManager(private val context: Context) {
         }
     }
 
+    suspend fun getCloudProfileDirty(): Boolean =
+        context.galleryDataStore.data.map { it[KEY_CLOUD_PROFILE_DIRTY] ?: false }.first()
+
+    suspend fun setCloudProfileDirty(dirty: Boolean) {
+        context.galleryDataStore.edit { prefs ->
+            prefs[KEY_CLOUD_PROFILE_DIRTY] = dirty
+        }
+    }
+
     companion object {
         const val DEFAULT_CACHE_MB = 500
         const val DEFAULT_GRID_COLUMNS = 4
@@ -338,5 +347,6 @@ class PreferencesManager(private val context: Context) {
         private val KEY_RECENT_SEARCHES = stringPreferencesKey("recent_searches")
         private val KEY_LAST_CLOUD_PROFILE_SYNC_MS = longPreferencesKey("last_cloud_profile_sync_ms")
         private val KEY_PENDING_LOCAL_CLOUD_RULES = stringPreferencesKey("pending_local_cloud_rules")
+        private val KEY_CLOUD_PROFILE_DIRTY = booleanPreferencesKey("cloud_profile_dirty")
     }
 }
