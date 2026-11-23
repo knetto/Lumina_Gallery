@@ -14,6 +14,7 @@ import com.luminagallery.drive.data.remote.auth.DriveAuthInterceptor
 import com.luminagallery.drive.data.remote.auth.ServiceAccountTokenManager
 import com.luminagallery.drive.data.repository.AlbumOrganizationRepository
 import com.luminagallery.drive.data.repository.AppUpdateManager
+import com.luminagallery.drive.data.repository.CloudProfileSyncManager
 import com.luminagallery.drive.data.repository.CoilCacheManager
 import com.luminagallery.drive.data.repository.GalleryExtrasRepository
 import com.luminagallery.drive.data.repository.GalleryRepository
@@ -119,6 +120,20 @@ class AppContainer(context: Context) {
     val syncGalleryUseCase: SyncGalleryUseCase = SyncGalleryUseCase(galleryRepository)
     val manageRootsUseCase: ManageRootsUseCase = ManageRootsUseCase(galleryRepository)
     val exportMediaUseCase: ExportMediaUseCase = ExportMediaUseCase(mediaExportManager)
+
+    val cloudProfileSyncManager: CloudProfileSyncManager = CloudProfileSyncManager(
+        database = database,
+        localMediaRepository = localMediaRepository,
+        preferencesManager = preferencesManager,
+        credentialStore = credentialStore,
+        tokenManager = tokenManager,
+        networkMonitor = networkMonitor,
+        okHttpClient = okHttpClient,
+        json = json,
+        onPinnedRootsRestored = {
+            syncGalleryUseCase.syncDeltaOrInitial(forceFullRescan = false)
+        }
+    )
 }
 
 val LocalAppContainer = staticCompositionLocalOf<AppContainer> {

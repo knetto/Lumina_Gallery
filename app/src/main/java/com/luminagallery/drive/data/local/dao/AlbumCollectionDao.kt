@@ -22,6 +22,12 @@ interface AlbumCollectionDao {
     @Upsert
     suspend fun upsertCollection(collection: AlbumCollectionEntity)
 
+    @Upsert
+    suspend fun upsertCollections(collections: List<AlbumCollectionEntity>)
+
+    @Query("DELETE FROM album_collections")
+    suspend fun clearAllCollections()
+
     @Query("UPDATE album_collections SET name = :newName WHERE id = :collectionId")
     suspend fun renameCollection(collectionId: String, newName: String)
 
@@ -54,4 +60,7 @@ interface AlbumCollectionDao {
 
     @Query("DELETE FROM album_layout WHERE itemId = :itemId")
     suspend fun deleteLayout(itemId: String)
+
+    @Query("DELETE FROM album_layout")
+    suspend fun clearAllLayouts()
 }

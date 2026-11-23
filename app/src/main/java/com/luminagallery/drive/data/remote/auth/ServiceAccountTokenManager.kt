@@ -34,15 +34,31 @@ class ServiceAccountTokenManager(
     @Volatile
     private var cachedOAuthFetchedAtMs: Long = 0L
 
+    /** Tracks whether the active Google OAuth token includes `drive.appdata` for account sync. */
+    @Volatile
+    var hasAppDataScope: Boolean = false
+        private set
+
     fun buildGoogleAuthorizationRequest(): AuthorizationRequest =
+        AuthorizationRequest.builder()
+            .setRequestedScopes(
+                listOf(
+                    Scope(DriveScopes.DRIVE_READONLY),
+                    Scope(DriveScopes.DRIVE_APPDATA)
+                )
+            )
+            .build()
+
+    private fun buildReadOnlyFallbackRequest(): AuthorizationRequest =
         AuthorizationRequest.builder()
             .setRequestedScopes(listOf(Scope(DriveScopes.DRIVE_READONLY)))
             .build()
 
-    fun cacheInteractiveOAuthToken(accessToken: String) {
+    fun cacheInteractiveOAuthToken(accessToken: String, grantedAppDataScope: Boolean = true) {
         synchronized(lock) {
             cachedOAuthToken = accessToken
             cachedOAuthFetchedAtMs = System.currentTimeMillis()
+            hasAppDataScope = grantedAppDataScope
         }
     }
 
@@ -51,7 +67,12 @@ class ServiceAccountTokenManager(
             cachedCredentials = null
             cachedOAuthToken = null
             cachedOAuthFetchedAtMs = 0L
+            hasAppDataScope = false
         }
+    }
+
+    fun markAppDataScopeMissing() {
+        hasAppDataScope = false
     }
 
     fun clearPlayServicesTokenBlocking() {
@@ -114,6 +135,25 @@ class ServiceAccountTokenManager(
         }
 
         if (result.hasResolution()) {
+            // Backward-compatibility for existing sessions that consented to DRIVE_READONLY before
+            // DRIVE_APPDATA was added: fall back silently so Drive photos keep working uninterrupted
+            // until the user taps Sign in once to grant account backup access.
+            val fallbackResult = runCatching {
+                Tasks.await(
+                    client.authorize(buildReadOnlyFallbackRequest()),
+                    PLAY_SERVICES_TIMEOUT_SEC,
+                    TimeUnit.SECONDS
+                )
+            }.getOrNull()
+
+            val fallbackToken = fallbackResult?.takeIf { !it.hasResolution() }?.accessToken
+            if (!fallbackToken.isNullOrBlank()) {
+                cachedOAuthToken = fallbackToken
+                cachedOAuthFetchedAtMs = System.currentTimeMillis()
+                hasAppDataScope = false
+                return fallbackToken
+            }
+
             throw DriveAuthException(
                 "Google Drive access needs one-time re-consent. Open Settings and tap Sign in with Google."
             )
@@ -124,6 +164,7 @@ class ServiceAccountTokenManager(
 
         cachedOAuthToken = freshToken
         cachedOAuthFetchedAtMs = System.currentTimeMillis()
+        hasAppDataScope = true
         return freshToken
     }
 

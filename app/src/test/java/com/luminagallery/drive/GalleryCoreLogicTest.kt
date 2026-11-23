@@ -1,11 +1,23 @@
 package com.luminagallery.drive
 
 import androidx.compose.ui.geometry.Rect
+import com.luminagallery.drive.data.repository.CloudAlbumCollection
+import com.luminagallery.drive.data.repository.CloudAlbumLayout
+import com.luminagallery.drive.data.repository.CloudPinnedRoot
+import com.luminagallery.drive.data.repository.CloudPreferencesPayload
+import com.luminagallery.drive.data.repository.CloudProfileSnapshot
+import com.luminagallery.drive.data.repository.LocalAlbumCloudMatcher
+import com.luminagallery.drive.domain.model.AlbumGridItem
+import com.luminagallery.drive.domain.model.DriveFolder
 import com.luminagallery.drive.ui.components.AlbumTransitionOriginTracker
 import com.luminagallery.drive.ui.components.FormatUtils
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.security.MessageDigest
@@ -65,5 +77,137 @@ class GalleryCoreLogicTest {
         digest.update(payload)
         val hex = digest.digest().joinToString("") { "%02x".format(it) }
         assertEquals("3b18e512dba79e4c8300dd08aeb37f8e728b8dad", hex)
+    }
+
+    @Test
+    fun localAlbumCloudMatcher_matchesAcrossPhonesByIdPathAndUniqueName() {
+        fun localFolder(id: String, name: String, relPath: String) = DriveFolder(
+            id = id,
+            parentId = null,
+            name = name,
+            subfolderCount = 0,
+            mediaCount = 12,
+            coverThumbnailLink = null,
+            coverItemId = null,
+            modifiedTimeEpochMs = 1_000L,
+            isPinned = false,
+            isLocal = true,
+            relativePath = relPath
+        )
+
+        val newPhoneAlbums = listOf(
+            localFolder("local_bucket_100", "Camera", "DCIM/Camera"),
+            localFolder("local_bucket_200", "Vacations", "DCIM/Vacations"),
+            localFolder("local_bucket_300", "Screenshots", "Pictures/Screenshots"),
+            localFolder("local_bucket_400", "Work", "DCIM/Work"),
+            localFolder("local_bucket_500", "Work", "Download/Work")
+        )
+
+        // 1. Exact bucket ID match
+        assertEquals(
+            "local_bucket_100",
+            LocalAlbumCloudMatcher.resolveTargetBucketId(
+                savedBucketId = "local_bucket_100",
+                savedRelativePath = "DCIM/Camera",
+                savedFolderName = "Camera",
+                localAlbums = newPhoneAlbums
+            )
+        )
+
+        // 2. Different bucket ID on new phone, matched by normalized DCIM relativePath (case-insensitive)
+        assertEquals(
+            "local_bucket_200",
+            LocalAlbumCloudMatcher.resolveTargetBucketId(
+                savedBucketId = "local_bucket_old_999",
+                savedRelativePath = "dcim/Vacations/",
+                savedFolderName = "Vacations",
+                localAlbums = newPhoneAlbums
+            )
+        )
+
+        // 3. Cross-OEM folder move (Samsung DCIM/Screenshots -> Xiaomi Pictures/Screenshots) via unique name
+        assertEquals(
+            "local_bucket_300",
+            LocalAlbumCloudMatcher.resolveTargetBucketId(
+                savedBucketId = "local_bucket_samsung_777",
+                savedRelativePath = "DCIM/Screenshots",
+                savedFolderName = "Screenshots",
+                localAlbums = newPhoneAlbums
+            )
+        )
+
+        // 4. Disambiguates duplicate folder names using relativePath
+        assertEquals(
+            "local_bucket_500",
+            LocalAlbumCloudMatcher.resolveTargetBucketId(
+                savedBucketId = "local_bucket_old_work",
+                savedRelativePath = "Download/Work",
+                savedFolderName = "Work",
+                localAlbums = newPhoneAlbums
+            )
+        )
+
+        // 5. Ambiguous folder name with non-matching path returns null rather than guessing wrong album
+        assertNull(
+            LocalAlbumCloudMatcher.resolveTargetBucketId(
+                savedBucketId = "local_bucket_other_work",
+                savedRelativePath = "Pictures/Work",
+                savedFolderName = "Work",
+                localAlbums = newPhoneAlbums
+            )
+        )
+    }
+
+    @Test
+    fun cloudProfileSnapshot_serializesAndDeserializesRoundTrip() {
+        val codec = Json {
+            ignoreUnknownKeys = true
+            encodeDefaults = true
+        }
+        val original = CloudProfileSnapshot(
+            updatedAtEpochMs = 1_760_000_000_000L,
+            preferences = CloudPreferencesPayload(
+                gridColumns = 3,
+                startVideosMuted = true,
+                themeMode = "DARK"
+            ),
+            pinnedDriveRoots = listOf(
+                CloudPinnedRoot(
+                    folderId = "drive_folder_abc",
+                    displayName = "Japan Trip",
+                    pinnedAtEpochMs = 1_750_000_000_000L,
+                    sortOrder = 0
+                )
+            ),
+            collections = listOf(
+                CloudAlbumCollection(
+                    id = "collection_travel",
+                    name = "Travel",
+                    parentCollectionId = null,
+                    createdAtEpochMs = 1_750_000_000_000L
+                )
+            ),
+            layouts = listOf(
+                CloudAlbumLayout(
+                    itemId = "local_bucket_42",
+                    itemKind = AlbumGridItem.KIND_LOCAL,
+                    parentCollectionId = "collection_travel",
+                    sortOrder = 1,
+                    localRelativePath = "DCIM/Vacations",
+                    localFolderName = "Vacations"
+                ),
+                CloudAlbumLayout(
+                    itemId = "drive_folder_abc",
+                    itemKind = AlbumGridItem.KIND_DRIVE,
+                    parentCollectionId = "collection_travel",
+                    sortOrder = 2
+                )
+            ),
+            driveFavoriteItemIds = listOf("drive_photo_1", "drive_photo_2")
+        )
+
+        val encoded = codec.encodeToString(original)
+        val decoded = codec.decodeFromString<CloudProfileSnapshot>(encoded)
+        assertEquals(original, decoded)
     }
 }

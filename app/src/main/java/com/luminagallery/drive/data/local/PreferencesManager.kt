@@ -256,6 +256,57 @@ class PreferencesManager(private val context: Context) {
         }
     }
 
+    /**
+     * Atomically applies settings restored from Google Drive `appDataFolder` while keeping
+     * device-local settings (like Samsung/Xiaomi external gallery package) untouched.
+     */
+    suspend fun applyCloudSyncedPreferences(synced: UserPreferences) {
+        context.galleryDataStore.edit { prefs ->
+            prefs[KEY_MAX_CACHE_MB] = synced.maxCacheSizeMb.coerceIn(250, 2048)
+            prefs[KEY_THEME_MODE] = synced.themeMode.name
+            prefs[KEY_DYNAMIC_COLOR] = synced.dynamicColor
+            prefs[KEY_GRID_COLUMNS] = synced.gridColumns.coerceIn(2, 5)
+            prefs[KEY_BACKGROUND_SYNC] = synced.backgroundSyncEnabled
+            prefs[KEY_ALBUM_SORT_MODE] = synced.albumSortMode.name
+            prefs[KEY_DEFAULT_START_TAB] = synced.defaultStartTab.name
+            prefs[KEY_SHOW_DAY_LOCATIONS] = synced.showDayLocationHeaders
+            prefs[KEY_SHOW_ALBUM_SIDEBAR] = synced.showAlbumSidebarDefault
+            prefs[KEY_SHOW_CLOUD_BADGES] = synced.showCloudBadges
+            prefs[KEY_AUTO_PLAY_VIDEOS] = synced.autoPlayVideos
+            prefs[KEY_START_VIDEOS_MUTED] = synced.startVideosMuted
+            prefs[KEY_LOOP_VIDEOS] = synced.loopVideos
+            prefs[KEY_SHOW_VIEWER_FILMSTRIP] = synced.showViewerFilmstrip
+            prefs[KEY_MAX_VIEWER_BRIGHTNESS] = synced.maxViewerBrightness
+            prefs[KEY_KEEP_SCREEN_ON_VIEWER] = synced.keepScreenOnViewer
+            prefs[KEY_SWIPE_DOWN_DISMISS] = synced.swipeDownToDismiss
+            prefs[KEY_PREFETCH_ADJACENT] = synced.prefetchAdjacentMedia
+            prefs[KEY_WIFI_ONLY_HIGH_RES] = synced.wifiOnlyHighRes
+            prefs[KEY_AUTO_CHECK_UPDATES] = synced.autoCheckUpdates
+        }
+    }
+
+    suspend fun getLastCloudProfileSyncMs(): Long =
+        context.galleryDataStore.data.map { it[KEY_LAST_CLOUD_PROFILE_SYNC_MS] ?: 0L }.first()
+
+    suspend fun setLastCloudProfileSyncMs(epochMs: Long) {
+        context.galleryDataStore.edit { prefs ->
+            prefs[KEY_LAST_CLOUD_PROFILE_SYNC_MS] = epochMs
+        }
+    }
+
+    suspend fun getPendingLocalCloudRulesJson(): String =
+        context.galleryDataStore.data.map { it[KEY_PENDING_LOCAL_CLOUD_RULES].orEmpty() }.first()
+
+    suspend fun setPendingLocalCloudRulesJson(rawJson: String) {
+        context.galleryDataStore.edit { prefs ->
+            if (rawJson.isBlank()) {
+                prefs.remove(KEY_PENDING_LOCAL_CLOUD_RULES)
+            } else {
+                prefs[KEY_PENDING_LOCAL_CLOUD_RULES] = rawJson
+            }
+        }
+    }
+
     companion object {
         const val DEFAULT_CACHE_MB = 500
         const val DEFAULT_GRID_COLUMNS = 4
@@ -285,5 +336,7 @@ class PreferencesManager(private val context: Context) {
         private val KEY_DISMISSED_UPDATE_SHA = stringPreferencesKey("dismissed_update_sha")
         private val KEY_LAST_UPDATE_CHECK_MS = longPreferencesKey("last_update_check_ms")
         private val KEY_RECENT_SEARCHES = stringPreferencesKey("recent_searches")
+        private val KEY_LAST_CLOUD_PROFILE_SYNC_MS = longPreferencesKey("last_cloud_profile_sync_ms")
+        private val KEY_PENDING_LOCAL_CLOUD_RULES = stringPreferencesKey("pending_local_cloud_rules")
     }
 }

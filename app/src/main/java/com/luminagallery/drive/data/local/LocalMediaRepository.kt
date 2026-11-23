@@ -70,6 +70,11 @@ class LocalMediaRepository(private val context: Context) {
     @Volatile
     private var latestMediaByBucket: Map<String, List<MediaItem>> = emptyMap()
 
+    @Volatile
+    private var latestLocalAlbums: List<DriveFolder> = emptyList()
+
+    fun getCachedLocalAlbums(): List<DriveFolder> = latestLocalAlbums
+
     fun getCachedAlbumMedia(bucketId: String): List<MediaItem> = when (bucketId) {
         LOCAL_BUCKET_ALL -> latestAllMedia
         LOCAL_BUCKET_VIDEOS -> latestVideosMedia
@@ -103,6 +108,7 @@ class LocalMediaRepository(private val context: Context) {
                 latestAllMedia = emptyList()
                 latestVideosMedia = emptyList()
                 latestMediaByBucket = emptyMap()
+                latestLocalAlbums = emptyList()
                 return@map IndexedLocalMedia(emptyList(), emptyList(), emptyMap(), emptyList())
             }
 
@@ -116,10 +122,16 @@ class LocalMediaRepository(private val context: Context) {
 
             val albums = grouped.map { (bucketId, items) ->
                 val newest = items.first()
+                val fullStoragePath = newest.storagePath
+                    ?.trim()
+                    ?.trim('/')
+                    ?.takeIf { it.isNotBlank() }
                 val folderName = newest.relativePath
-                    ?.trimEnd('/')
+                    ?.trim()
+                    ?.trim('/')
                     ?.substringAfterLast('/')
                     ?.takeIf { it.isNotBlank() }
+                    ?: fullStoragePath?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
                     ?: "Device Folder"
                 DriveFolder(
                     id = bucketId,
@@ -133,7 +145,8 @@ class LocalMediaRepository(private val context: Context) {
                     isPinned = false,
                     isLocal = true,
                     coverIsVideo = newest.isVideo,
-                    coverSizeBytes = newest.sizeBytes
+                    coverSizeBytes = newest.sizeBytes,
+                    relativePath = fullStoragePath ?: folderName
                 )
             }.sortedWith(
                 compareBy<DriveFolder> { albumPriority(it.name) }
@@ -143,6 +156,7 @@ class LocalMediaRepository(private val context: Context) {
             latestAllMedia = allItems
             latestVideosMedia = videos
             latestMediaByBucket = grouped
+            latestLocalAlbums = albums
 
             IndexedLocalMedia(
                 allItems = allItems,

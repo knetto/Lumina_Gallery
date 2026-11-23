@@ -120,6 +120,7 @@ fun SettingsScreen(
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
 
     var activePicker by remember { mutableStateOf<SettingsPickerSheet?>(null) }
+    var showCloudProfileDialog by remember { mutableStateOf(false) }
     var showSignOutDialog by remember { mutableStateOf(false) }
     var showResetDefaultsDialog by remember { mutableStateOf(false) }
     var showAboutDialog by remember { mutableStateOf(false) }
@@ -132,9 +133,13 @@ fun SettingsScreen(
                 .getAuthorizationResultFromIntent(activityResult.data)
             val token = authResult.accessToken
             if (!token.isNullOrBlank()) {
+                val granted = authResult.grantedScopes
+                val hasAppData = granted.isEmpty() ||
+                    com.luminagallery.drive.data.remote.DriveScopes.DRIVE_APPDATA in granted
                 viewModel.onGoogleSignInSuccess(
                     accessToken = token,
-                    fallbackEmail = authResult.toGoogleSignInAccount()?.email
+                    fallbackEmail = authResult.toGoogleSignInAccount()?.email,
+                    grantedAppDataScope = hasAppData
                 )
             } else {
                 viewModel.showMessage("Google sign-in cancelled")
@@ -158,9 +163,13 @@ fun SettingsScreen(
                 } else {
                     val token = result.accessToken
                     if (!token.isNullOrBlank()) {
+                        val granted = result.grantedScopes
+                        val hasAppData = granted.isEmpty() ||
+                            com.luminagallery.drive.data.remote.DriveScopes.DRIVE_APPDATA in granted
                         viewModel.onGoogleSignInSuccess(
                             accessToken = token,
-                            fallbackEmail = result.toGoogleSignInAccount()?.email
+                            fallbackEmail = result.toGoogleSignInAccount()?.email,
+                            grantedAppDataScope = hasAppData
                         )
                     }
                 }
@@ -256,6 +265,41 @@ fun SettingsScreen(
                             }
                         } else null,
                         onClick = viewModel::triggerDeltaSync
+                    )
+
+                    OneUiDivider()
+
+                    val cloudSync = uiState.cloudProfileSyncStatus
+                    val cloudProfileSubtitle = when {
+                        cloudSync.isSyncing -> "Syncing settings & album layout…"
+                        !isSignedIn -> "Sign in with Google to sync settings, Drive links & nested albums"
+                        cloudSync.needsScopeReconsent -> "Tap to grant backup permission (one-time Google prompt)"
+                        cloudSync.lastSyncedEpochMs > 0L ->
+                            "Backed up · ${FormatUtils.formatLastSync(cloudSync.lastSyncedEpochMs)}"
+                        else -> "Syncs settings, Drive links & nested DCIM album groups"
+                    }
+                    OneUiActionRow(
+                        title = "Account backup & restore",
+                        subtitle = cloudProfileSubtitle,
+                        subtitleAccent = cloudSync.isSyncing || cloudSync.needsScopeReconsent,
+                        enabled = !cloudSync.isSyncing,
+                        showChevron = isSignedIn && !cloudSync.needsScopeReconsent && !cloudSync.isSyncing,
+                        trailingContent = if (cloudSync.isSyncing) {
+                            {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        } else null,
+                        onClick = {
+                            if (!isSignedIn || cloudSync.needsScopeReconsent) {
+                                startGoogleSignIn()
+                            } else {
+                                showCloudProfileDialog = true
+                            }
+                        }
                     )
 
                     OneUiDivider()
@@ -702,6 +746,92 @@ fun SettingsScreen(
     }
 
     // --- Confirmation & About Dialogs ---
+    if (showCloudProfileDialog) {
+        val cloudSync = uiState.cloudProfileSyncStatus
+        AlertDialog(
+            onDismissRequest = { showCloudProfileDialog = false },
+            shape = OneUiGroupShape,
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            title = { Text("Google account backup", fontWeight = FontWeight.SemiBold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        text = "Your Gallery settings, linked Google Drive albums, custom order, and nested album groups (including DCIM folders matched across phones) are saved automatically in your Google Drive's private hidden app data.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (cloudSync.lastSyncedEpochMs > 0L) {
+                        Text(
+                            text = "Last backup: ${FormatUtils.formatLastSync(cloudSync.lastSyncedEpochMs)}",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    cloudSync.lastError?.let { err ->
+                        Text(
+                            text = err,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(16.dp))
+                            .clickable {
+                                showCloudProfileDialog = false
+                                viewModel.backupCloudProfileNow()
+                            }
+                    ) {
+                        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                            Text(
+                                text = "Back up now",
+                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                text = "Upload this phone's settings, Drive links & album groups",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(16.dp))
+                            .clickable {
+                                showCloudProfileDialog = false
+                                viewModel.restoreCloudProfileNow()
+                            }
+                    ) {
+                        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                            Text(
+                                text = "Restore from Google",
+                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = "Apply your saved cloud profile & match local DCIM albums",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showCloudProfileDialog = false }) {
+                    Text("Close", fontWeight = FontWeight.SemiBold)
+                }
+            }
+        )
+    }
+
     if (showSignOutDialog) {
         AlertDialog(
             onDismissRequest = { showSignOutDialog = false },

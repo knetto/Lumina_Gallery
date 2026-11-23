@@ -175,7 +175,8 @@ data class DriveFolder(
     val isLocal: Boolean = false,
     val coverIsVideo: Boolean = false,
     val coverSizeBytes: Long = 0L,
-    val previewCovers: List<AlbumCoverPreview> = emptyList()
+    val previewCovers: List<AlbumCoverPreview> = emptyList(),
+    val relativePath: String? = null
 )
 
 @Immutable

@@ -12,6 +12,8 @@ import com.luminagallery.drive.data.remote.auth.CredentialStore
 import com.luminagallery.drive.data.remote.auth.ServiceAccountTokenManager
 import com.luminagallery.drive.data.repository.AppUpdateManager
 import com.luminagallery.drive.data.repository.AppUpdateState
+import com.luminagallery.drive.data.repository.CloudProfileSyncManager
+import com.luminagallery.drive.data.repository.CloudProfileSyncStatus
 import com.luminagallery.drive.data.repository.CoilCacheManager
 import com.luminagallery.drive.data.repository.GalleryExtrasRepository
 import com.luminagallery.drive.data.repository.GalleryRepository
@@ -46,6 +48,7 @@ data class SettingsUiState(
         cachedFolderCount = 0
     ),
     val syncStatus: SyncStatus = SyncStatus(),
+    val cloudProfileSyncStatus: CloudProfileSyncStatus = CloudProfileSyncStatus(),
     val networkState: NetworkState = NetworkState(),
     val hiddenAlbumCount: Int = 0,
     val ignoredCleanOutCount: Int = 0,
@@ -65,6 +68,7 @@ class SettingsViewModel(
     private val extrasRepository: GalleryExtrasRepository,
     private val offlineMediaManager: OfflineMediaManager,
     private val appUpdateManager: AppUpdateManager,
+    private val cloudProfileSyncManager: CloudProfileSyncManager,
     private val syncUseCase: SyncGalleryUseCase,
     networkMonitor: NetworkMonitor
 ) : ViewModel() {
@@ -119,13 +123,15 @@ class SettingsViewModel(
         credentialStore.state,
         preferencesManager.preferencesFlow,
         storageStatsFlow,
-        localStatusFlow
-    ) { account, prefs, stats, local ->
+        localStatusFlow,
+        cloudProfileSyncManager.status
+    ) { account, prefs, stats, local, cloudSync ->
         SettingsUiState(
             serviceAccountState = account,
             preferences = prefs,
             storageStats = stats,
             syncStatus = local.syncStatus,
+            cloudProfileSyncStatus = cloudSync,
             networkState = local.networkState,
             hiddenAlbumCount = local.hiddenAlbumCount,
             ignoredCleanOutCount = local.ignoredCleanOutCount,
@@ -181,26 +187,104 @@ class SettingsViewModel(
         }
     }
 
-    fun onGoogleSignInSuccess(accessToken: String, fallbackEmail: String?) {
+    fun onGoogleSignInSuccess(
+        accessToken: String,
+        fallbackEmail: String?,
+        grantedAppDataScope: Boolean = true
+    ) {
         viewModelScope.launch {
-            tokenManager.cacheInteractiveOAuthToken(accessToken)
+            tokenManager.cacheInteractiveOAuthToken(
+                accessToken = accessToken,
+                grantedAppDataScope = grantedAppDataScope
+            )
             credentialStore.saveGoogleSignInSession(
                 email = fallbackEmail ?: "Google Account",
                 displayName = null
             )
+            var resolvedEmail = fallbackEmail
             repository.fetchSignedInUserProfile()
                 .onSuccess { (email, displayName) ->
+                    resolvedEmail = email
                     credentialStore.saveGoogleSignInSession(email, displayName)
-                    snackbarFlow.value = "Signed in as $email"
                 }
-                .onFailure {
-                    snackbarFlow.value = "Connected Google account"
+
+            val restoreResult = cloudProfileSyncManager.syncOnSignIn()
+            val summary = restoreResult.getOrNull()
+            if (summary != null && summary.restoredFromCloud) {
+                val parts = buildList {
+                    if (summary.restoredPinnedRootsCount > 0) {
+                        add("${summary.restoredPinnedRootsCount} Drive album(s)")
+                    }
+                    if (summary.restoredCollectionsCount > 0) {
+                        add("${summary.restoredCollectionsCount} group(s)")
+                    }
+                }
+                snackbarFlow.value = if (parts.isNotEmpty()) {
+                    "Restored settings & ${parts.joinToString(", ")} from Google"
+                } else {
+                    "Restored settings & layout from Google"
+                }
+                if (summary.restoredPinnedRootsCount > 0) {
+                    launch { syncUseCase.syncDeltaOrInitial(forceFullRescan = false) }
+                }
+            } else if (restoreResult.isSuccess) {
+                snackbarFlow.value = if (!resolvedEmail.isNullOrBlank()) {
+                    "Signed in as $resolvedEmail · Account backup active"
+                } else {
+                    "Connected Google account · Backup active"
+                }
+            } else {
+                snackbarFlow.value = if (!resolvedEmail.isNullOrBlank()) {
+                    "Signed in as $resolvedEmail"
+                } else {
+                    "Connected Google account"
+                }
+            }
+        }
+    }
+
+    fun backupCloudProfileNow() {
+        viewModelScope.launch {
+            cloudProfileSyncManager.backupToCloudNow()
+                .onSuccess {
+                    snackbarFlow.value = "Backed up settings, Drive links & album groups to Google"
+                }
+                .onFailure { err ->
+                    snackbarFlow.value = err.message ?: "Account backup failed"
+                }
+        }
+    }
+
+    fun restoreCloudProfileNow() {
+        viewModelScope.launch {
+            cloudProfileSyncManager.restoreFromCloudNow()
+                .onSuccess { summary ->
+                    val parts = buildList {
+                        if (summary.restoredPinnedRootsCount > 0) {
+                            add("${summary.restoredPinnedRootsCount} Drive album(s)")
+                        }
+                        if (summary.restoredCollectionsCount > 0) {
+                            add("${summary.restoredCollectionsCount} group(s)")
+                        }
+                    }
+                    snackbarFlow.value = if (parts.isNotEmpty()) {
+                        "Restored settings & ${parts.joinToString(", ")} from Google"
+                    } else {
+                        "Restored settings & layout from Google"
+                    }
+                    if (summary.restoredPinnedRootsCount > 0) {
+                        launch { syncUseCase.syncDeltaOrInitial(forceFullRescan = false) }
+                    }
+                }
+                .onFailure { err ->
+                    snackbarFlow.value = err.message ?: "Restore failed"
                 }
         }
     }
 
     fun signOutGoogleAccount() {
         viewModelScope.launch {
+            cloudProfileSyncManager.onSignedOut()
             withContext(Dispatchers.IO) {
                 tokenManager.clearPlayServicesTokenBlocking()
             }
@@ -424,6 +508,7 @@ class SettingsViewModel(
             extrasRepository = container.galleryExtrasRepository,
             offlineMediaManager = container.offlineMediaManager,
             appUpdateManager = container.appUpdateManager,
+            cloudProfileSyncManager = container.cloudProfileSyncManager,
             syncUseCase = container.syncGalleryUseCase,
             networkMonitor = container.networkMonitor
         ) as T

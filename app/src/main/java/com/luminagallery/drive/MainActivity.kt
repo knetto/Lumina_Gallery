@@ -67,6 +67,8 @@ class MainActivity : ComponentActivity() {
                     dynamicColor = preferences.dynamicColor
                 ) {
                     LaunchedEffect(Unit) {
+                        // Start Google Account profile sync (settings, Drive links, nested albums)
+                        appContainer.cloudProfileSyncManager.startAutoSyncIfSignedIn()
                         // Wait 2 seconds after launch so cold start stays instant, then silently check GitHub
                         delay(2_000L)
                         appContainer.appUpdateManager.checkForUpdate(manual = false)

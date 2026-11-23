@@ -14,6 +14,7 @@ import com.luminagallery.drive.data.remote.NetworkMonitor
 import com.luminagallery.drive.data.remote.auth.CredentialStore
 import com.luminagallery.drive.data.remote.auth.ServiceAccountTokenManager
 import com.luminagallery.drive.data.repository.AlbumOrganizationRepository
+import com.luminagallery.drive.data.repository.CloudProfileSyncManager
 import com.luminagallery.drive.data.repository.GalleryExtrasRepository
 import com.luminagallery.drive.data.repository.GalleryRepository
 import com.luminagallery.drive.domain.model.AlbumGridItem
@@ -37,6 +38,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChangedBy
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
@@ -128,6 +130,7 @@ class HomeViewModel(
     private val organizationRepository: AlbumOrganizationRepository,
     private val extrasRepository: GalleryExtrasRepository,
     private val preferencesManager: PreferencesManager,
+    private val cloudProfileSyncManager: CloudProfileSyncManager,
     private val syncUseCase: SyncGalleryUseCase,
     private val manageRootsUseCase: ManageRootsUseCase,
     private val exportMediaUseCase: ExportMediaUseCase,
@@ -572,28 +575,58 @@ class HomeViewModel(
         pendingShareFlow.value = null
     }
 
-    fun onGoogleSignInSuccess(accessToken: String, fallbackEmail: String?) {
+    fun onGoogleSignInSuccess(
+        accessToken: String,
+        fallbackEmail: String?,
+        grantedAppDataScope: Boolean = true
+    ) {
         viewModelScope.launch {
             setupErrorFlow.value = null
-            tokenManager.cacheInteractiveOAuthToken(accessToken)
+            tokenManager.cacheInteractiveOAuthToken(
+                accessToken = accessToken,
+                grantedAppDataScope = grantedAppDataScope
+            )
             credentialStore.saveGoogleSignInSession(
                 email = fallbackEmail ?: "Google Account",
                 displayName = null
             )
 
+            var resolvedEmail = fallbackEmail
             repository.fetchSignedInUserProfile()
                 .onSuccess { (email, displayName) ->
+                    resolvedEmail = email
                     credentialStore.saveGoogleSignInSession(email, displayName)
-                    snackbarFlow.value = "Signed in as $email"
-                }
-                .onFailure {
-                    snackbarFlow.value = "Connected to Google Drive"
                 }
 
-            if (uiState.value.pinnedRoots.isEmpty()) {
+            val restoreSummary = cloudProfileSyncManager.syncOnSignIn().getOrNull()
+            val hasPinnedRootsNow = repository.observePinnedRoots().first().isNotEmpty() ||
+                (restoreSummary?.restoredPinnedRootsCount ?: 0) > 0
+
+            snackbarFlow.value = when {
+                restoreSummary?.restoredFromCloud == true -> {
+                    val parts = buildList {
+                        if (restoreSummary.restoredPinnedRootsCount > 0) {
+                            add("${restoreSummary.restoredPinnedRootsCount} Drive album(s)")
+                        }
+                        if (restoreSummary.restoredCollectionsCount > 0) {
+                            add("${restoreSummary.restoredCollectionsCount} group(s)")
+                        }
+                    }
+                    if (parts.isNotEmpty()) {
+                        "Restored settings & ${parts.joinToString(", ")} from Google"
+                    } else {
+                        "Restored settings & layout from Google"
+                    }
+                }
+                !resolvedEmail.isNullOrBlank() -> "Signed in as $resolvedEmail"
+                else -> "Connected to Google Drive"
+            }
+
+            if (!hasPinnedRootsNow) {
                 isDriveSheetOpenFlow.value = false
                 openRootPicker(initialTab = 1)
             } else {
+                isDriveSheetOpenFlow.value = false
                 triggerSmartSync()
             }
         }
@@ -892,6 +925,7 @@ class HomeViewModel(
             organizationRepository = container.albumOrganizationRepository,
             extrasRepository = container.galleryExtrasRepository,
             preferencesManager = container.preferencesManager,
+            cloudProfileSyncManager = container.cloudProfileSyncManager,
             syncUseCase = container.syncGalleryUseCase,
             manageRootsUseCase = container.manageRootsUseCase,
             exportMediaUseCase = container.exportMediaUseCase,

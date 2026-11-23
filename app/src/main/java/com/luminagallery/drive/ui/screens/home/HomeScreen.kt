@@ -242,9 +242,13 @@ fun HomeScreen(
                 .getAuthorizationResultFromIntent(activityResult.data)
             val token = authResult.accessToken
             if (!token.isNullOrBlank()) {
+                val granted = authResult.grantedScopes
+                val hasAppData = granted.isEmpty() ||
+                    com.luminagallery.drive.data.remote.DriveScopes.DRIVE_APPDATA in granted
                 viewModel.onGoogleSignInSuccess(
                     accessToken = token,
-                    fallbackEmail = authResult.toGoogleSignInAccount()?.email
+                    fallbackEmail = authResult.toGoogleSignInAccount()?.email,
+                    grantedAppDataScope = hasAppData
                 )
             } else {
                 viewModel.onGoogleSignInError("Google sign-in was cancelled.")
@@ -276,9 +280,13 @@ fun HomeScreen(
                     isSigningInWithGoogle = false
                     val token = result.accessToken
                     if (!token.isNullOrBlank()) {
+                        val granted = result.grantedScopes
+                        val hasAppData = granted.isEmpty() ||
+                            com.luminagallery.drive.data.remote.DriveScopes.DRIVE_APPDATA in granted
                         viewModel.onGoogleSignInSuccess(
                             accessToken = token,
-                            fallbackEmail = result.toGoogleSignInAccount()?.email
+                            fallbackEmail = result.toGoogleSignInAccount()?.email,
+                            grantedAppDataScope = hasAppData
                         )
                     } else {
                         viewModel.onGoogleSignInError("Empty access token returned.")

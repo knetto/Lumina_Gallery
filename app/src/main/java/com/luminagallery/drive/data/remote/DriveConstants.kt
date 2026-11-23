@@ -2,6 +2,7 @@ package com.luminagallery.drive.data.remote
 
 object DriveScopes {
     const val DRIVE_READONLY: String = "https://www.googleapis.com/auth/drive.readonly"
+    const val DRIVE_APPDATA: String = "https://www.googleapis.com/auth/drive.appdata"
 }
 
 object DriveConstants {

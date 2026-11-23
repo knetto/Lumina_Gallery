@@ -19,8 +19,14 @@ interface GalleryExtrasDao {
     @Query("SELECT itemId FROM favorite_items")
     fun observeFavoriteItemIds(): Flow<List<String>>
 
+    @Query("SELECT itemId FROM favorite_items")
+    suspend fun getAllFavoriteItemIds(): List<String>
+
     @Upsert
     suspend fun upsertFavoriteItem(item: FavoriteItemEntity)
+
+    @Upsert
+    suspend fun upsertFavoriteItems(items: List<FavoriteItemEntity>)
 
     @Query("DELETE FROM favorite_items WHERE itemId = :itemId")
     suspend fun removeFavoriteItem(itemId: String)
@@ -28,8 +34,14 @@ interface GalleryExtrasDao {
     @Query("SELECT albumId FROM hidden_albums")
     fun observeHiddenAlbumIds(): Flow<List<String>>
 
+    @Query("SELECT albumId FROM hidden_albums")
+    suspend fun getAllHiddenAlbumIds(): List<String>
+
     @Upsert
     suspend fun upsertHiddenAlbum(album: HiddenAlbumEntity)
+
+    @Upsert
+    suspend fun upsertHiddenAlbums(albums: List<HiddenAlbumEntity>)
 
     @Query("DELETE FROM hidden_albums WHERE albumId = :albumId")
     suspend fun removeHiddenAlbum(albumId: String)

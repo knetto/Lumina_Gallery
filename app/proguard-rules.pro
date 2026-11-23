@@ -23,6 +23,13 @@
 -keepclasseswithmembers class com.luminagallery.drive.ui.navigation.** {
     kotlinx.serialization.KSerializer serializer(...);
 }
+-keep,includedescriptorclasses class com.luminagallery.drive.data.repository.**$$serializer { *; }
+-keepclassmembers class com.luminagallery.drive.data.repository.** {
+    *** Companion;
+}
+-keepclasseswithmembers class com.luminagallery.drive.data.repository.** {
+    kotlinx.serialization.KSerializer serializer(...);
+}
 
 # Retrofit 2
 -keepattributes Signature, Exceptions, RuntimeVisibleAnnotations, RuntimeVisibleParameterAnnotations
