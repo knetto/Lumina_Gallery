@@ -356,6 +356,8 @@ fun LuminaNavGraph(
                         originTracker.setMorphEnabled(targetState.id, true)
                         holdStillEnter(OneUiMotion.MORPH_OPEN_MS)
                     },
+                    exitTransition = null,
+                    popEnterTransition = null,
                     popExitTransition = {
                         originTracker.setMorphEnabled(initialState.id, true)
                         holdStillExit(OneUiMotion.MORPH_CLOSE_MS)
@@ -413,6 +415,8 @@ fun LuminaNavGraph(
                         originTracker.setMorphEnabled(targetState.id, true)
                         holdStillEnter(OneUiMotion.MORPH_OPEN_MS)
                     },
+                    exitTransition = null,
+                    popEnterTransition = null,
                     popExitTransition = {
                         originTracker.setMorphEnabled(initialState.id, true)
                         holdStillExit(OneUiMotion.MORPH_CLOSE_MS)

@@ -103,4 +103,22 @@ class UiSafetyAuditTest {
             navGraph.contains("delayMillis = 55")
         )
     }
+
+    @Test
+    fun navGraph_morphParentRoutesOverridePopEnterTransitionSoChildCloseNeverZoomsPage() {
+        val navGraph = File(
+            projectSrcRoot(),
+            "java/com/luminagallery/drive/ui/navigation/LuminaNavGraph.kt"
+        ).readText()
+        val folderBlock = navGraph.substringAfter("composable<FolderRoute>(").substringBefore(") { backStackEntry ->")
+        val collectionBlock = navGraph.substringAfter("composable<CollectionRoute>(").substringBefore(") { backStackEntry ->")
+        assertTrue(
+            "FolderRoute must explicitly set popEnterTransition = null so closing Viewer doesn't re-run album enter morph",
+            folderBlock.contains("popEnterTransition = null")
+        )
+        assertTrue(
+            "CollectionRoute must explicitly set popEnterTransition = null so closing a child album doesn't re-run collection enter morph",
+            collectionBlock.contains("popEnterTransition = null")
+        )
+    }
 }
