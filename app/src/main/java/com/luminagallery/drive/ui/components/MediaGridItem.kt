@@ -44,6 +44,8 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -91,6 +93,9 @@ fun MediaGridItem(
 ) {
     val context = LocalContext.current
     val imageLoader = LocalGalleryImageLoader.current
+    val originTracker = LocalAlbumTransitionOrigin.current
+    val displayMetrics = context.resources.displayMetrics
+    val tileCenter = remember { floatArrayOf(0.5f, 0.5f) }
 
     // Avoid allocating selection spring animations per tile during normal 120Hz scrolling
     val insetPadding = if (isSelectionMode) {
@@ -98,7 +103,7 @@ fun MediaGridItem(
             targetValue = if (isSelected) 7.dp else 0.dp,
             animationSpec = SelectionSpringSpec,
             label = "selectionInset"
-        ).value
+        ).value.coerceAtLeast(0.dp)
     } else {
         0.dp
     }
@@ -108,7 +113,7 @@ fun MediaGridItem(
             targetValue = if (isSelected) 10.dp else 0.dp,
             animationSpec = SelectionSpringSpec,
             label = "selectionRadius"
-        ).value
+        ).value.coerceAtLeast(0.dp)
     } else {
         0.dp
     }
@@ -155,18 +160,23 @@ fun MediaGridItem(
         label = "mediaTilePress"
     )
 
+    val handleClick: () -> Unit = {
+        originTracker.record("media_${item.id}", tileCenter[0], tileCenter[1])
+        onClick()
+    }
+
     val clickModifier = if (onLongClick != null) {
         Modifier.combinedClickable(
             interactionSource = interactionSource,
             indication = null,
-            onClick = onClick,
+            onClick = handleClick,
             onLongClick = onLongClick
         )
     } else {
         Modifier.clickable(
             interactionSource = interactionSource,
             indication = null,
-            onClick = onClick
+            onClick = handleClick
         )
     }
 
@@ -174,6 +184,13 @@ fun MediaGridItem(
         modifier = modifier
             .fillMaxWidth()
             .aspectRatio(1f)
+            .onGloballyPositioned { coords ->
+                val bounds = coords.boundsInWindow()
+                val w = displayMetrics.widthPixels.toFloat().coerceAtLeast(1f)
+                val h = displayMetrics.heightPixels.toFloat().coerceAtLeast(1f)
+                tileCenter[0] = bounds.center.x / w
+                tileCenter[1] = bounds.center.y / h
+            }
             .graphicsLayer {
                 if (pressScale != 1f) {
                     scaleX = pressScale
@@ -195,20 +212,15 @@ fun MediaGridItem(
             Modifier.fillMaxSize()
         }
 
-        val tileModifier = with(sharedTransitionScope) {
-            baseTileMod.sharedElement(
-                sharedContentState = rememberSharedContentState(key = "media_${item.id}"),
-                animatedVisibilityScope = animatedVisibilityScope,
-                boundsTransform = OneUiMotion.SharedPhotoBoundsTransform
-            )
-        }
-
+        // Note: Intentionally avoid Modifier.sharedElement() here because it hides the grid tile
+        // behind a black hole during Android Predictive Back scrubbing; instead, LuminaNavGraph
+        // runs a 120Hz origin-tracked zoom-bloom directly out of (tileCenterX, tileCenterY)!
         AsyncImage(
             model = imageRequest,
             imageLoader = imageLoader,
             contentDescription = item.name,
             contentScale = ContentScale.Crop,
-            modifier = tileModifier.background(MaterialTheme.colorScheme.surfaceContainer)
+            modifier = baseTileMod.background(MaterialTheme.colorScheme.surfaceContainer)
         )
 
         if (isPressed) {

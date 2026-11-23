@@ -11,8 +11,10 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
@@ -152,25 +154,28 @@ fun LuminaNavGraph(
     }
 
     CompositionLocalProvider(LocalAlbumTransitionOrigin provides originTracker) {
-        Box(modifier = Modifier.fillMaxSize()) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.background)
+        ) {
         SharedTransitionLayout {
             NavHost(
                 navController = navController,
                 startDestination = HomeRoute,
                 enterTransition = {
-                    slideInHorizontally(tween(320, easing = OneUiNavEasing)) { it / 5 } +
-                        scaleIn(tween(320, easing = OneUiNavEasing), initialScale = 0.95f) +
-                        fadeIn(tween(200, easing = LinearOutSlowInEasing))
+                    slideInHorizontally(tween(280, easing = OneUiNavEasing)) { it } +
+                        fadeIn(tween(140, easing = LinearOutSlowInEasing))
                 },
                 exitTransition = {
                     when {
                         targetState.destination.hasRoute<ViewerRoute>() -> {
-                            // Keep parent rock-solid for seamless 120Hz sharedElement photo morph!
-                            fadeOut(tween(200))
+                            // Keep parent grid completely solid underneath so no black gap ever appears
+                            scaleOut(tween(240, easing = OneUiAlbumEasing), targetScale = 0.96f) +
+                                fadeOut(tween(220), targetAlpha = 0.85f)
                         }
                         targetState.destination.hasRoute<FolderRoute>() ||
                             targetState.destination.hasRoute<CollectionRoute>() -> {
-                            // Authentic Samsung One UI forward dive-through parallax into the tapped album card!
                             val key = runCatching {
                                 if (targetState.destination.hasRoute<FolderRoute>()) {
                                     targetState.toRoute<FolderRoute>().folderId
@@ -179,21 +184,23 @@ fun LuminaNavGraph(
                                 }
                             }.getOrNull()
                             scaleOut(
-                                animationSpec = tween(300, easing = OneUiAlbumEasing),
-                                targetScale = 1.07f,
+                                animationSpec = tween(260, easing = OneUiAlbumEasing),
+                                targetScale = 1.05f,
                                 transformOrigin = originTracker.originFor(key)
-                            ) + fadeOut(tween(150, easing = LinearOutSlowInEasing))
+                            ) + fadeOut(tween(200), targetAlpha = 0.72f)
                         }
                         else -> {
-                            scaleOut(tween(300, easing = OneUiNavEasing), targetScale = 0.95f) +
-                                fadeOut(tween(180))
+                            slideOutHorizontally(tween(280, easing = OneUiNavEasing)) { -it / 5 } +
+                                fadeOut(tween(240), targetAlpha = 0.78f)
                         }
                     }
                 },
                 popEnterTransition = {
                     when {
                         initialState.destination.hasRoute<ViewerRoute>() -> {
-                            fadeIn(tween(180))
+                            // Underlying grid is IMMEDIATELY solid during predictive back swipe (zero black block!)
+                            scaleIn(tween(240, easing = OneUiAlbumEasing), initialScale = 0.96f) +
+                                fadeIn(tween(120), initialAlpha = 0.92f)
                         }
                         initialState.destination.hasRoute<FolderRoute>() ||
                             initialState.destination.hasRoute<CollectionRoute>() -> {
@@ -205,21 +212,21 @@ fun LuminaNavGraph(
                                 }
                             }.getOrNull()
                             scaleIn(
-                                animationSpec = tween(270, easing = OneUiAlbumEasing),
-                                initialScale = 1.07f,
+                                animationSpec = tween(250, easing = OneUiAlbumEasing),
+                                initialScale = 1.05f,
                                 transformOrigin = originTracker.originFor(key)
-                            ) + fadeIn(tween(160, easing = LinearOutSlowInEasing))
+                            ) + fadeIn(tween(120), initialAlpha = 0.90f)
                         }
                         else -> {
-                            scaleIn(tween(280, easing = OneUiNavEasing), initialScale = 0.95f) +
-                                fadeIn(tween(200))
+                            // Crisp One UI / HyperOS parallax reveal on back swipe — stays solid underneath!
+                            slideInHorizontally(tween(260, easing = OneUiNavEasing)) { -it / 5 } +
+                                fadeIn(tween(120), initialAlpha = 0.88f)
                         }
                     }
                 },
                 popExitTransition = {
-                    slideOutHorizontally(tween(280, easing = OneUiNavEasing)) { it / 5 } +
-                        scaleOut(tween(280, easing = OneUiNavEasing), targetScale = 0.95f) +
-                        fadeOut(tween(180))
+                    // Full 1:1 edge-to-edge slide-out for buttery predictive back swipe tracking!
+                    slideOutHorizontally(tween(260, easing = OneUiNavEasing)) { it }
                 }
             ) {
                 composable<HomeRoute> { backStackEntry ->
@@ -326,18 +333,19 @@ fun LuminaNavGraph(
                 enterTransition = {
                     val key = runCatching { targetState.toRoute<CollectionRoute>().collectionId }.getOrNull()
                     scaleIn(
-                        animationSpec = tween(300, easing = OneUiAlbumEasing),
-                        initialScale = 0.80f,
+                        animationSpec = tween(280, easing = OneUiAlbumEasing),
+                        initialScale = 0.85f,
                         transformOrigin = originTracker.originFor(key)
-                    ) + fadeIn(tween(120, easing = LinearOutSlowInEasing))
+                    ) + fadeIn(tween(130, easing = LinearOutSlowInEasing))
                 },
                 popExitTransition = {
+                    // Clean zero-delay dissolve + gentle zoom-back so predictive back never shows a floating black block!
                     val key = runCatching { initialState.toRoute<CollectionRoute>().collectionId }.getOrNull()
                     scaleOut(
-                        animationSpec = tween(250, easing = OneUiAlbumEasing),
-                        targetScale = 0.80f,
+                        animationSpec = tween(240, easing = OneUiAlbumEasing),
+                        targetScale = 0.88f,
                         transformOrigin = originTracker.originFor(key)
-                    ) + fadeOut(tween(130, delayMillis = 55, easing = FastOutLinearInEasing))
+                    ) + fadeOut(tween(180, easing = LinearOutSlowInEasing))
                 }
             ) { backStackEntry ->
                 val route = backStackEntry.toRoute<CollectionRoute>()
@@ -378,18 +386,19 @@ fun LuminaNavGraph(
                 enterTransition = {
                     val key = runCatching { targetState.toRoute<FolderRoute>().folderId }.getOrNull()
                     scaleIn(
-                        animationSpec = tween(300, easing = OneUiAlbumEasing),
-                        initialScale = 0.80f,
+                        animationSpec = tween(280, easing = OneUiAlbumEasing),
+                        initialScale = 0.85f,
                         transformOrigin = originTracker.originFor(key)
-                    ) + fadeIn(tween(120, easing = LinearOutSlowInEasing))
+                    ) + fadeIn(tween(130, easing = LinearOutSlowInEasing))
                 },
                 popExitTransition = {
+                    // Clean zero-delay dissolve + gentle zoom-back so predictive back never shows a floating black block!
                     val key = runCatching { initialState.toRoute<FolderRoute>().folderId }.getOrNull()
                     scaleOut(
-                        animationSpec = tween(250, easing = OneUiAlbumEasing),
-                        targetScale = 0.80f,
+                        animationSpec = tween(240, easing = OneUiAlbumEasing),
+                        targetScale = 0.88f,
                         transformOrigin = originTracker.originFor(key)
-                    ) + fadeOut(tween(130, delayMillis = 55, easing = FastOutLinearInEasing))
+                    ) + fadeOut(tween(180, easing = LinearOutSlowInEasing))
                 }
             ) { backStackEntry ->
                 val route = backStackEntry.toRoute<FolderRoute>()
@@ -476,12 +485,26 @@ fun LuminaNavGraph(
                 )
             }
 
-            // Pure fast fade for ViewerRoute so Modifier.sharedElement photo morphs stay buttery 120Hz
+            // Silky 120Hz origin-tracked zoom-bloom for ViewerRoute — 100% predictive-back-safe (no black tile holes!)
             composable<ViewerRoute>(
-                enterTransition = { fadeIn(animationSpec = tween(240, easing = OneUiNavEasing)) },
-                exitTransition = { fadeOut(animationSpec = tween(180)) },
-                popEnterTransition = { fadeIn(animationSpec = tween(200)) },
-                popExitTransition = { fadeOut(animationSpec = tween(200)) }
+                enterTransition = {
+                    val key = runCatching { "media_${targetState.toRoute<ViewerRoute>().initialItemId}" }.getOrNull()
+                    scaleIn(
+                        animationSpec = tween(240, easing = OneUiAlbumEasing),
+                        initialScale = 0.86f,
+                        transformOrigin = originTracker.originFor(key)
+                    ) + fadeIn(tween(150, easing = LinearOutSlowInEasing))
+                },
+                exitTransition = { fadeOut(tween(150)) },
+                popEnterTransition = { fadeIn(tween(140), initialAlpha = 0.90f) },
+                popExitTransition = {
+                    val key = runCatching { "media_${initialState.toRoute<ViewerRoute>().initialItemId}" }.getOrNull()
+                    scaleOut(
+                        animationSpec = tween(220, easing = OneUiAlbumEasing),
+                        targetScale = 0.88f,
+                        transformOrigin = originTracker.originFor(key)
+                    ) + fadeOut(tween(170, easing = LinearOutSlowInEasing))
+                }
             ) { backStackEntry ->
                 val route = backStackEntry.toRoute<ViewerRoute>()
                 val mediaType = route.mediaTypeName?.let {

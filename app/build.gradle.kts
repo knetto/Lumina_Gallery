@@ -170,4 +170,7 @@ dependencies {
 
     // MapLibre Native 120Hz Vector Map (API-key-free OpenFreeMap tiles)
     implementation(libs.maplibre.android.sdk)
+
+    // JVM Unit Tests
+    testImplementation("junit:junit:4.13.2")
 }

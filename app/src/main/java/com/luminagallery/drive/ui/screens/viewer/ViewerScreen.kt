@@ -1,8 +1,10 @@
 package com.luminagallery.drive.ui.screens.viewer
 
 import android.app.Activity
+import android.view.LayoutInflater
 import android.view.ViewGroup
 import android.view.WindowManager
+import com.luminagallery.drive.R
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -393,25 +395,10 @@ fun ViewerScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .navigationBarsPadding()
-                .padding(bottom = bottomDockClearance)
+                .padding(bottom = bottomDockClearance.coerceAtLeast(0.dp))
         ) { page ->
             val pageItem = items.getOrNull(page) ?: return@HorizontalPager
             val isActivePage = page == pagerState.currentPage
-            val isSettledPage = page == pagerState.settledPage
-
-            // Attach sharedElement ONLY on the settled page so Compose never detaches/reattaches
-            // shared transition nodes mid-drag while the user's finger is swiping the pager!
-            val sharedModifier = if (isSettledPage) {
-                with(sharedTransitionScope) {
-                    Modifier.sharedElement(
-                        sharedContentState = rememberSharedContentState(key = "media_${pageItem.id}"),
-                        animatedVisibilityScope = animatedVisibilityScope,
-                        boundsTransform = OneUiMotion.SharedPhotoBoundsTransform
-                    )
-                }
-            } else {
-                Modifier
-            }
 
             if (pageItem.isVideo) {
                 VideoPlayerPage(
@@ -432,8 +419,7 @@ fun ViewerScreen(
                         if (isActivePage) viewModel.openExifSheet(pageItem)
                     },
                     onFrameCapturedMessage = viewModel::showMessage,
-                    onDismiss = onDismiss,
-                    modifier = sharedModifier
+                    onDismiss = onDismiss
                 )
             } else {
                 ZoomablePhotoPage(
@@ -455,8 +441,7 @@ fun ViewerScreen(
                     onSwipeUpForDetails = {
                         if (isActivePage) viewModel.openExifSheet(pageItem)
                     },
-                    onDismiss = onDismiss,
-                    modifier = sharedModifier
+                    onDismiss = onDismiss
                 )
             }
         }
@@ -1831,7 +1816,7 @@ private fun ZoomablePhotoPage(
         if (motionPlayer != null) {
             AndroidView(
                 factory = { ctx ->
-                    PlayerView(ctx).apply {
+                    (LayoutInflater.from(ctx).inflate(R.layout.view_exo_texture_player, null) as PlayerView).apply {
                         useController = false
                         resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                         setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)

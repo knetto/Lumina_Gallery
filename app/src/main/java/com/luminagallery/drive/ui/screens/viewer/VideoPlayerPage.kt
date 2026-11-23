@@ -8,10 +8,12 @@ import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
+import android.view.LayoutInflater
 import android.view.PixelCopy
 import android.view.SurfaceView
 import android.view.TextureView
 import android.view.ViewGroup
+import com.luminagallery.drive.R
 import androidx.annotation.OptIn
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
@@ -427,10 +429,10 @@ fun VideoPlayerPage(
         if (exoPlayer != null) {
             AndroidView(
                 factory = { ctx ->
-                    PlayerView(ctx).apply {
+                    (LayoutInflater.from(ctx).inflate(R.layout.view_exo_texture_player, null) as PlayerView).apply {
                         useController = false
                         resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-                        setShutterBackgroundColor(android.graphics.Color.BLACK)
+                        setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
                         layoutParams = ViewGroup.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.MATCH_PARENT
