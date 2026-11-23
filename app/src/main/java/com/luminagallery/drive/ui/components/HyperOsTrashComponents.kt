@@ -1,5 +1,6 @@
 package com.luminagallery.drive.ui.components
 
+import android.os.Build
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
@@ -119,43 +120,64 @@ fun HyperOsTrashConfirmSheet(
     val sizeLabel = remember(totalBytes) {
         if (totalBytes > 0L) FormatUtils.formatFileSize(totalBytes) else null
     }
+    val hasDirectFileItems = remember(items) {
+        items.any { it.localContentUri?.startsWith("file://") == true }
+    }
+    val allDirectFileItems = remember(items) {
+        items.all { it.localContentUri?.startsWith("file://") == true }
+    }
+    val supportsSystemTrash = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+    val effectivePermanentDelete = mode == TrashConfirmMode.DELETE_PERMANENTLY ||
+        (mode == TrashConfirmMode.MOVE_TO_TRASH && (allDirectFileItems || !supportsSystemTrash))
 
-    val title = when (mode) {
-        TrashConfirmMode.MOVE_TO_TRASH ->
+    val title = when {
+        effectivePermanentDelete ->
+            if (count == 1) "Delete permanently?" else "Permanently delete $count items?"
+        mode == TrashConfirmMode.MOVE_TO_TRASH ->
             if (count == 1) {
                 if (items.first().isVideo) "Move video to trash?" else "Move photo to trash?"
             } else {
                 "Move $count items to trash?"
             }
-        TrashConfirmMode.RESTORE_FROM_TRASH ->
+        else ->
             if (count == 1) "Restore item from trash?" else "Restore $count items?"
-        TrashConfirmMode.DELETE_PERMANENTLY ->
-            if (count == 1) "Delete permanently?" else "Permanently delete $count items?"
     }
 
-    val subtitle = when (mode) {
-        TrashConfirmMode.MOVE_TO_TRASH -> buildString {
+    val subtitle = when {
+        mode == TrashConfirmMode.MOVE_TO_TRASH && allDirectFileItems -> buildString {
+            if (sizeLabel != null) append("Frees $sizeLabel · ")
+            append("Locked album items are deleted permanently and cannot be restored from Trash.")
+        }
+        mode == TrashConfirmMode.MOVE_TO_TRASH && !supportsSystemTrash -> buildString {
+            if (sizeLabel != null) append("Frees $sizeLabel · ")
+            append("Android ${Build.VERSION.RELEASE} deletes media permanently without a Trash bin.")
+        }
+        mode == TrashConfirmMode.MOVE_TO_TRASH && hasDirectFileItems -> buildString {
+            if (sizeLabel != null) append("$sizeLabel · ")
+            append("Standard items move to Trash for 30 days. Locked album files are deleted permanently.")
+        }
+        mode == TrashConfirmMode.MOVE_TO_TRASH -> buildString {
             if (sizeLabel != null) append("$sizeLabel · ")
             append("Items in Trash are deleted after 30 days.")
         }
-        TrashConfirmMode.RESTORE_FROM_TRASH ->
+        mode == TrashConfirmMode.RESTORE_FROM_TRASH ->
             "Restored items will return to their original albums."
-        TrashConfirmMode.DELETE_PERMANENTLY -> buildString {
+        else -> buildString {
             if (sizeLabel != null) append("Frees $sizeLabel · ")
             append("This action cannot be undone.")
         }
     }
 
-    val confirmLabel = when (mode) {
-        TrashConfirmMode.MOVE_TO_TRASH -> "Move to trash"
-        TrashConfirmMode.RESTORE_FROM_TRASH -> "Restore"
-        TrashConfirmMode.DELETE_PERMANENTLY -> "Delete"
+    val confirmLabel = when {
+        effectivePermanentDelete -> "Delete permanently"
+        mode == TrashConfirmMode.MOVE_TO_TRASH -> "Move to trash"
+        else -> "Restore"
     }
 
-    val badgeIcon = when (mode) {
-        TrashConfirmMode.MOVE_TO_TRASH -> Icons.Rounded.DeleteOutline
-        TrashConfirmMode.RESTORE_FROM_TRASH -> Icons.Rounded.RestoreFromTrash
-        TrashConfirmMode.DELETE_PERMANENTLY -> Icons.Rounded.DeleteForever
+    val badgeIcon = when {
+        effectivePermanentDelete -> Icons.Rounded.DeleteForever
+        mode == TrashConfirmMode.MOVE_TO_TRASH -> Icons.Rounded.DeleteOutline
+        else -> Icons.Rounded.RestoreFromTrash
     }
 
     var visible by remember { mutableStateOf(false) }

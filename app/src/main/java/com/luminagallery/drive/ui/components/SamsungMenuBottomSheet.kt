@@ -22,6 +22,7 @@ import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.LocationOn
+import androidx.compose.material.icons.outlined.PhotoCamera
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.SmartDisplay
@@ -63,11 +64,12 @@ fun SamsungMenuBottomSheet(
     onGoogleDriveClick: () -> Unit,
     onCleanOutClick: () -> Unit,
     onTrashClick: () -> Unit,
-    onSettingsClick: () -> Unit
+    onSettingsClick: () -> Unit,
+    onCameraClick: (() -> Unit)? = null
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    val sheetSurface = Color(0xFF232326)
-    val pillSurface = Color(0xFF36363A)
+    val sheetSurface = MaterialTheme.colorScheme.surfaceContainerHigh
+    val pillSurface = MaterialTheme.colorScheme.surfaceContainerHighest
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -169,6 +171,17 @@ fun SamsungMenuBottomSheet(
                     modifier = Modifier.weight(1f)
                 )
             }
+
+            if (onCameraClick != null) {
+                MenuWidePill(
+                    icon = Icons.Outlined.PhotoCamera,
+                    label = "Open Camera",
+                    pillColor = pillSurface,
+                    staggerDelayMs = 135L,
+                    onClick = { onDismiss(); onCameraClick() },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
         }
     }
 }
@@ -211,8 +224,8 @@ private fun MenuCircleItem(
         ) {
             Icon(
                 imageVector = icon,
-                contentDescription = label,
-                tint = Color.White.copy(alpha = 0.94f),
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.size(24.dp)
             )
         }
@@ -220,7 +233,7 @@ private fun MenuCircleItem(
             text = label,
             fontSize = 12.5.sp,
             fontWeight = FontWeight.Normal,
-            color = Color.White.copy(alpha = 0.9f),
+            color = MaterialTheme.colorScheme.onSurface,
             maxLines = 1
         )
     }
@@ -262,15 +275,15 @@ private fun MenuWidePill(
         ) {
             Icon(
                 imageVector = icon,
-                contentDescription = label,
-                tint = Color.White.copy(alpha = 0.92f),
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.size(20.dp)
             )
             Spacer(Modifier.width(10.dp))
             Text(
                 text = label,
                 style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Medium),
-                color = Color.White.copy(alpha = 0.94f),
+                color = MaterialTheme.colorScheme.onSurface,
                 maxLines = 1
             )
         }

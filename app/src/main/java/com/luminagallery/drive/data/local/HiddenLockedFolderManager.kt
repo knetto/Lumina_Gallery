@@ -27,6 +27,7 @@ import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 
 data class HiddenFolderMoveResult(
     val hiddenDirPath: String,
@@ -44,6 +45,16 @@ data class HiddenFolderMoveResult(
  *    after a reinstall or clear-data.
  */
 class HiddenLockedFolderManager(private val context: Context) {
+
+    private data class CachedFileMeta(
+        val lastModified: Long,
+        val length: Long,
+        val width: Int?,
+        val height: Int?,
+        val durationMs: Long?
+    )
+
+    private val fileMetaCache = ConcurrentHashMap<String, CachedFileMeta>()
 
     fun requiresAllFilesPermission(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
 
@@ -214,9 +225,11 @@ class HiddenLockedFolderManager(private val context: Context) {
                     }
                 } else {
                     // Destination already recreated (e.g. new camera photos taken while locked):
-                    // merge hidden files cleanly into desiredTarget without overwriting anything.
+                    // recursively merge all hidden files & subdirectories cleanly before removing hiddenDir.
                     mergeDirectoryContents(sourceDir = hiddenDir, destDir = desiredTarget)
-                    hiddenDir.deleteRecursively()
+                    if (isDirectoryEffectivelyEmpty(hiddenDir)) {
+                        hiddenDir.deleteRecursively()
+                    }
                     desiredTarget
                 }
 
@@ -243,7 +256,8 @@ class HiddenLockedFolderManager(private val context: Context) {
         val dir = File(dirPath)
         if (!dir.exists() || !dir.isDirectory) return emptyList()
 
-        val files = dir.listFiles() ?: return emptyList()
+        val files = collectMediaFilesRecursively(dir)
+        if (files.isEmpty()) return emptyList()
         val zone = ZoneId.systemDefault()
         val currentYear = LocalDate.now(zone).year
         val displayFolderName = entity.displayName?.takeIf { it.isNotBlank() }
@@ -267,7 +281,9 @@ class HiddenLockedFolderManager(private val context: Context) {
                 else -> MediaType.PHOTO
             }
 
-            val epochMs = file.lastModified().takeIf { it > 0L } ?: System.currentTimeMillis()
+            val lastMod = file.lastModified()
+            val fileLen = file.length()
+            val epochMs = lastMod.takeIf { it > 0L } ?: System.currentTimeMillis()
             val zdt = Instant.ofEpochMilli(epochMs).atZone(zone)
             val monthYear = MONTH_YEAR_FMT.format(zdt)
             val fullDate = FULL_DATE_FMT.format(zdt)
@@ -277,37 +293,44 @@ class HiddenLockedFolderManager(private val context: Context) {
                 OTHER_YEAR_DAY_FMT.format(zdt)
             }
 
-            var width: Int? = null
-            var height: Int? = null
-            var durationMs: Long? = null
-            if (!isVideo && !isRaw) {
-                val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                runCatching { BitmapFactory.decodeFile(file.absolutePath, opts) }
-                if (opts.outWidth > 0 && opts.outHeight > 0) {
-                    width = opts.outWidth
-                    height = opts.outHeight
-                }
-            } else if (isVideo) {
-                runCatching {
-                    val retriever = MediaMetadataRetriever()
-                    try {
-                        retriever.setDataSource(file.absolutePath)
-                        durationMs = retriever
-                            .extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
-                            ?.toLongOrNull()
-                            ?.takeIf { it > 0L }
-                        width = retriever
-                            .extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
-                            ?.toIntOrNull()
-                            ?.takeIf { it > 0 }
-                        height = retriever
-                            .extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
-                            ?.toIntOrNull()
-                            ?.takeIf { it > 0 }
-                    } finally {
-                        runCatching { retriever.release() }
+            val cachedMeta = fileMetaCache[file.absolutePath]?.takeIf {
+                it.lastModified == lastMod && it.length == fileLen
+            }
+            var width: Int? = cachedMeta?.width
+            var height: Int? = cachedMeta?.height
+            var durationMs: Long? = cachedMeta?.durationMs
+            if (cachedMeta == null) {
+                if (!isVideo && !isRaw) {
+                    val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    runCatching { BitmapFactory.decodeFile(file.absolutePath, opts) }
+                    if (opts.outWidth > 0 && opts.outHeight > 0) {
+                        width = opts.outWidth
+                        height = opts.outHeight
+                    }
+                } else if (isVideo) {
+                    runCatching {
+                        val retriever = MediaMetadataRetriever()
+                        try {
+                            retriever.setDataSource(file.absolutePath)
+                            durationMs = retriever
+                                .extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                                ?.toLongOrNull()
+                                ?.takeIf { it > 0L }
+                            width = retriever
+                                .extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
+                                ?.toIntOrNull()
+                                ?.takeIf { it > 0 }
+                            height = retriever
+                                .extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
+                                ?.toIntOrNull()
+                                ?.takeIf { it > 0 }
+                        } finally {
+                            runCatching { retriever.release() }
+                        }
                     }
                 }
+                if (fileMetaCache.size > 4000) fileMetaCache.clear()
+                fileMetaCache[file.absolutePath] = CachedFileMeta(lastMod, fileLen, width, height, durationMs)
             }
 
             val fileUri = Uri.fromFile(file).toString()
@@ -386,38 +409,56 @@ class HiddenLockedFolderManager(private val context: Context) {
             File(extRoot, "DCIM"),
             File(extRoot, "Pictures"),
             File(extRoot, "Movies"),
-            File(extRoot, "Download")
-        )
+            File(extRoot, "Download"),
+            File(extRoot, "Documents")
+        ).distinctBy { it.absolutePath }
         val discovered = LinkedHashMap<String, LockedAlbumEntity>()
+        val visited = HashSet<String>()
         val now = System.currentTimeMillis()
-        for (root in scanRoots) {
-            val children = root.listFiles() ?: continue
+
+        fun scanDir(dir: File, depth: Int) {
+            if (depth > 3 || !dir.isDirectory) return
+            val canonical = runCatching { dir.canonicalPath }.getOrDefault(dir.absolutePath)
+            if (!visited.add(canonical)) return
+            val children = dir.listFiles() ?: return
             for (child in children) {
-                if (!child.isDirectory || !child.name.startsWith(".")) continue
-                val marker = File(child, LOCK_MARKER_FILE)
-                if (!marker.isFile) continue
-                val parsed = runCatching {
-                    val obj = JSONObject(marker.readText(Charsets.UTF_8))
-                    val albumId = obj.optString("albumId").takeIf { it.isNotBlank() }
-                        ?: "${LocalMediaRepository.LOCAL_BUCKET_PREFIX}hidden_${stableShortHash(child.absolutePath)}"
-                    val displayName = obj.optString("displayName").takeIf { it.isNotBlank() }
-                        ?: child.name.trimStart('.')
-                    val origPath = obj.optString("originalDirPath").takeIf { it.isNotBlank() }
-                    val origRel = obj.optString("originalRelativePath").takeIf { it.isNotBlank() }
-                    LockedAlbumEntity(
-                        albumId = albumId,
-                        lockedAtEpochMs = now,
-                        isHiddenOnDisk = true,
-                        hiddenDirPath = child.absolutePath,
-                        originalDirPath = origPath,
-                        displayName = displayName,
-                        originalRelativePath = origRel
-                    )
-                }.getOrNull()
-                if (parsed != null) {
-                    discovered[parsed.albumId] = parsed
+                if (!child.isDirectory) continue
+                val name = child.name
+                if (name.startsWith(".")) {
+                    val marker = File(child, LOCK_MARKER_FILE)
+                    if (marker.isFile) {
+                        val parsed = runCatching {
+                            val obj = JSONObject(marker.readText(Charsets.UTF_8))
+                            val albumId = obj.optString("albumId").takeIf { it.isNotBlank() }
+                                ?: "${LocalMediaRepository.LOCAL_BUCKET_PREFIX}hidden_${stableShortHash(child.absolutePath)}"
+                            val displayName = obj.optString("displayName").takeIf { it.isNotBlank() }
+                                ?: name.trimStart('.')
+                            val origPath = obj.optString("originalDirPath").takeIf { it.isNotBlank() }
+                            val origRel = obj.optString("originalRelativePath").takeIf { it.isNotBlank() }
+                            LockedAlbumEntity(
+                                albumId = albumId,
+                                lockedAtEpochMs = now,
+                                isHiddenOnDisk = true,
+                                hiddenDirPath = child.absolutePath,
+                                originalDirPath = origPath,
+                                displayName = displayName,
+                                originalRelativePath = origRel
+                            )
+                        }.getOrNull()
+                        if (parsed != null) {
+                            discovered[parsed.albumId] = parsed
+                        }
+                    }
+                    continue
+                }
+                if (depth < 3 && !name.equals("Android", ignoreCase = true)) {
+                    scanDir(child, depth + 1)
                 }
             }
+        }
+
+        for (root in scanRoots) {
+            scanDir(root, depth = 0)
         }
         discovered.values.toList()
     }
@@ -475,49 +516,26 @@ class HiddenLockedFolderManager(private val context: Context) {
         }
     }
 
-    private fun mergeDirectoryContents(sourceDir: File, destDir: File) {
-        val children = sourceDir.listFiles() ?: return
-        for (child in children) {
-            if (child.name == NOMEDIA_FILE || child.name == LOCK_MARKER_FILE) continue
-            var target = File(destDir, child.name)
-            if (target.exists()) {
-                val base = child.nameWithoutExtension
-                val ext = child.extension.takeIf { it.isNotBlank() }?.let { ".$it" }.orEmpty()
-                var idx = 1
-                while (target.exists() && idx < 500) {
-                    target = File(destDir, "${base}_$idx$ext")
-                    idx++
-                }
-            }
-            if (!child.renameTo(target)) {
-                if (child.isFile) {
-                    child.copyTo(target, overwrite = false)
-                    child.delete()
+    private fun collectMediaFilesRecursively(dir: File, maxDepth: Int = 8): List<File> {
+        val out = mutableListOf<File>()
+        fun walk(current: File, depth: Int) {
+            if (depth > maxDepth) return
+            val files = current.listFiles() ?: return
+            for (f in files) {
+                if (f.name.startsWith(".")) continue
+                if (f.isDirectory) {
+                    walk(f, depth + 1)
+                } else if (f.isFile) {
+                    out.add(f)
                 }
             }
         }
-    }
-
-    private fun pickUniqueSibling(parentDir: File, desiredName: String): File {
-        var candidate = File(parentDir, desiredName)
-        var suffix = 1
-        while (candidate.exists() && suffix < 100) {
-            candidate = File(parentDir, "${desiredName}_$suffix")
-            suffix++
-        }
-        return candidate
-    }
-
-    private fun collectMediaPathsRecursively(dir: File): List<String> {
-        val out = mutableListOf<String>()
-        val files = dir.listFiles() ?: return out
-        for (f in files) {
-            if (f.isFile && !f.name.startsWith(".")) {
-                out.add(f.absolutePath)
-            }
-        }
+        walk(dir, 0)
         return out
     }
+
+    private fun collectMediaPathsRecursively(dir: File): List<String> =
+        collectMediaFilesRecursively(dir).map { it.absolutePath }
 
     private fun computeRelativePath(
         originalDir: File,
@@ -534,10 +552,12 @@ class HiddenLockedFolderManager(private val context: Context) {
     }
 
     private fun resolveMimeType(ext: String, isVideo: Boolean, isRaw: Boolean): String {
+        if (isVideo) {
+            return com.luminagallery.drive.data.repository.VideoFormatSupport.normalizeVideoMimeType("file.$ext", null)
+        }
         val guessed = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
         if (!guessed.isNullOrBlank()) return guessed
         return when {
-            isVideo -> "video/$ext"
             isRaw -> "image/x-adobe-dng"
             else -> "image/jpeg"
         }
@@ -554,7 +574,7 @@ class HiddenLockedFolderManager(private val context: Context) {
         )
 
         private val IMAGE_EXTS = setOf("jpg", "jpeg", "png", "webp", "heic", "heif", "gif", "bmp", "avif")
-        private val VIDEO_EXTS = setOf("mp4", "mov", "mkv", "webm", "3gp", "m4v", "avi", "ts")
+        private val VIDEO_EXTS = com.luminagallery.drive.data.repository.VideoFormatSupport.ALL_VIDEO_EXTENSIONS
         private val RAW_EXTS = setOf("dng", "cr2", "cr3", "nef", "nrw", "arw", "orf", "rw2", "raf", "pef", "srw", "raw")
 
         private val MONTH_YEAR_FMT = DateTimeFormatter.ofPattern("MMM yyyy", Locale.getDefault())
@@ -564,6 +584,73 @@ class HiddenLockedFolderManager(private val context: Context) {
 
         fun isHiddenFileUri(uriStr: String?): Boolean =
             uriStr != null && uriStr.startsWith("file://", ignoreCase = true)
+
+        internal fun mergeDirectoryContents(sourceDir: File, destDir: File) {
+            if (!destDir.exists()) destDir.mkdirs()
+            val children = sourceDir.listFiles() ?: return
+            for (child in children) {
+                if (child.name == NOMEDIA_FILE || child.name == LOCK_MARKER_FILE) {
+                    runCatching { child.delete() }
+                    continue
+                }
+                if (child.isDirectory) {
+                    val targetDir = File(destDir, child.name)
+                    if (!targetDir.exists()) {
+                        if (!child.renameTo(targetDir)) {
+                            targetDir.mkdirs()
+                            mergeDirectoryContents(child, targetDir)
+                            if (isDirectoryEffectivelyEmpty(child)) {
+                                child.delete()
+                            }
+                        }
+                    } else if (targetDir.isDirectory) {
+                        mergeDirectoryContents(child, targetDir)
+                        if (isDirectoryEffectivelyEmpty(child)) {
+                            child.delete()
+                        }
+                    } else {
+                        val uniqueDir = pickUniqueSibling(destDir, child.name)
+                        if (!child.renameTo(uniqueDir)) {
+                            uniqueDir.mkdirs()
+                            mergeDirectoryContents(child, uniqueDir)
+                            if (isDirectoryEffectivelyEmpty(child)) {
+                                child.delete()
+                            }
+                        }
+                    }
+                } else {
+                    var target = File(destDir, child.name)
+                    if (target.exists()) {
+                        val base = child.nameWithoutExtension
+                        val ext = child.extension.takeIf { it.isNotBlank() }?.let { ".$it" }.orEmpty()
+                        var idx = 1
+                        while (target.exists() && idx < 500) {
+                            target = File(destDir, "${base}_$idx$ext")
+                            idx++
+                        }
+                    }
+                    if (!child.renameTo(target)) {
+                        child.copyTo(target, overwrite = false)
+                        child.delete()
+                    }
+                }
+            }
+        }
+
+        internal fun isDirectoryEffectivelyEmpty(dir: File): Boolean {
+            val children = dir.listFiles() ?: return true
+            return children.all { it.name == NOMEDIA_FILE || it.name == LOCK_MARKER_FILE }
+        }
+
+        private fun pickUniqueSibling(parentDir: File, desiredName: String): File {
+            var candidate = File(parentDir, desiredName)
+            var suffix = 1
+            while (candidate.exists() && suffix < 100) {
+                candidate = File(parentDir, "${desiredName}_$suffix")
+                suffix++
+            }
+            return candidate
+        }
 
         internal fun isSafeFolderPathToHide(dirPath: String, externalStorageRootPath: String): Boolean {
             val cleanRoot = externalStorageRootPath.replace('\\', '/').trimEnd('/').lowercase(Locale.US)

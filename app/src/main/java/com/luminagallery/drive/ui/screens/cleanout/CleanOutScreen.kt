@@ -37,13 +37,16 @@ import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.BurstMode
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.CleaningServices
+import androidx.compose.material.icons.rounded.Compare
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.Screenshot
 import androidx.compose.material.icons.rounded.Storage
 import androidx.compose.material.icons.rounded.VideoFile
+import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -91,6 +94,7 @@ import com.luminagallery.drive.LocalGalleryImageLoader
 import com.luminagallery.drive.data.local.LocalMediaRepository
 import com.luminagallery.drive.data.repository.CoilCacheManager
 import com.luminagallery.drive.data.repository.GalleryExtrasRepository
+import com.luminagallery.drive.data.repository.LocalThumbnailRequest
 import com.luminagallery.drive.domain.model.CleanOutCategory
 import com.luminagallery.drive.domain.model.CleanOutGroup
 import com.luminagallery.drive.domain.model.DuplicateCluster
@@ -116,7 +120,24 @@ data class CleanOutUiState(
     val snackbarMessage: String? = null
 ) {
     val totalReclaimableBytes: Long
-        get() = groups.sumOf { it.reclaimableBytes } + driveCacheBytes
+        get() {
+            // Deduplicate overlapping suggestions across categories (e.g. a large video that is also a duplicate)
+            val seenItemSizes = LinkedHashMap<String, Long>()
+            for (group in groups) {
+                val reclaimItems = if (group.category == CleanOutCategory.DUPLICATES ||
+                    group.category == CleanOutCategory.BURST_SIMILAR
+                ) {
+                    group.items.filter { it.id in group.preselectedIds }
+                } else {
+                    group.items
+                }
+                for (item in reclaimItems) {
+                    seenItemSizes.putIfAbsent(item.id, item.sizeBytes)
+                }
+            }
+            val visibleDriveCache = if (driveCacheBytes > 1024L * 1024L) driveCacheBytes else 0L
+            return seenItemSizes.values.sum() + visibleDriveCache
+        }
 }
 
 class CleanOutViewModel(
@@ -135,7 +156,12 @@ class CleanOutViewModel(
     fun runSmartScan() {
         viewModelScope.launch {
             _uiState.update { it.copy(isScanning = true) }
+            val excludedAlbumIds = extrasRepository.excludedAlbumIdsFlow.first()
             val allLocal = localMediaRepository.observeAllLocalMedia().first()
+                .let { list ->
+                    if (excludedAlbumIds.isEmpty()) list
+                    else list.filterNot { it.parentId in excludedAlbumIds }
+                }
             val ignoredIds = extrasRepository.ignoredCleanOutIdsFlow.first()
             val groups = localMediaRepository.scanCleanOutSuggestions(allLocal, ignoredIds)
             val cacheBytes = coilCacheManager.refreshDiskUsage()
@@ -182,24 +208,31 @@ class CleanOutViewModel(
 
     fun requestTrashItems(items: List<MediaItem>) {
         if (items.isEmpty()) return
-        if (localMediaRepository.canManageMediaDirectly()) {
+        val supportsTrash = localMediaRepository.supportsMediaStoreTrash()
+        if (localMediaRepository.canDeleteDirectlyWithoutDialog()) {
             viewModelScope.launch {
                 localMediaRepository.trashLocalItemsDirectly(items, toTrash = true)
                     .onSuccess { count ->
                         localMediaRepository.notifyPermissionChanged()
                         _uiState.update {
                             it.copy(
-                                snackbarMessage = if (count == 1) "Moved to trash" else "Moved $count items to trash"
+                                snackbarMessage = if (!supportsTrash) {
+                                    if (count == 1) "Deleted permanently" else "Deleted $count items permanently"
+                                } else {
+                                    if (count == 1) "Moved to trash" else "Moved $count items to trash"
+                                }
                             )
                         }
                         runSmartScan()
                     }
-                    .onFailure {
+                    .onFailure { err ->
                         val sender = localMediaRepository.buildTrashIntentSender(items, toTrash = true)
                         if (sender != null) {
                             _uiState.update { it.copy(pendingTrashSender = sender) }
                         } else {
-                            _uiState.update { it.copy(snackbarMessage = "Trash requires Android 11 or newer") }
+                            _uiState.update {
+                                it.copy(snackbarMessage = err.localizedMessage ?: "Unable to delete items")
+                            }
                         }
                     }
             }
@@ -209,7 +242,7 @@ class CleanOutViewModel(
         if (sender != null) {
             _uiState.update { it.copy(pendingTrashSender = sender) }
         } else {
-            _uiState.update { it.copy(snackbarMessage = "Trash requires Android 11 or newer") }
+            _uiState.update { it.copy(snackbarMessage = "Unable to move items to trash") }
         }
     }
 
@@ -240,7 +273,9 @@ class CleanOutViewModel(
 @Composable
 fun CleanOutScreen(
     viewModel: CleanOutViewModel,
-    onNavigateBack: () -> Unit
+    onNavigateBack: () -> Unit,
+    onOpenPreview: (MediaItem) -> Unit = {},
+    onOpenCompare: (List<String>) -> Unit = {}
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val container = LocalAppContainer.current
@@ -248,6 +283,7 @@ fun CleanOutScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     var reviewingCategory by remember { mutableStateOf<CleanOutCategory?>(null) }
     var pendingCleanOutTrash by remember { mutableStateOf<List<MediaItem>?>(null) }
+    var showRestoreIgnoredDialog by remember { mutableStateOf(false) }
 
     val activeReviewGroup = remember(uiState.groups, reviewingCategory) {
         reviewingCategory?.let { cat -> uiState.groups.firstOrNull { it.category == cat } }
@@ -297,7 +333,7 @@ fun CleanOutScreen(
                 },
                 actions = {
                     if (uiState.ignoredCount > 0) {
-                        TextButton(onClick = viewModel::restoreAllIgnored) {
+                        TextButton(onClick = { showRestoreIgnoredDialog = true }) {
                             Text("Ignored (${uiState.ignoredCount})")
                         }
                     }
@@ -469,6 +505,13 @@ fun CleanOutScreen(
         CleanOutReviewSheet(
             group = group,
             onDismiss = { reviewingCategory = null },
+            onPreviewItem = { item ->
+                onOpenPreview(item)
+            },
+            onCompareItems = { ids ->
+                reviewingCategory = null
+                onOpenCompare(ids)
+            },
             onIgnoreCluster = { cluster ->
                 viewModel.ignoreItems(
                     itemIds = cluster.items.map { it.id },
@@ -485,11 +528,37 @@ fun CleanOutScreen(
         )
     }
 
+    if (showRestoreIgnoredDialog) {
+        AlertDialog(
+            onDismissRequest = { showRestoreIgnoredDialog = false },
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            shape = RoundedCornerShape(26.dp),
+            title = { Text("Restore ignored suggestions?") },
+            text = {
+                Text(
+                    text = "All ${uiState.ignoredCount} previously ignored Clean Out item(s) will be shown again in future scans.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showRestoreIgnoredDialog = false
+                        viewModel.restoreAllIgnored()
+                    }
+                ) { Text("Restore all", fontWeight = FontWeight.SemiBold) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRestoreIgnoredDialog = false }) { Text("Cancel") }
+            }
+        )
+    }
+
     pendingCleanOutTrash?.let { chosen ->
         HyperOsTrashConfirmSheet(
             items = chosen,
             mode = TrashConfirmMode.MOVE_TO_TRASH,
-            canSkipSystemPrompt = container.localMediaRepository.canManageMediaDirectly(),
+            canSkipSystemPrompt = container.localMediaRepository.canDeleteDirectlyWithoutDialog(),
             supportsSkipPromptSetting = container.localMediaRepository.supportsManageMediaPermission(),
             onOpenManageMediaSettings = {
                 container.localMediaRepository.buildManageMediaSettingsIntent()?.let { intent ->
@@ -498,7 +567,7 @@ fun CleanOutScreen(
             },
             onConfirm = {
                 pendingCleanOutTrash = null
-                if (container.localMediaRepository.canManageMediaDirectly()) {
+                if (container.localMediaRepository.canDeleteDirectlyWithoutDialog()) {
                     reviewingCategory = null
                 }
                 viewModel.requestTrashItems(chosen)
@@ -601,6 +670,8 @@ private fun CleanOutCategoryCard(
 private fun CleanOutReviewSheet(
     group: CleanOutGroup,
     onDismiss: () -> Unit,
+    onPreviewItem: (MediaItem) -> Unit,
+    onCompareItems: (List<String>) -> Unit,
     onIgnoreCluster: (DuplicateCluster) -> Unit,
     onIgnoreSelected: (List<MediaItem>) -> Unit,
     onMoveToTrash: (List<MediaItem>) -> Unit
@@ -616,7 +687,7 @@ private fun CleanOutReviewSheet(
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
-        containerColor = Color(0xFF1F1F22),
+        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
     ) {
         Column(
@@ -630,7 +701,8 @@ private fun CleanOutReviewSheet(
             Column {
                 Text(
                     text = group.category.title,
-                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.SemiBold)
+                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.SemiBold),
+                    color = MaterialTheme.colorScheme.onSurface
                 )
                 Text(
                     text = group.category.description,
@@ -640,7 +712,7 @@ private fun CleanOutReviewSheet(
             }
 
             if (group.category == CleanOutCategory.DUPLICATES && group.duplicateClusters.isNotEmpty()) {
-                // Rich Duplicate Cluster List showing exact Source Folder + Ignore button per set!
+                // Rich Duplicate Cluster List showing exact Source Folder + Preview + Compare + Ignore!
                 LazyColumn(
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                     modifier = Modifier
@@ -651,9 +723,12 @@ private fun CleanOutReviewSheet(
                         items = group.duplicateClusters,
                         key = { it.clusterKey }
                     ) { cluster ->
+                        val comparableIds = remember(cluster.items) {
+                            cluster.items.filter { !it.isVideo }.map { it.id }.take(4)
+                        }
                         Surface(
                             shape = RoundedCornerShape(20.dp),
-                            color = Color(0xFF2B2B30),
+                            color = MaterialTheme.colorScheme.surfaceContainerHighest,
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Column(
@@ -670,17 +745,33 @@ private fun CleanOutReviewSheet(
                                         style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
                                         color = MaterialTheme.colorScheme.primary
                                     )
-                                    TextButton(
-                                        onClick = { onIgnoreCluster(cluster) },
-                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Rounded.VisibilityOff,
-                                            contentDescription = null,
-                                            modifier = Modifier.size(15.dp)
-                                        )
-                                        Spacer(Modifier.width(5.dp))
-                                        Text("Ignore", style = MaterialTheme.typography.labelMedium)
+                                    Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                                        if (comparableIds.size >= 2) {
+                                            TextButton(
+                                                onClick = { onCompareItems(comparableIds) },
+                                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Rounded.Compare,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(15.dp)
+                                                )
+                                                Spacer(Modifier.width(4.dp))
+                                                Text("Compare", style = MaterialTheme.typography.labelMedium)
+                                            }
+                                        }
+                                        TextButton(
+                                            onClick = { onIgnoreCluster(cluster) },
+                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.VisibilityOff,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(15.dp)
+                                            )
+                                            Spacer(Modifier.width(4.dp))
+                                            Text("Ignore", style = MaterialTheme.typography.labelMedium)
+                                        }
                                     }
                                 }
 
@@ -688,7 +779,7 @@ private fun CleanOutReviewSheet(
                                     if (idx > 0) {
                                         HorizontalDivider(
                                             thickness = 0.5.dp,
-                                            color = Color.White.copy(alpha = 0.08f)
+                                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)
                                         )
                                     }
                                     val checked = item.id in selectedIds
@@ -706,16 +797,27 @@ private fun CleanOutReviewSheet(
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                                     ) {
-                                        AsyncImage(
-                                            model = ImageRequest.Builder(context).data(item.localContentUri).build(),
-                                            imageLoader = imageLoader,
-                                            contentDescription = item.name,
-                                            contentScale = ContentScale.Crop,
+                                        Box(
                                             modifier = Modifier
                                                 .size(56.dp)
                                                 .clip(RoundedCornerShape(12.dp))
-                                                .background(Color(0xFF1A1A1E))
-                                        )
+                                                .background(MaterialTheme.colorScheme.surfaceContainer)
+                                                .clickable { onPreviewItem(item) }
+                                        ) {
+                                            AsyncImage(
+                                                model = ImageRequest.Builder(context)
+                                                    .data(
+                                                        if (item.isVideo && !item.localContentUri.isNullOrBlank()) {
+                                                            LocalThumbnailRequest(item.localContentUri, isVideo = true)
+                                                        } else item.localContentUri
+                                                    )
+                                                    .build(),
+                                                imageLoader = imageLoader,
+                                                contentDescription = "Preview ${item.name}",
+                                                contentScale = ContentScale.Crop,
+                                                modifier = Modifier.fillMaxSize()
+                                            )
+                                        }
 
                                         Column(
                                             modifier = Modifier.weight(1f),
@@ -728,7 +830,7 @@ private fun CleanOutReviewSheet(
                                                 Text(
                                                     text = item.name,
                                                     style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
-                                                    color = Color.White,
+                                                    color = MaterialTheme.colorScheme.onSurface,
                                                     maxLines = 1,
                                                     overflow = TextOverflow.Ellipsis,
                                                     modifier = Modifier.weight(1f, fill = false)
@@ -761,7 +863,7 @@ private fun CleanOutReviewSheet(
                                                 Text(
                                                     text = sourcePath,
                                                     style = MaterialTheme.typography.labelSmall,
-                                                    color = Color.White.copy(alpha = 0.85f),
+                                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.82f),
                                                     maxLines = 1,
                                                     overflow = TextOverflow.Ellipsis
                                                 )
@@ -776,6 +878,128 @@ private fun CleanOutReviewSheet(
                                         }
 
                                         CleanOutCheckCircle(checked = checked)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if (group.category == CleanOutCategory.BURST_SIMILAR) {
+                // Visual burst-shot cluster grouping so user can compare & pick the sharpest shot!
+                val burstClusters = remember(group.items) {
+                    val sorted = group.items.sortedBy { it.createdTimeEpochMs }
+                    val clusters = mutableListOf<List<MediaItem>>()
+                    val current = mutableListOf<MediaItem>()
+                    for (item in sorted) {
+                        val prev = current.lastOrNull()
+                        if (prev != null && kotlin.math.abs(item.createdTimeEpochMs - prev.createdTimeEpochMs) > 6_000L) {
+                            if (current.isNotEmpty()) clusters.add(current.toList())
+                            current.clear()
+                        }
+                        current.add(item)
+                    }
+                    if (current.isNotEmpty()) clusters.add(current.toList())
+                    clusters.reversed()
+                }
+                LazyColumn(
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 430.dp)
+                ) {
+                    items(burstClusters, key = { it.first().id }) { burst ->
+                        val comparableIds = remember(burst) {
+                            burst.filter { !it.isVideo }.map { it.id }.take(4)
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(18.dp),
+                            color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = "${burst.size} burst shots · ${burst.first().fullDateLabel}",
+                                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    if (comparableIds.size >= 2) {
+                                        TextButton(
+                                            onClick = { onCompareItems(comparableIds) },
+                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                        ) {
+                                            Icon(Icons.Rounded.Compare, contentDescription = null, modifier = Modifier.size(15.dp))
+                                            Spacer(Modifier.width(4.dp))
+                                            Text("Compare", style = MaterialTheme.typography.labelMedium)
+                                        }
+                                    }
+                                }
+                                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    items(burst, key = { it.id }) { item ->
+                                        val checked = item.id in selectedIds
+                                        Box(
+                                            modifier = Modifier
+                                                .size(96.dp)
+                                                .clip(RoundedCornerShape(12.dp))
+                                                .clickable {
+                                                    selectedIds = if (checked) selectedIds - item.id else selectedIds + item.id
+                                                }
+                                        ) {
+                                            AsyncImage(
+                                                model = ImageRequest.Builder(context).data(item.localContentUri).build(),
+                                                imageLoader = imageLoader,
+                                                contentDescription = item.name,
+                                                contentScale = ContentScale.Crop,
+                                                modifier = Modifier.fillMaxSize()
+                                            )
+                                            Box(
+                                                modifier = Modifier
+                                                    .align(Alignment.TopStart)
+                                                    .padding(5.dp)
+                                                    .size(24.dp)
+                                                    .clip(CircleShape)
+                                                    .background(Color.Black.copy(alpha = 0.55f))
+                                                    .clickable { onPreviewItem(item) },
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Rounded.Visibility,
+                                                    contentDescription = "Preview",
+                                                    tint = Color.White,
+                                                    modifier = Modifier.size(14.dp)
+                                                )
+                                            }
+                                            if (item.id == burst.first().id) {
+                                                Text(
+                                                    text = "Keep",
+                                                    fontSize = 9.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = Color.White,
+                                                    modifier = Modifier
+                                                        .align(Alignment.BottomStart)
+                                                        .padding(5.dp)
+                                                        .clip(RoundedCornerShape(6.dp))
+                                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.9f))
+                                                        .padding(horizontal = 5.dp, vertical = 1.dp)
+                                                )
+                                            }
+                                            CleanOutCheckCircle(
+                                                checked = checked,
+                                                modifier = Modifier
+                                                    .align(Alignment.TopEnd)
+                                                    .padding(5.dp)
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -802,12 +1026,35 @@ private fun CleanOutReviewSheet(
                                 }
                         ) {
                             AsyncImage(
-                                model = ImageRequest.Builder(context).data(item.localContentUri).build(),
+                                model = ImageRequest.Builder(context)
+                                    .data(
+                                        if (item.isVideo && !item.localContentUri.isNullOrBlank()) {
+                                            LocalThumbnailRequest(item.localContentUri, isVideo = true)
+                                        } else item.localContentUri
+                                    )
+                                    .build(),
                                 imageLoader = imageLoader,
                                 contentDescription = item.name,
                                 contentScale = ContentScale.Crop,
                                 modifier = Modifier.fillMaxSize()
                             )
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.TopStart)
+                                    .padding(5.dp)
+                                    .size(24.dp)
+                                    .clip(CircleShape)
+                                    .background(Color.Black.copy(alpha = 0.55f))
+                                    .clickable { onPreviewItem(item) },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Visibility,
+                                    contentDescription = "Preview",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                            }
                             Column(
                                 modifier = Modifier
                                     .align(Alignment.BottomStart)

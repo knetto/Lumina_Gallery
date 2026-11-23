@@ -2,4 +2,12 @@
 <resources>
     <string name="app_name">Lumina Gallery</string>
     <string name="widget_description">Rounded photo frame displaying your favorites and recent memories</string>
+    <string name="shortcut_camera_short">Camera</string>
+    <string name="shortcut_camera_long">Open Camera</string>
+    <string name="shortcut_search_short">Search</string>
+    <string name="shortcut_search_long">Search photos &amp; videos</string>
+    <string name="shortcut_favorites_short">Favorites</string>
+    <string name="shortcut_favorites_long">Open Favorites</string>
+    <string name="shortcut_trash_short">Trash</string>
+    <string name="shortcut_trash_long">Open Trash</string>
 </resources>

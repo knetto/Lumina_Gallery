@@ -55,13 +55,14 @@
 
         <TextView
             android:id="@+id/widget_next_btn"
-            android:layout_width="32dp"
-            android:layout_height="32dp"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
             android:background="@drawable/widget_bg_rounded"
+            android:contentDescription="Next memory photo"
             android:gravity="center"
             android:text="↻"
             android:textColor="#FFFFFFFF"
-            android:textSize="16sp" />
+            android:textSize="18sp" />
     </LinearLayout>
 
 </FrameLayout>

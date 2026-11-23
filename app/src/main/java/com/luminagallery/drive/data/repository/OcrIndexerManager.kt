@@ -4,9 +4,11 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.ImageDecoder
+import android.graphics.Matrix
 import android.net.Uri
 import android.os.Build
 import androidx.compose.runtime.Immutable
+import androidx.exifinterface.media.ExifInterface
 import com.google.android.gms.tasks.Tasks
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
@@ -114,7 +116,7 @@ class OcrIndexerManager(
                 val results = coroutineScope {
                     batch.chunked(6).map { slice ->
                         async(Dispatchers.IO) {
-                            slice.map { item -> scanSingleLocalItem(item) }
+                            slice.mapNotNull { item -> scanSingleLocalItem(item) }
                         }
                     }.awaitAll().flatten()
                 }
@@ -171,10 +173,11 @@ class OcrIndexerManager(
             }
         }
 
-    private fun scanSingleLocalItem(item: MediaItem): PhotoOcrEntity {
+    private fun scanSingleLocalItem(item: MediaItem): PhotoOcrEntity? {
+        // Return null on transient decode/timeout errors instead of permanently caching `hasText = false`
         val text = runCatching {
-            val bitmap = decodeLocalOcrBitmap(Uri.parse(item.localContentUri ?: return@runCatching ""))
-                ?: return@runCatching ""
+            val bitmap = decodeLocalOcrBitmap(Uri.parse(item.localContentUri ?: return@runCatching null))
+                ?: return@runCatching null
             try {
                 val result = Tasks.await(
                     recognizer.process(InputImage.fromBitmap(bitmap, 0)),
@@ -185,7 +188,7 @@ class OcrIndexerManager(
             } finally {
                 bitmap.recycle()
             }
-        }.getOrDefault("")
+        }.getOrNull() ?: return null
 
         return PhotoOcrEntity(
             itemId = item.id,
@@ -236,8 +239,21 @@ class OcrIndexerManager(
             }
             val sample = computeInSampleSize(bounds.outWidth, bounds.outHeight, MAX_OCR_DIMENSION_PX)
             val opts = BitmapFactory.Options().apply { inSampleSize = sample }
-            context.contentResolver.openInputStream(uri)?.use {
+            val raw = context.contentResolver.openInputStream(uri)?.use {
                 BitmapFactory.decodeStream(it, null, opts)
+            } ?: return@runCatching null
+            val degrees = runCatching {
+                context.contentResolver.openInputStream(uri)?.use { stream ->
+                    ExifInterface(stream).rotationDegrees
+                } ?: 0
+            }.getOrDefault(0)
+            if (degrees != 0) {
+                val m = Matrix().apply { postRotate(degrees.toFloat()) }
+                val rotated = Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, m, true)
+                if (rotated !== raw) raw.recycle()
+                rotated
+            } else {
+                raw
             }
         }
     }.getOrNull()

@@ -51,7 +51,17 @@ private val LuminaLightColorScheme = lightColorScheme(
     primary = LightPrimary,
     onPrimary = Color.White,
     primaryContainer = LightPrimaryContainer,
-    onPrimaryContainer = Color(0xFF1E3A8A),
+    onPrimaryContainer = Color(0xFF00325E),
+    secondary = Color(0xFF475C7A),
+    onSecondary = Color.White,
+    secondaryContainer = Color(0xFFD6E3F7),
+    onSecondaryContainer = Color(0xFF0C1D36),
+    tertiary = Color(0xFF006B77),
+    onTertiary = Color.White,
+    error = Color(0xFFBA1A1A),
+    onError = Color.White,
+    errorContainer = Color(0xFFFFDAD6),
+    onErrorContainer = Color(0xFF410002),
     background = LightBackground,
     onBackground = LightOnSurface,
     surface = LightSurface,
@@ -62,7 +72,9 @@ private val LuminaLightColorScheme = lightColorScheme(
     surfaceContainerLow = LightBackground,
     surfaceContainer = LightSurfaceContainer,
     surfaceContainerHigh = LightSurfaceContainerHigh,
-    surfaceContainerHighest = Color(0xFFDBE0E8)
+    surfaceContainerHighest = Color(0xFFDBE0E8),
+    outline = Color(0xFF74777F),
+    outlineVariant = Color(0xFFC4C6D0)
 )
 
 @Composable
@@ -78,8 +90,7 @@ fun LuminaTheme(
         ThemeMode.LIGHT -> false
         ThemeMode.SYSTEM -> systemDark
     }
-    val useAmoledPitchBlack = themeMode == ThemeMode.AMOLED_BLACK ||
-        (themeMode == ThemeMode.SYSTEM && systemDark)
+    val useAmoledPitchBlack = themeMode == ThemeMode.AMOLED_BLACK
 
     val colorScheme: ColorScheme = when {
         dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
@@ -89,11 +100,7 @@ fun LuminaTheme(
                     base.copy(
                         background = PitchBlack,
                         surface = PitchBlack,
-                        surfaceContainerLowest = PitchBlack,
-                        surfaceContainerLow = OledSurfaceLow,
-                        surfaceContainer = OledSurface,
-                        surfaceContainerHigh = OledSurfaceHigh,
-                        surfaceContainerHighest = OledSurfaceHighest
+                        surfaceContainerLowest = PitchBlack
                     )
                 } else {
                     base

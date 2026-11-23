@@ -255,6 +255,15 @@ class LocalMediaRepository(
                 Manifest.permission.ACCESS_MEDIA_LOCATION
             ) == PackageManager.PERMISSION_GRANTED
 
+    fun hasPartialMediaPermission(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return false
+        val granted = PackageManager.PERMISSION_GRANTED
+        val hasFullImages = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_IMAGES) == granted
+        val hasFullVideos = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_VIDEO) == granted
+        val hasSelected = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) == granted
+        return hasSelected && !hasFullImages && !hasFullVideos
+    }
+
     fun hasMediaPermission(): Boolean {
         val granted = PackageManager.PERMISSION_GRANTED
         return when {
@@ -512,7 +521,8 @@ class LocalMediaRepository(
                 )
             }
 
-            // 2. Exact Duplicates (grouped by identical byte size, verified via fast 8KB SHA-256 hash)
+            // 2. Exact Duplicates (same byte size -> verified by FULL streaming SHA-256 hash so
+            // container/EXIF headers can NEVER produce false-positive deletion suggestions)
             val duplicateItems = mutableListOf<MediaItem>()
             val duplicateClusters = mutableListOf<DuplicateCluster>()
             val preselectedDuplicates = LinkedHashSet<String>()
@@ -520,7 +530,7 @@ class LocalMediaRepository(
             for ((sizeBytes, sameSizeList) in sizeBuckets) {
                 if (sameSizeList.size < 2) continue
                 val byHash = sameSizeList.groupBy { item ->
-                    computeQuickContentHash(item.localContentUri) ?: item.id
+                    computeExactContentSha256(item.localContentUri) ?: item.id
                 }
                 for ((hash, dupes) in byHash) {
                     if (dupes.size >= 2) {
@@ -621,6 +631,34 @@ class LocalMediaRepository(
     fun canManageMediaDirectly(): Boolean =
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && MediaStore.canManageMedia(context)
 
+    fun canDeleteDirectlyWithoutDialog(): Boolean =
+        canManageMediaDirectly() || Build.VERSION.SDK_INT < Build.VERSION_CODES.Q
+
+    fun supportsMediaStoreTrash(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+
+    fun buildFavoriteIntentSender(item: MediaItem, favorite: Boolean): IntentSender? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        if (!item.isLocal || item.localContentUri.isNullOrBlank()) return null
+        if (HiddenLockedFolderManager.isHiddenFileUri(item.localContentUri)) return null
+        val uri = Uri.parse(item.localContentUri)
+        return runCatching {
+            MediaStore.createFavoriteRequest(context.contentResolver, listOf(uri), favorite).intentSender
+        }.getOrNull()
+    }
+
+    suspend fun setLocalFavoriteDirectly(item: MediaItem, favorite: Boolean): Boolean =
+        withContext(Dispatchers.IO) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return@withContext false
+            if (!item.isLocal || item.localContentUri.isNullOrBlank()) return@withContext false
+            if (HiddenLockedFolderManager.isHiddenFileUri(item.localContentUri)) return@withContext false
+            runCatching {
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.IS_FAVORITE, if (favorite) 1 else 0)
+                }
+                context.contentResolver.update(Uri.parse(item.localContentUri), values, null, null) > 0
+            }.getOrDefault(false)
+        }
+
     fun buildManageMediaSettingsIntent(): Intent? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return null
         return Intent(
@@ -646,17 +684,24 @@ class LocalMediaRepository(
                 count += hiddenFolderManager.deleteHiddenFilesDirectly(hiddenItems).getOrThrow()
             }
             if (mediaStoreItems.isNotEmpty()) {
-                require(Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    "Trash requires Android 11 or newer"
-                }
-                val values = ContentValues().apply {
-                    put(MediaStore.MediaColumns.IS_TRASHED, if (toTrash) 1 else 0)
-                }
-                for (item in mediaStoreItems) {
-                    if (!item.isLocal || item.localContentUri.isNullOrBlank()) continue
-                    val uri = Uri.parse(item.localContentUri)
-                    val updated = context.contentResolver.update(uri, values, null, null)
-                    if (updated > 0) count++
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    val values = ContentValues().apply {
+                        put(MediaStore.MediaColumns.IS_TRASHED, if (toTrash) 1 else 0)
+                    }
+                    for (item in mediaStoreItems) {
+                        if (!item.isLocal || item.localContentUri.isNullOrBlank()) continue
+                        val uri = Uri.parse(item.localContentUri)
+                        val updated = context.contentResolver.update(uri, values, null, null)
+                        if (updated > 0) count++
+                    }
+                } else if (toTrash) {
+                    // Android 8-10 has no system Trash bin — delete directly on confirmed request
+                    for (item in mediaStoreItems) {
+                        if (!item.isLocal || item.localContentUri.isNullOrBlank()) continue
+                        val uri = Uri.parse(item.localContentUri)
+                        val deleted = context.contentResolver.delete(uri, null, null)
+                        if (deleted > 0) count++
+                    }
                 }
             }
             if (count == 0) {
@@ -731,25 +776,33 @@ class LocalMediaRepository(
 
     @Suppress("DEPRECATION")
     fun resolveCityAndCountry(lat: Double, lon: Double): Pair<String, String> {
+        val (city, country, _) = resolveCityAndCountryWithStatus(lat, lon)
+        return city to country
+    }
+
+    @Suppress("DEPRECATION")
+    fun resolveCityAndCountryWithStatus(lat: Double, lon: Double): Triple<String, String, Boolean> {
         val bucketLat = (lat * 10.0).roundToInt() / 10.0
         val bucketLon = (lon * 10.0).roundToInt() / 10.0
         val key = "${String.format(Locale.US, "%.2f", bucketLat)},${String.format(Locale.US, "%.2f", bucketLon)}"
-        geocodeCache[key]?.let { return it }
+        geocodeCache[key]?.let { return Triple(it.first, it.second, true) }
 
         val geocoder = if (Geocoder.isPresent()) Geocoder(context, Locale.getDefault()) else null
-        val resolved = runCatching {
-            val addr = geocoder?.getFromLocation(lat, lon, 1)?.firstOrNull()
-            val city = addr?.locality
-                ?: addr?.subAdminArea
-                ?: addr?.adminArea
-                ?: addr?.countryName
-                ?: String.format(Locale.US, "%.2f°, %.2f°", lat, lon)
-            val country = addr?.countryName?.takeIf { it.isNotBlank() } ?: "Other"
-            city to country
-        }.getOrNull() ?: (String.format(Locale.US, "%.2f°, %.2f°", lat, lon) to "Other")
+        val addr = runCatching { geocoder?.getFromLocation(lat, lon, 1)?.firstOrNull() }.getOrNull()
+        val city = addr?.locality
+            ?: addr?.subAdminArea
+            ?: addr?.adminArea
+            ?: addr?.countryName
+        val country = addr?.countryName?.takeIf { it.isNotBlank() }
 
-        geocodeCache[key] = resolved
-        return resolved
+        if (!city.isNullOrBlank()) {
+            val pair = city to (country ?: "Other")
+            if (geocodeCache.size > 2_000) geocodeCache.clear()
+            geocodeCache[key] = pair
+            return Triple(pair.first, pair.second, true)
+        }
+        // Do NOT poison geocodeCache when offline / throttled so it resolves cleanly once online!
+        return Triple(String.format(Locale.US, "%.2f°, %.2f°", lat, lon), "Other", false)
     }
 
     private fun readVideoLatLon(contentUriStr: String): Pair<Double, Double>? = runCatching {
@@ -800,34 +853,29 @@ class LocalMediaRepository(
         lon: Double
     ): Pair<String, String> {
         geocodeCache[key]?.let { return it }
-        val resolved = runCatching {
-            val addresses = geocoder?.getFromLocation(lat, lon, 1)
-            val addr = addresses?.firstOrNull()
-            val city = addr?.locality
-                ?: addr?.subAdminArea
-                ?: addr?.adminArea
-                ?: addr?.countryName
-                ?: "Location ($key)"
+        val addr = runCatching { geocoder?.getFromLocation(lat, lon, 1)?.firstOrNull() }.getOrNull()
+        val city = addr?.locality
+            ?: addr?.subAdminArea
+            ?: addr?.adminArea
+            ?: addr?.countryName
+        if (!city.isNullOrBlank()) {
             val country = listOfNotNull(addr?.adminArea?.takeIf { it != city }, addr?.countryName)
                 .distinct()
                 .joinToString(", ")
                 .ifBlank { String.format(Locale.US, "%.2f°, %.2f°", lat, lon) }
-            city to country
-        }.getOrNull() ?: ("Location" to String.format(Locale.US, "%.2f°, %.2f°", lat, lon))
-
-        geocodeCache[key] = resolved
-        return resolved
+            val resolved = city to country
+            if (geocodeCache.size > 2_000) geocodeCache.clear()
+            geocodeCache[key] = resolved
+            return resolved
+        }
+        return "Location" to String.format(Locale.US, "%.2f°, %.2f°", lat, lon)
     }
 
-    private fun computeQuickContentHash(contentUriStr: String?): String? {
+    private fun computeExactContentSha256(contentUriStr: String?): String? {
         if (contentUriStr.isNullOrBlank()) return null
         return runCatching {
             context.contentResolver.openInputStream(Uri.parse(contentUriStr))?.use { stream ->
-                val buffer = ByteArray(8192)
-                val read = stream.read(buffer)
-                if (read <= 0) return@runCatching null
-                val digest = MessageDigest.getInstance("SHA-256").digest(buffer.copyOf(read))
-                digest.joinToString("") { "%02x".format(it) }
+                hashStreamSha256(stream)
             }
         }.getOrNull()
     }
@@ -846,6 +894,7 @@ class LocalMediaRepository(
         runCatching {
             resolver.registerContentObserver(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, true, observer)
             resolver.registerContentObserver(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, true, observer)
+            resolver.registerContentObserver(MediaStore.Files.getContentUri("external"), true, observer)
         }
         awaitClose {
             mainHandler.removeCallbacks(coalescedEmit)
@@ -895,10 +944,11 @@ class LocalMediaRepository(
             }
         }.toTypedArray()
 
-        val rawLikes = RAW_EXTS.joinToString(" OR ") { ext ->
+        val fallbackExts = RAW_EXTS + com.luminagallery.drive.data.repository.VideoFormatSupport.MEDIASTORE_FALLBACK_VIDEO_EXTS
+        val extraLikes = fallbackExts.joinToString(" OR ") { ext ->
             "LOWER(${MediaStore.Files.FileColumns.DISPLAY_NAME}) LIKE '%.$ext'"
         }
-        val selection = "(${MediaStore.Files.FileColumns.MEDIA_TYPE} IN (?, ?) OR (${MediaStore.Files.FileColumns.MEDIA_TYPE} = ${MediaStore.Files.FileColumns.MEDIA_TYPE_NONE} AND ($rawLikes))) AND ${MediaStore.Files.FileColumns.SIZE} > 0"
+        val selection = "(${MediaStore.Files.FileColumns.MEDIA_TYPE} IN (?, ?) OR (${MediaStore.Files.FileColumns.MEDIA_TYPE} = ${MediaStore.Files.FileColumns.MEDIA_TYPE_NONE} AND ($extraLikes))) AND ${MediaStore.Files.FileColumns.SIZE} > 0"
         val selectionArgs = arrayOf(
             MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE.toString(),
             MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO.toString()
@@ -946,9 +996,15 @@ class LocalMediaRepository(
             while (c.moveToNext()) {
                 val mediaStoreId = c.getLong(idCol)
                 val fileMediaType = c.getInt(mediaTypeCol)
-                val isVideo = fileMediaType == MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO
                 val name = c.getString(nameCol) ?: "Media_$mediaStoreId"
-                val mime = c.getString(mimeCol) ?: if (isVideo) "video/mp4" else "image/jpeg"
+                val rawMime = c.getString(mimeCol)
+                val isVideo = fileMediaType == MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO ||
+                    com.luminagallery.drive.data.repository.VideoFormatSupport.isVideoFile(name, rawMime)
+                val mime = if (isVideo) {
+                    com.luminagallery.drive.data.repository.VideoFormatSupport.normalizeVideoMimeType(name, rawMime)
+                } else {
+                    rawMime ?: "image/jpeg"
+                }
                 val sizeBytes = c.getLong(sizeCol)
 
                 val dateTaken = if (dateTakenCol >= 0) c.getLong(dateTakenCol) else 0L
@@ -1065,6 +1121,22 @@ class LocalMediaRepository(
         private const val LARGE_FILE_THRESHOLD_BYTES = 50L * 1024L * 1024L
 
         fun isLocalFolderId(folderId: String): Boolean = folderId.startsWith(LOCAL_BUCKET_PREFIX)
+
+        internal fun hashStreamSha256(stream: java.io.InputStream): String? {
+            val digest = MessageDigest.getInstance("SHA-256")
+            val buffer = ByteArray(64 * 1024)
+            var totalRead = 0L
+            while (true) {
+                val read = stream.read(buffer)
+                if (read < 0) break
+                if (read > 0) {
+                    digest.update(buffer, 0, read)
+                    totalRead += read
+                }
+            }
+            if (totalRead <= 0L) return null
+            return digest.digest().joinToString("") { "%02x".format(it) }
+        }
 
         private val RAW_EXTS = setOf("dng", "cr2", "cr3", "nef", "nrw", "arw", "orf", "rw2", "raf", "pef", "srw", "raw")
         private val ISO_6709_REGEX = Regex("""([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)""")

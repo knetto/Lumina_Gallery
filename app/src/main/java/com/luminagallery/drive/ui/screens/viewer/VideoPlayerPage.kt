@@ -2,6 +2,7 @@ package com.luminagallery.drive.ui.screens.viewer
 
 import android.content.ContentValues
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.os.Build
 import android.os.Environment
@@ -30,8 +31,13 @@ import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -39,12 +45,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -62,6 +70,7 @@ import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntSize
@@ -72,6 +81,8 @@ import java.io.File
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem as Media3Item
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -88,6 +99,7 @@ import com.luminagallery.drive.LocalAppContainer
 import com.luminagallery.drive.LocalGalleryImageLoader
 import com.luminagallery.drive.data.remote.DriveConstants
 import com.luminagallery.drive.data.repository.LocalThumbnailRequest
+import com.luminagallery.drive.data.repository.VideoFormatSupport
 import com.luminagallery.drive.domain.model.MediaItem
 import com.luminagallery.drive.ui.components.GlassSurface
 import com.luminagallery.drive.ui.components.OneUiMotion
@@ -110,14 +122,19 @@ class ActiveVideoController {
     var playbackSpeed by mutableFloatStateOf(1f)
     var currentPositionMs by mutableLongStateOf(0L)
     var durationMs by mutableLongStateOf(0L)
+    var isScrubbing by mutableStateOf(false)
 
     internal var onTogglePlayPause: (() -> Unit)? = null
+    internal var onPause: (() -> Unit)? = null
+    internal var onPlay: (() -> Unit)? = null
     internal var onToggleMute: (() -> Unit)? = null
     internal var onSeekTo: ((Long) -> Unit)? = null
     internal var onCaptureFrame: (() -> Unit)? = null
     internal var onSetSpeed: ((Float) -> Unit)? = null
 
     fun togglePlayPause() = onTogglePlayPause?.invoke()
+    fun pause() = onPause?.invoke()
+    fun play() = onPlay?.invoke()
     fun toggleMute() = onToggleMute?.invoke()
     fun seekTo(positionMs: Long) {
         currentPositionMs = positionMs.coerceIn(0L, durationMs.coerceAtLeast(1L))
@@ -224,91 +241,121 @@ fun VideoPlayerPage(
     }
 
     val offlinePath = remember(item.id) { appContainer.offlineMediaManager.getOfflineFilePath(item.id) }
+    var retryNonce by remember(item.id) { mutableIntStateOf(0) }
+    var exoPlayer by remember(item.id) { mutableStateOf<ExoPlayer?>(null) }
 
-    val exoPlayer: ExoPlayer? = remember(item.id, item.isLocal, item.localContentUri, offlinePath, isActivePage) {
+    // Create, bind, and release ExoPlayer strictly inside DisposableEffect (never inside `remember`)
+    // so aborted compositions can never leak hardware decoder codecs.
+    DisposableEffect(item.id, item.isLocal, item.localContentUri, offlinePath, isActivePage, retryNonce) {
         if (!isActivePage) {
-            null
-        } else if (!offlinePath.isNullOrBlank() && File(offlinePath).exists()) {
-            ExoPlayer.Builder(context)
-                .build()
-                .apply {
-                    setMediaItem(Media3Item.fromUri(android.net.Uri.fromFile(File(offlinePath))))
-                    repeatMode = if (loopVideo) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
-                    volume = if (startMuted) 0f else 1f
-                    playWhenReady = autoPlay
-                    prepare()
-                }
-        } else if (item.isLocal && !item.localContentUri.isNullOrBlank()) {
-            ExoPlayer.Builder(context)
-                .build()
-                .apply {
-                    setMediaItem(Media3Item.fromUri(item.localContentUri))
-                    repeatMode = if (loopVideo) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
-                    volume = if (startMuted) 0f else 1f
-                    playWhenReady = autoPlay
-                    prepare()
-                }
-        } else {
-            val okHttpDataSourceFactory = OkHttpDataSource.Factory(appContainer.okHttpClient)
-            val mediaSourceFactory = DefaultMediaSourceFactory(okHttpDataSourceFactory)
-            ExoPlayer.Builder(context)
-                .setMediaSourceFactory(mediaSourceFactory)
-                .build()
-                .apply {
-                    val streamUrl = DriveConstants.buildFullMediaUrl(item.id)
-                    setMediaItem(Media3Item.fromUri(streamUrl))
-                    repeatMode = if (loopVideo) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
-                    volume = if (startMuted) 0f else 1f
-                    playWhenReady = autoPlay
-                    prepare()
-                }
-        }
-    }
-
-    // Bind active ExoPlayer instance into `ActiveVideoController`
-    DisposableEffect(exoPlayer, isActivePage) {
-        if (exoPlayer == null || !isActivePage) {
             firstFrameRendered = false
             isPlaying = false
+            exoPlayer = null
             return@DisposableEffect onDispose {}
         }
 
+        playbackError = null
+        isBuffering = true
+        val audioAttributes = AudioAttributes.Builder()
+            .setUsage(C.USAGE_MEDIA)
+            .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+            .build()
+        val renderersFactory = VideoFormatSupport.buildRenderersFactory(context)
+        val isMp2p = VideoFormatSupport.isMp2pVideo(item.name, item.mimeType)
+        val extractorsFactory = VideoFormatSupport.buildExtractorsFactory(preferProgramStream = isMp2p)
+        val hintedMime = VideoFormatSupport.resolveExoPlayerMimeType(item.name, item.mimeType)
+
+        fun buildMedia3Item(uri: android.net.Uri): Media3Item =
+            Media3Item.Builder()
+                .setUri(uri)
+                .apply {
+                    if (!hintedMime.isNullOrBlank()) {
+                        setMimeType(hintedMime)
+                    }
+                }
+                .build()
+
+        val builder = ExoPlayer.Builder(context, renderersFactory)
+            .setAudioAttributes(audioAttributes, /* handleAudioFocus = */ true)
+            .setHandleAudioBecomingNoisy(true)
+
+        val playerInstance = when {
+            !offlinePath.isNullOrBlank() -> {
+                val mediaSourceFactory = DefaultMediaSourceFactory(context, extractorsFactory)
+                builder
+                    .setMediaSourceFactory(mediaSourceFactory)
+                    .build()
+                    .apply {
+                        setMediaItem(buildMedia3Item(android.net.Uri.fromFile(File(offlinePath))))
+                    }
+            }
+            item.isLocal && !item.localContentUri.isNullOrBlank() -> {
+                val mediaSourceFactory = DefaultMediaSourceFactory(context, extractorsFactory)
+                builder
+                    .setMediaSourceFactory(mediaSourceFactory)
+                    .build()
+                    .apply {
+                        setMediaItem(buildMedia3Item(android.net.Uri.parse(item.localContentUri)))
+                    }
+            }
+            else -> {
+                val okHttpDataSourceFactory = OkHttpDataSource.Factory(appContainer.okHttpClient)
+                val mediaSourceFactory = DefaultMediaSourceFactory(okHttpDataSourceFactory, extractorsFactory)
+                builder
+                    .setMediaSourceFactory(mediaSourceFactory)
+                    .build()
+                    .apply {
+                        setMediaItem(buildMedia3Item(android.net.Uri.parse(DriveConstants.buildFullMediaUrl(item.id))))
+                    }
+            }
+        }.apply {
+            repeatMode = if (loopVideo) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+            volume = if (isMuted) 0f else 1f
+            playWhenReady = autoPlay
+            prepare()
+        }
+        exoPlayer = playerInstance
+
         videoController.activeItemId = item.id
-        videoController.durationMs = (exoPlayer.duration.takeIf { it > 0L } ?: item.durationMillis ?: 0L)
-        videoController.currentPositionMs = exoPlayer.currentPosition.coerceAtLeast(0L)
+        videoController.durationMs = (playerInstance.duration.takeIf { it > 0L } ?: item.durationMillis ?: 0L)
+        videoController.currentPositionMs = playerInstance.currentPosition.coerceAtLeast(0L)
         videoController.isMuted = isMuted
         videoController.playbackSpeed = 1f
-        videoController.isPlaying = exoPlayer.isPlaying
+        videoController.isPlaying = playerInstance.isPlaying
         videoController.isEnded = false
 
         videoController.onTogglePlayPause = {
             when {
-                exoPlayer.playbackState == Player.STATE_ENDED -> {
-                    exoPlayer.seekTo(0L)
-                    exoPlayer.play()
+                playerInstance.playbackState == Player.STATE_ENDED -> {
+                    playerInstance.seekTo(0L)
+                    playerInstance.play()
                 }
-                exoPlayer.isPlaying -> exoPlayer.pause()
-                else -> exoPlayer.play()
+                playerInstance.isPlaying -> playerInstance.pause()
+                else -> playerInstance.play()
             }
         }
+        videoController.onPause = { playerInstance.pause() }
+        videoController.onPlay = { playerInstance.play() }
         videoController.onToggleMute = {
             val next = !isMuted
             isMuted = next
-            exoPlayer.volume = if (next) 0f else 1f
+            playerInstance.volume = if (next) 0f else 1f
             videoController.isMuted = next
         }
         videoController.onSeekTo = { posMs ->
-            exoPlayer.seekTo(posMs)
+            playerInstance.seekTo(posMs)
         }
         videoController.onSetSpeed = { speed ->
-            exoPlayer.setPlaybackSpeed(speed)
+            playerInstance.setPlaybackSpeed(speed)
         }
         videoController.onCaptureFrame = {
             val pv = playerViewRef
             captureCurrentVideoFrame(
                 context = context,
+                scope = coroutineScope,
                 playerView = pv,
                 sourceName = item.name,
+                onSavedNotify = { appContainer.localMediaRepository.notifyPermissionChanged() },
                 onResult = { msg ->
                     coroutineScope.launch { onFrameCapturedMessage(msg) }
                 }
@@ -325,8 +372,8 @@ fun VideoPlayerPage(
                 isBuffering = playbackState == Player.STATE_BUFFERING
                 isEnded = playbackState == Player.STATE_ENDED
                 videoController.isEnded = isEnded
-                if (exoPlayer.duration > 0L) {
-                    videoController.durationMs = exoPlayer.duration
+                if (playerInstance.duration > 0L) {
+                    videoController.durationMs = playerInstance.duration
                 }
                 if (isEnded) {
                     videoController.currentPositionMs = videoController.durationMs
@@ -346,21 +393,25 @@ fun VideoPlayerPage(
 
         val lifecycleObserver = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_STOP -> exoPlayer.pause()
+                Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_STOP -> playerInstance.pause()
                 else -> Unit
             }
         }
 
-        exoPlayer.addListener(listener)
+        playerInstance.addListener(listener)
         lifecycleOwner.lifecycle.addObserver(lifecycleObserver)
 
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(lifecycleObserver)
-            exoPlayer.removeListener(listener)
-            exoPlayer.stop()
-            exoPlayer.release()
+            playerInstance.removeListener(listener)
+            playerInstance.stop()
+            playerInstance.release()
+            if (exoPlayer === playerInstance) exoPlayer = null
+            firstFrameRendered = false
             if (videoController.activeItemId == item.id) {
                 videoController.onTogglePlayPause = null
+                videoController.onPause = null
+                videoController.onPlay = null
                 videoController.onToggleMute = null
                 videoController.onSeekTo = null
                 videoController.onSetSpeed = null
@@ -370,11 +421,18 @@ fun VideoPlayerPage(
         }
     }
 
-    // Silky 20fps playhead ticker while actively playing & chrome visible (smooth white scrub bar!)
+    LaunchedEffect(exoPlayer, loopVideo) {
+        exoPlayer?.repeatMode = if (loopVideo) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+    }
+
+    // Silky 20fps playhead ticker while actively playing & chrome visible (pauses while scrubbing!)
     LaunchedEffect(exoPlayer, isPlaying, chromeVisible, isActivePage) {
-        while (exoPlayer != null && isActivePage && isPlaying && chromeVisible) {
-            videoController.currentPositionMs = exoPlayer.currentPosition.coerceAtLeast(0L)
-            if (exoPlayer.duration > 0L) videoController.durationMs = exoPlayer.duration
+        val activePlayer = exoPlayer ?: return@LaunchedEffect
+        while (isActivePage && isPlaying && chromeVisible) {
+            if (!videoController.isScrubbing) {
+                videoController.currentPositionMs = activePlayer.currentPosition.coerceAtLeast(0L)
+            }
+            if (activePlayer.duration > 0L) videoController.durationMs = activePlayer.duration
             delay(50L)
         }
     }
@@ -391,13 +449,34 @@ fun VideoPlayerPage(
         }
     }
 
-    val dismissFraction = (dismissOffsetY.value / 420f).coerceIn(0f, 1f)
+    val density = LocalDensity.current
+    val dismissThresholdPx = with(density) { 84.dp.toPx() }
+    val dismissRangePx = with(density) { 160.dp.toPx() }.coerceAtLeast(1f)
+    val dismissFraction = (dismissOffsetY.value / dismissRangePx).coerceIn(0f, 1f)
     val dismissScale = 1f - (dismissFraction * 0.22f)
 
     Box(
         modifier = modifier
             .fillMaxSize()
             .onSizeChanged { videoContainerSize = it }
+            .pointerInput(item.id, exoPlayer) {
+                detectTapGestures(
+                    onTap = { onToggleChrome() },
+                    onDoubleTap = { offset ->
+                        val activePlayer = exoPlayer
+                        if (activePlayer != null) {
+                            val isLeft = offset.x < size.width / 2f
+                            val delta = if (isLeft) -5_000L else 5_000L
+                            val target = (activePlayer.currentPosition + delta)
+                                .coerceIn(0L, activePlayer.duration.coerceAtLeast(1L))
+                            activePlayer.seekTo(target)
+                            videoController.currentPositionMs = target
+                            skipFeedbackLeft = isLeft
+                            skipFeedbackText = if (isLeft) "-5s" else "+5s"
+                        }
+                    }
+                )
+            }
             .pointerInput(item.id) {
                 awaitEachGesture {
                     awaitFirstDown(requireUnconsumed = false)
@@ -448,8 +527,7 @@ fun VideoPlayerPage(
                     },
                     onDragEnd = {
                         when {
-                            swipeDownToDismiss && dismissOffsetY.value > 210f -> {
-                                // Hand the current drag position over to the fly-home morph
+                            swipeDownToDismiss && dismissOffsetY.value > dismissThresholdPx -> {
                                 onDismiss()
                             }
                             !detailsFired && swipeUpAccumulated > 55f -> {
@@ -481,7 +559,6 @@ fun VideoPlayerPage(
                     onVerticalDrag = { change, dragAmount ->
                         change.consume()
                         if (dragAmount < 0f && dismissOffsetY.value <= 0f) {
-                            // Keep video completely stationary when swiping up for Details
                             swipeUpAccumulated += -dragAmount
                             if (!detailsFired && swipeUpAccumulated > 95f) {
                                 detailsFired = true
@@ -491,7 +568,7 @@ fun VideoPlayerPage(
                         } else if (swipeDownToDismiss) {
                             val updated = (dismissOffsetY.value + dragAmount).coerceAtLeast(0f)
                             coroutineScope.launch { dismissOffsetY.snapTo(updated) }
-                            onVerticalDismissProgress((updated / 420f).coerceIn(0f, 1f))
+                            onVerticalDismissProgress((updated / dismissRangePx).coerceIn(0f, 1f))
                         }
                     }
                 )
@@ -501,27 +578,11 @@ fun VideoPlayerPage(
                 scaleY = dismissScale * videoZoom
                 translationX = videoPan.x
                 translationY = dismissOffsetY.value + videoPan.y
-            }
-            .pointerInput(item.id, exoPlayer) {
-                detectTapGestures(
-                    onTap = { onToggleChrome() },
-                    onDoubleTap = { offset ->
-                        if (exoPlayer != null) {
-                            val isLeft = offset.x < size.width / 2f
-                            val delta = if (isLeft) -5_000L else 5_000L
-                            val target = (exoPlayer.currentPosition + delta)
-                                .coerceIn(0L, exoPlayer.duration.coerceAtLeast(1L))
-                            exoPlayer.seekTo(target)
-                            videoController.currentPositionMs = target
-                            skipFeedbackLeft = isLeft
-                            skipFeedbackText = if (isLeft) "-5s" else "+5s"
-                        }
-                    }
-                )
             },
         contentAlignment = Alignment.Center
     ) {
-        if (exoPlayer != null) {
+        val activePlayer = exoPlayer
+        if (activePlayer != null) {
             AndroidView(
                 factory = { ctx ->
                     (LayoutInflater.from(ctx).inflate(R.layout.view_exo_texture_player, null) as PlayerView).apply {
@@ -532,14 +593,14 @@ fun VideoPlayerPage(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.MATCH_PARENT
                         )
-                        player = exoPlayer
+                        player = activePlayer
                         playerViewRef = this
                     }
                 },
                 update = { view ->
                     playerViewRef = view
-                    if (view.player !== exoPlayer) {
-                        view.player = exoPlayer
+                    if (view.player !== activePlayer) {
+                        view.player = activePlayer
                     }
                 },
                 onRelease = { view ->
@@ -626,29 +687,81 @@ fun VideoPlayerPage(
         playbackError?.let { err ->
             GlassSurface(
                 shape = RoundedCornerShape(16.dp),
-                containerColor = Color.Black.copy(alpha = 0.78f),
+                containerColor = Color.Black.copy(alpha = 0.82f),
                 modifier = Modifier.padding(24.dp)
             ) {
-                Text(
-                    text = err,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = Color.White,
-                    modifier = Modifier.padding(16.dp)
-                )
+                Column(
+                    modifier = Modifier.padding(18.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = err,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = Color.White
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(onClick = { retryNonce++ }) {
+                            Text("Retry", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
+                        }
+                        TextButton(
+                            onClick = {
+                                coroutineScope.launch {
+                                    val resolvedUri = when {
+                                        item.isLocal && !item.localContentUri.isNullOrBlank() -> {
+                                            val rawUri = android.net.Uri.parse(item.localContentUri)
+                                            if (rawUri.scheme == "file") {
+                                                appContainer.mediaExportManager
+                                                    .prepareCleanShareUri(rawUri, item.name, item.mimeType)
+                                                    .getOrNull()
+                                            } else {
+                                                rawUri
+                                            }
+                                        }
+                                        else -> {
+                                            appContainer.exportMediaUseCase
+                                                .prepareShareUris(listOf(item), stripLocation = false)
+                                                .getOrNull()
+                                                ?.firstOrNull()
+                                        }
+                                    }
+                                    if (resolvedUri != null) {
+                                        val mime = VideoFormatSupport.normalizeVideoMimeType(item.name, item.mimeType)
+                                        val viewIntent = Intent(Intent.ACTION_VIEW).apply {
+                                            setDataAndType(resolvedUri, mime)
+                                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                        }
+                                        runCatching {
+                                            context.startActivity(Intent.createChooser(viewIntent, "Play video with"))
+                                        }.onFailure {
+                                            onFrameCapturedMessage("No external video player found")
+                                        }
+                                    } else {
+                                        onFrameCapturedMessage("Unable to open video externally")
+                                    }
+                                }
+                            }
+                        ) {
+                            Text("Open externally", color = Color.White.copy(alpha = 0.9f), fontWeight = FontWeight.Medium)
+                        }
+                    }
+                }
             }
         }
     }
 }
 
 /**
- * Samsung-style Video Frame Capture: grabs the exact current frame from ExoPlayer's SurfaceView
+ * Samsung-style Video Frame Capture: grabs the exact current frame from ExoPlayer's TextureView/SurfaceView
  * (works for BOTH local videos and streamed Google Drive videos!) and saves it to Pictures/Lumina.
  */
 @OptIn(UnstableApi::class)
 private fun captureCurrentVideoFrame(
     context: Context,
+    scope: kotlinx.coroutines.CoroutineScope,
     playerView: PlayerView?,
     sourceName: String,
+    onSavedNotify: () -> Unit,
     onResult: (String) -> Unit
 ) {
     val surfaceView = playerView?.videoSurfaceView
@@ -658,7 +771,9 @@ private fun captureCurrentVideoFrame(
     }
 
     fun persistBitmap(bmp: Bitmap) {
-        kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+        scope.launch(Dispatchers.IO) {
+            val resolver = context.contentResolver
+            var insertedUri: android.net.Uri? = null
             val saved = runCatching {
                 val baseName = sourceName.substringBeforeLast('.').ifBlank { "VideoFrame" }
                 val fileName = "${baseName}_frame_${System.currentTimeMillis()}.jpg"
@@ -670,19 +785,24 @@ private fun captureCurrentVideoFrame(
                         put(MediaStore.Images.Media.IS_PENDING, 1)
                     }
                 }
-                val resolver = context.contentResolver
                 val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
                     ?: error("Insert failed")
+                insertedUri = uri
                 resolver.openOutputStream(uri)?.use { out ->
-                    bmp.compress(Bitmap.CompressFormat.JPEG, 95, out)
-                }
+                    if (!bmp.compress(Bitmap.CompressFormat.JPEG, 95, out)) {
+                        error("Compress failed")
+                    }
+                } ?: error("Output stream unavailable")
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     values.clear()
                     values.put(MediaStore.Images.Media.IS_PENDING, 0)
                     resolver.update(uri, values, null, null)
                 }
+            }.onFailure {
+                insertedUri?.let { runCatching { resolver.delete(it, null, null) } }
             }.isSuccess
             bmp.recycle()
+            if (saved) onSavedNotify()
             withContext(Dispatchers.Main) {
                 onResult(if (saved) "Captured frame saved to gallery" else "Could not save captured frame")
             }

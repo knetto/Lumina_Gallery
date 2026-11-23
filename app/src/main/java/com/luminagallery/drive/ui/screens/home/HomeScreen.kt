@@ -1,15 +1,17 @@
 package com.luminagallery.drive.ui.screens.home
 
 import android.app.Activity
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.MediaStore
+import android.provider.Settings
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.AnimatedVisibilityScope
-import androidx.compose.animation.ExperimentalSharedTransitionApi
-import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -55,10 +57,10 @@ import androidx.compose.material.icons.automirrored.rounded.Sort
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.FilterAlt
 import androidx.compose.material.icons.outlined.LocationOn
+import androidx.compose.material.icons.outlined.PhotoCamera
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.CloudDone
 import androidx.compose.material.icons.rounded.CreateNewFolder
 import androidx.compose.material.icons.rounded.DeleteOutline
@@ -83,6 +85,7 @@ import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
@@ -108,6 +111,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -148,14 +152,12 @@ import com.luminagallery.drive.ui.screens.stories.StoriesTabContent
 
 private val OneUiTabEasing = OneUiMotion.FluidEasing
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalSharedTransitionApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
     viewModel: HomeViewModel,
     lastViewedItemId: String?,
     onConsumedLastViewedItemId: () -> Unit,
-    sharedTransitionScope: SharedTransitionScope,
-    animatedVisibilityScope: AnimatedVisibilityScope,
     onOpenFolder: (folderId: String, folderName: String) -> Unit,
     onOpenCollection: (collectionId: String, collectionName: String) -> Unit,
     onOpenPictureViewer: (itemId: String) -> Unit,
@@ -172,6 +174,27 @@ fun HomeScreen(
     val haptic = LocalHapticFeedback.current
     val snackbarHostState = remember { SnackbarHostState() }
     val picturesGridState = rememberLazyGridState()
+    val albumsGridState = rememberLazyGridState()
+    val permPrefs = remember(context) {
+        context.applicationContext.getSharedPreferences("lumina_perm_prefs", Context.MODE_PRIVATE)
+    }
+    var hasRequestedPermsBefore by remember {
+        mutableStateOf(permPrefs.getBoolean("asked_initial_media_perms", false))
+    }
+
+    fun launchSystemCamera() {
+        val intent = Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA)
+        runCatching { context.startActivity(intent) }
+            .onFailure { viewModel.showMessage("No camera app found on this device") }
+    }
+
+    fun openAppSettings() {
+        val intent = Intent(
+            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            Uri.fromParts("package", context.packageName, null)
+        )
+        runCatching { context.startActivity(intent) }
+    }
 
     var folderToUnpin by remember { mutableStateOf<DriveFolder?>(null) }
     var isSigningInWithGoogle by remember { mutableStateOf(false) }
@@ -198,13 +221,17 @@ fun HomeScreen(
     val mediaPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) {
+        permPrefs.edit().putBoolean("asked_initial_media_perms", true).apply()
+        hasRequestedPermsBefore = true
         viewModel.onMediaPermissionResult()
     }
 
     LaunchedEffect(Unit) {
-        if (!appContainer.localMediaRepository.hasMediaPermission() ||
-            !appContainer.localMediaRepository.hasMediaLocationPermission()
-        ) {
+        // Only auto-prompt once on fresh install; never nag about ACCESS_MEDIA_LOCATION on every launch
+        val alreadyAsked = permPrefs.getBoolean("asked_initial_media_perms", false)
+        if (!alreadyAsked && !appContainer.localMediaRepository.hasMediaPermission()) {
+            permPrefs.edit().putBoolean("asked_initial_media_perms", true).apply()
+            hasRequestedPermsBefore = true
             mediaPermissionLauncher.launch(
                 appContainer.localMediaRepository.requiredMediaPermissions()
             )
@@ -398,16 +425,19 @@ fun HomeScreen(
                 .padding(bottom = innerPadding.calculateBottomPadding())
         ) {
             if (storiesAmbientAlpha > 0.01f) {
+                val isDarkBg = MaterialTheme.colorScheme.background.luminance() < 0.5f
+                val washColor = if (isDarkBg) {
+                    Color(0xFF0E2B2A).copy(alpha = 0.72f * storiesAmbientAlpha)
+                } else {
+                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.52f * storiesAmbientAlpha)
+                }
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(280.dp)
                         .background(
                             Brush.verticalGradient(
-                                colors = listOf(
-                                    Color(0xFF0E2B2A).copy(alpha = 0.72f * storiesAmbientAlpha),
-                                    Color.Transparent
-                                )
+                                colors = listOf(washColor, Color.Transparent)
                             )
                         )
                 )
@@ -437,6 +467,7 @@ fun HomeScreen(
                     onFavoritesClick = {
                         onOpenSpecialFilter(SpecialGalleryFilter.FAVORITES)
                     },
+                    onCameraClick = ::launchSystemCamera,
                     onSearchClick = onOpenSearch,
                     onOverflowClick = { showOverflowMenu = true },
                     onSelectActionClick = {
@@ -511,20 +542,40 @@ fun HomeScreen(
                             MainTab.PICTURES -> {
                                 if (!uiState.hasLocalMediaPermission) {
                                     LocalPermissionCard(
+                                        showSettingsFallback = hasRequestedPermsBefore,
                                         onGrantClick = {
                                             mediaPermissionLauncher.launch(
                                                 appContainer.localMediaRepository.requiredMediaPermissions()
                                             )
-                                        }
+                                        },
+                                        onOpenSettingsClick = ::openAppSettings
                                     )
                                 } else if (uiState.timelineEntries.isEmpty()) {
-                                    EmptyPicturesState()
+                                    Column(modifier = Modifier.fillMaxSize()) {
+                                        if (uiState.hasPartialMediaPermission) {
+                                            Box(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                                                CompactOneUiBanner(
+                                                    icon = Icons.Rounded.PhotoLibrary,
+                                                    title = "Limited photo access",
+                                                    subtitle = "Tap to choose more photos or grant full access",
+                                                    onClick = {
+                                                        mediaPermissionLauncher.launch(
+                                                            appContainer.localMediaRepository.requiredMediaPermissions()
+                                                        )
+                                                    }
+                                                )
+                                            }
+                                        }
+                                        EmptyPicturesState()
+                                    }
                                 } else {
                                     PinchZoomGridContainer(
                                         currentColumns = uiState.gridColumns,
                                         onColumnsChange = viewModel::setGridColumns,
                                         modifier = Modifier.fillMaxSize()
                                     ) {
+                                        val hasPartialBanner = uiState.hasPartialMediaPermission
+                                        val partialHeaderOffset = if (hasPartialBanner) 1 else 0
                                         val orderedPictureIds = remember(uiState.timelineEntries) {
                                             uiState.timelineEntries
                                                 .filterIsInstance<PicturesTimelineEntry.PhotoTile>()
@@ -550,9 +601,29 @@ fun HomeScreen(
                                                         (key as? String)?.takeIf { it.startsWith("pic_") }?.removePrefix("pic_")
                                                     },
                                                     selectedIds = uiState.selectedPictureIds,
-                                                    onSetItemSelected = viewModel::setPictureSelected
+                                                    onSetItemSelected = viewModel::setPictureSelected,
+                                                    onSetRangeSelected = viewModel::setPicturesSelectedRange
                                                 )
                                         ) {
+                                            if (hasPartialBanner) {
+                                                item(
+                                                    key = "partial_access_banner_pics",
+                                                    span = { GridItemSpan(maxLineSpan) }
+                                                ) {
+                                                    Box(modifier = Modifier.padding(horizontal = 6.dp, vertical = 6.dp)) {
+                                                        CompactOneUiBanner(
+                                                            icon = Icons.Rounded.PhotoLibrary,
+                                                            title = "Limited photo access",
+                                                            subtitle = "Tap to select more photos or allow all",
+                                                            onClick = {
+                                                                mediaPermissionLauncher.launch(
+                                                                    appContainer.localMediaRepository.requiredMediaPermissions()
+                                                                )
+                                                            }
+                                                        )
+                                                    }
+                                                }
+                                            }
                                             items(
                                                 items = uiState.timelineEntries,
                                                 key = { it.stableKey },
@@ -624,8 +695,6 @@ fun HomeScreen(
                                                             isSelected = isSelected,
                                                             isFavorite = entry.item.id in uiState.favoriteItemIds,
                                                             showCloudBadge = uiState.showCloudBadges,
-                                                            sharedTransitionScope = sharedTransitionScope,
-                                                            animatedVisibilityScope = animatedVisibilityScope,
                                                             onClick = {
                                                                 if (uiState.isPictureSelectionMode) {
                                                                     viewModel.togglePictureSelection(entry.item.id)
@@ -643,9 +712,9 @@ fun HomeScreen(
 
                                         FastScrollThumb(
                                             gridState = picturesGridState,
-                                            totalItemCount = uiState.timelineEntries.size,
+                                            totalItemCount = uiState.timelineEntries.size + partialHeaderOffset,
                                             labelForIndex = { idx ->
-                                                uiState.timelineEntries.getOrNull(idx)?.dateLabel
+                                                uiState.timelineEntries.getOrNull(idx - partialHeaderOffset)?.dateLabel
                                             },
                                             modifier = Modifier.align(Alignment.CenterEnd)
                                         )
@@ -664,11 +733,13 @@ fun HomeScreen(
                                 ) {
                                     if (!uiState.hasLocalMediaPermission && uiState.unifiedAlbumGridItems.isEmpty()) {
                                         LocalPermissionCard(
+                                            showSettingsFallback = hasRequestedPermsBefore,
                                             onGrantClick = {
                                                 mediaPermissionLauncher.launch(
                                                     appContainer.localMediaRepository.requiredMediaPermissions()
                                                 )
-                                            }
+                                            },
+                                            onOpenSettingsClick = ::openAppSettings
                                         )
                                     } else {
                                         DraggableAlbumGrid(
@@ -676,7 +747,9 @@ fun HomeScreen(
                                             isUnmeteredWifi = uiState.highResThumbnailsAllowed,
                                             selectedIds = uiState.selectedAlbumIds,
                                             forceSelectionMode = uiState.forceAlbumSelectionMode,
+                                            dragReorderEnabled = uiState.albumsFilter == AlbumsTabFilter.ALL,
                                             showCloudBadges = uiState.showCloudBadges,
+                                            gridState = albumsGridState,
                                             contentPadding = PaddingValues(
                                                 start = 16.dp,
                                                 end = 16.dp,
@@ -696,6 +769,45 @@ fun HomeScreen(
                                                                 )
                                                             }
                                                         )
+                                                    }
+                                                }
+                                                uiState.hasPartialMediaPermission -> {
+                                                    {
+                                                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                            CompactOneUiBanner(
+                                                                icon = Icons.Rounded.PhotoLibrary,
+                                                                title = "Limited photo access",
+                                                                subtitle = "Tap to select more photos or allow all",
+                                                                onClick = {
+                                                                    mediaPermissionLauncher.launch(
+                                                                        appContainer.localMediaRepository.requiredMediaPermissions()
+                                                                    )
+                                                                }
+                                                            )
+                                                            if (uiState.albumsFilter != AlbumsTabFilter.ALL || uiState.albumSortMode != AlbumSortMode.CUSTOM) {
+                                                                Row(
+                                                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                                    verticalAlignment = Alignment.CenterVertically
+                                                                ) {
+                                                                    if (uiState.albumsFilter != AlbumsTabFilter.ALL) {
+                                                                        AlbumsActiveCapsule(
+                                                                            icon = Icons.Outlined.FilterAlt,
+                                                                            label = uiState.albumsFilter.label,
+                                                                            onClick = { showAlbumsFilterDialog = true },
+                                                                            onClear = { viewModel.setAlbumsFilter(AlbumsTabFilter.ALL) }
+                                                                        )
+                                                                    }
+                                                                    if (uiState.albumSortMode != AlbumSortMode.CUSTOM) {
+                                                                        AlbumsActiveCapsule(
+                                                                            icon = Icons.AutoMirrored.Rounded.Sort,
+                                                                            label = uiState.albumSortMode.label,
+                                                                            onClick = { showSortDialog = true },
+                                                                            onClear = { viewModel.setAlbumSortMode(AlbumSortMode.CUSTOM) }
+                                                                        )
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
                                                     }
                                                 }
                                                 uiState.albumsFilter != AlbumsTabFilter.ALL || uiState.albumSortMode != AlbumSortMode.CUSTOM -> {
@@ -772,7 +884,18 @@ fun HomeScreen(
                 it is AlbumGridItem.AlbumEntry && !it.folder.isLocal
             }
             val availableMoveTargets = remember(uiState.allCollections, uiState.selectedAlbumIds) {
-                uiState.allCollections.filter { it.id !in uiState.selectedAlbumIds }
+                val blocked = buildSet {
+                    addAll(uiState.selectedAlbumIds)
+                    val childrenByParent = uiState.allCollections.groupBy { it.parentCollectionId }
+                    val queue = ArrayDeque(uiState.selectedAlbumIds)
+                    while (queue.isNotEmpty()) {
+                        val curr = queue.removeFirst()
+                        for (child in childrenByParent[curr].orEmpty()) {
+                            if (add(child.id)) queue.addLast(child.id)
+                        }
+                    }
+                }
+                uiState.allCollections.filter { it.id !in blocked }
             }
 
             AlbumSelectionActionBar(
@@ -872,7 +995,8 @@ fun HomeScreen(
             onGoogleDriveClick = viewModel::openDriveManagerSheet,
             onCleanOutClick = onOpenCleanOut,
             onTrashClick = { onOpenSpecialFilter(SpecialGalleryFilter.TRASH) },
-            onSettingsClick = onOpenSettings
+            onSettingsClick = onOpenSettings,
+            onCameraClick = ::launchSystemCamera
         )
     }
 
@@ -904,7 +1028,7 @@ fun HomeScreen(
     if (showSortDialog) {
         AlertDialog(
             onDismissRequest = { showSortDialog = false },
-            containerColor = Color(0xFF232326),
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
             shape = RoundedCornerShape(26.dp),
             title = { Text("Sort albums") },
             text = {
@@ -946,7 +1070,7 @@ fun HomeScreen(
     if (showAlbumsFilterDialog) {
         AlertDialog(
             onDismissRequest = { showAlbumsFilterDialog = false },
-            containerColor = Color(0xFF232326),
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
             shape = RoundedCornerShape(26.dp),
             title = { Text("Filter albums") },
             text = {
@@ -1219,7 +1343,20 @@ fun HomeScreen(
 
     // Move selected albums into an existing collection
     if (showMoveSelectedSheet) {
-        val destinations = uiState.allCollections.filter { it.id !in uiState.selectedAlbumIds }
+        val destinations = remember(uiState.allCollections, uiState.selectedAlbumIds) {
+            val blocked = buildSet {
+                addAll(uiState.selectedAlbumIds)
+                val childrenByParent = uiState.allCollections.groupBy { it.parentCollectionId }
+                val queue = ArrayDeque(uiState.selectedAlbumIds)
+                while (queue.isNotEmpty()) {
+                    val curr = queue.removeFirst()
+                    for (child in childrenByParent[curr].orEmpty()) {
+                        if (add(child.id)) queue.addLast(child.id)
+                    }
+                }
+            }
+            uiState.allCollections.filter { it.id !in blocked }
+        }
         ModalBottomSheet(
             onDismissRequest = { showMoveSelectedSheet = false },
             containerColor = MaterialTheme.colorScheme.surfaceContainer,
@@ -1236,18 +1373,24 @@ fun HomeScreen(
                     style = MaterialTheme.typography.titleMedium,
                     modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp)
                 )
-                destinations.forEach { dest ->
-                    ListItem(
-                        headlineContent = { Text(dest.name) },
-                        leadingContent = {
-                            Icon(Icons.AutoMirrored.Rounded.DriveFileMove, contentDescription = null)
-                        },
-                        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                        modifier = Modifier.clickable {
-                            viewModel.moveSelectedAlbumsIntoCollection(dest.id)
-                            showMoveSelectedSheet = false
-                        }
-                    )
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 420.dp)
+                ) {
+                    items(destinations, key = { it.id }) { dest ->
+                        ListItem(
+                            headlineContent = { Text(dest.name) },
+                            leadingContent = {
+                                Icon(Icons.AutoMirrored.Rounded.DriveFileMove, contentDescription = null)
+                            },
+                            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                            modifier = Modifier.clickable {
+                                viewModel.moveSelectedAlbumsIntoCollection(dest.id)
+                                showMoveSelectedSheet = false
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -1265,6 +1408,7 @@ private fun SamsungTopHeaderBar(
     onCreateCollectionClick: () -> Unit,
     onAddDriveFolderClick: () -> Unit,
     onFavoritesClick: () -> Unit,
+    onCameraClick: () -> Unit,
     onSearchClick: () -> Unit,
     onOverflowClick: () -> Unit,
     onSelectActionClick: () -> Unit,
@@ -1313,7 +1457,7 @@ private fun SamsungTopHeaderBar(
                         expanded = addMenuExpanded,
                         onDismissRequest = onDismissAddMenu,
                         shape = RoundedCornerShape(20.dp),
-                        containerColor = Color(0xFF28282B)
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
                     ) {
                         DropdownMenuItem(
                             text = { Text("Create collection") },
@@ -1322,7 +1466,12 @@ private fun SamsungTopHeaderBar(
                         )
                         DropdownMenuItem(
                             text = { Text("Add Google Drive folder") },
-                            leadingIcon = { Icon(Icons.Rounded.Cloud, contentDescription = null) },
+                            leadingIcon = {
+                                com.luminagallery.drive.ui.components.GoogleDriveGlyph(
+                                    size = 20.dp,
+                                    primaryColor = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            },
                             onClick = onAddDriveFolderClick
                         )
                     }
@@ -1334,6 +1483,14 @@ private fun SamsungTopHeaderBar(
                     Icon(
                         imageVector = Icons.Outlined.FavoriteBorder,
                         contentDescription = "Favorites",
+                        tint = MaterialTheme.colorScheme.onBackground
+                    )
+                }
+            } else {
+                IconButton(onClick = onCameraClick) {
+                    Icon(
+                        imageVector = Icons.Outlined.PhotoCamera,
+                        contentDescription = "Open camera",
                         tint = MaterialTheme.colorScheme.onBackground
                     )
                 }
@@ -1359,7 +1516,7 @@ private fun SamsungTopHeaderBar(
                     expanded = overflowMenuExpanded,
                     onDismissRequest = onDismissOverflowMenu,
                     shape = RoundedCornerShape(22.dp),
-                    containerColor = Color(0xFF28282B)
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
                 ) {
                     when (selectedTab) {
                         MainTab.ALBUMS -> {
@@ -1427,7 +1584,7 @@ private fun HideAlbumsBottomSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = Color(0xFF232326),
+        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
     ) {
         Column(
@@ -1515,7 +1672,7 @@ private fun GoogleDriveManagerSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = Color(0xFF232326),
+        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
     ) {
         Column(
@@ -1615,7 +1772,7 @@ private fun GoogleDriveManagerSheet(
                             items(pinnedRoots, key = { it.id }) { folder ->
                                 Surface(
                                     shape = RoundedCornerShape(16.dp),
-                                    color = Color(0xFF323236),
+                                    color = MaterialTheme.colorScheme.surfaceContainerHighest,
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .clickable { onOpenFolder(folder) }
@@ -1631,7 +1788,7 @@ private fun GoogleDriveManagerSheet(
                                             Icon(
                                                 imageVector = Icons.Rounded.Folder,
                                                 contentDescription = null,
-                                                tint = Color.White.copy(alpha = 0.9f)
+                                                tint = MaterialTheme.colorScheme.onSurface
                                             )
                                         },
                                         trailingContent = {
@@ -1664,11 +1821,11 @@ private fun AlbumsActiveCapsule(
 ) {
     Surface(
         shape = RoundedCornerShape(50),
-        color = Color(0xFF1F1F24),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
         modifier = Modifier
             .border(
                 width = 0.8.dp,
-                color = Color.White.copy(alpha = 0.14f),
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
                 shape = RoundedCornerShape(50)
             )
             .clip(RoundedCornerShape(50))
@@ -1682,27 +1839,27 @@ private fun AlbumsActiveCapsule(
             Icon(
                 imageVector = icon,
                 contentDescription = null,
-                tint = Color.White.copy(alpha = 0.86f),
+                tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.86f),
                 modifier = Modifier.size(14.dp)
             )
             Text(
                 text = label,
                 style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
-                color = Color.White.copy(alpha = 0.94f),
+                color = MaterialTheme.colorScheme.onSurface,
                 maxLines = 1
             )
             Box(
                 modifier = Modifier
                     .size(17.dp)
                     .clip(CircleShape)
-                    .background(Color.White.copy(alpha = 0.12f))
+                    .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f))
                     .clickable(onClick = onClear),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
                     imageVector = Icons.Rounded.Close,
                     contentDescription = "Clear",
-                    tint = Color.White.copy(alpha = 0.9f),
+                    tint = MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier.size(11.dp)
                 )
             }
@@ -1753,7 +1910,11 @@ private fun CompactOneUiBanner(
 }
 
 @Composable
-private fun LocalPermissionCard(onGrantClick: () -> Unit) {
+private fun LocalPermissionCard(
+    showSettingsFallback: Boolean = false,
+    onGrantClick: () -> Unit,
+    onOpenSettingsClick: () -> Unit = {}
+) {
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -1793,6 +1954,17 @@ private fun LocalPermissionCard(onGrantClick: () -> Unit) {
                         .height(48.dp)
                 ) {
                     Text("Allow Photos & Videos")
+                }
+                if (showSettingsFallback) {
+                    OutlinedButton(
+                        onClick = onOpenSettingsClick,
+                        shape = RoundedCornerShape(16.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(46.dp)
+                    ) {
+                        Text("Open App Settings")
+                    }
                 }
             }
         }

@@ -76,15 +76,16 @@ fun MoveCopyToAlbumSheet(
     var useDcimParent by remember { mutableStateOf(true) }
     var newAlbumName by remember { mutableStateOf("") }
     var isBusy by remember { mutableStateOf(false) }
-    var pendingMoveTarget by remember { mutableStateOf<Pair<String, Boolean>?>(null) }
+    var pendingMoveTarget by remember { mutableStateOf<Triple<String, Boolean, String?>?>(null) }
 
-    fun executeMoveNow(targetFolderName: String, inDcim: Boolean) {
+    fun executeMoveNow(targetFolderName: String, inDcim: Boolean, targetRelPath: String?) {
         isBusy = true
         scope.launch {
             container.localFileOperationsManager.moveLocalItemsToAlbum(
                 items = localItems,
                 albumFolderName = targetFolderName,
-                useDcimParent = inDcim
+                useDcimParent = inDcim,
+                targetRelativePath = targetRelPath
             )
                 .onSuccess { count ->
                     container.localMediaRepository.notifyPermissionChanged()
@@ -104,13 +105,17 @@ fun MoveCopyToAlbumSheet(
         val target = pendingMoveTarget
         pendingMoveTarget = null
         if (result.resultCode == Activity.RESULT_OK && target != null && target.first.isNotBlank()) {
-            executeMoveNow(target.first, target.second)
+            executeMoveNow(target.first, target.second, target.third)
         } else {
             onCompleted("Move cancelled")
         }
     }
 
-    fun selectAlbum(targetFolderName: String, inDcim: Boolean = useDcimParent) {
+    fun selectAlbum(
+        targetFolderName: String,
+        inDcim: Boolean = useDcimParent,
+        targetRelPath: String? = null
+    ) {
         if (isBusy || localItems.isEmpty()) return
         val cleanName = targetFolderName.trim()
         if (cleanName.isEmpty()) return
@@ -118,10 +123,10 @@ fun MoveCopyToAlbumSheet(
         if (isMoveMode) {
             val sender = container.localFileOperationsManager.buildWritePermissionSender(localItems)
             if (sender != null) {
-                pendingMoveTarget = cleanName to inDcim
+                pendingMoveTarget = Triple(cleanName, inDcim, targetRelPath)
                 writePermissionLauncher.launch(IntentSenderRequest.Builder(sender).build())
             } else {
-                executeMoveNow(cleanName, inDcim)
+                executeMoveNow(cleanName, inDcim, targetRelPath)
             }
         } else {
             isBusy = true
@@ -129,7 +134,8 @@ fun MoveCopyToAlbumSheet(
                 container.localFileOperationsManager.copyLocalItemsToAlbum(
                     items = localItems,
                     albumFolderName = cleanName,
-                    useDcimParent = inDcim
+                    useDcimParent = inDcim,
+                    targetRelativePath = targetRelPath
                 )
                     .onSuccess { count ->
                         container.localMediaRepository.notifyPermissionChanged()
@@ -265,13 +271,20 @@ fun MoveCopyToAlbumSheet(
                     .fillMaxWidth()
                     .heightIn(max = 300.dp)
             ) {
-                items(localAlbums, key = { it.id }) { album ->
+                items(localAlbums.filter { !it.isLocked }, key = { it.id }) { album ->
                     val albumInDcim = album.relativePath?.startsWith("DCIM", ignoreCase = true) == true
+                    val exactPath = album.relativePath?.takeIf { it.contains('/') }
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(14.dp))
-                            .clickable(enabled = !isBusy) { selectAlbum(album.name, inDcim = albumInDcim) }
+                            .clickable(enabled = !isBusy) {
+                                selectAlbum(
+                                    targetFolderName = album.name,
+                                    inDcim = albumInDcim,
+                                    targetRelPath = exactPath
+                                )
+                            }
                             .padding(horizontal = 8.dp, vertical = 12.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(12.dp)

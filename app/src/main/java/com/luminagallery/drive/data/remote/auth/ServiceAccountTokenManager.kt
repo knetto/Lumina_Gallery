@@ -94,20 +94,24 @@ class ServiceAccountTokenManager(
     }
 
     @Throws(IOException::class)
-    fun getAccessToken(forceRefresh: Boolean = false): String {
+    fun getAccessToken(forceRefresh: Boolean = false, failedToken: String? = null): String {
         synchronized(lock) {
             if (credentialStore.isGoogleSignInActive()) {
-                return getGoogleOAuthTokenLocked(forceRefresh)
+                return getGoogleOAuthTokenLocked(forceRefresh, failedToken)
             }
-            return getServiceAccountTokenLocked(forceRefresh)
+            return getServiceAccountTokenLocked(forceRefresh, failedToken)
         }
     }
 
-    private fun getGoogleOAuthTokenLocked(forceRefresh: Boolean): String {
+    private fun getGoogleOAuthTokenLocked(forceRefresh: Boolean, failedToken: String?): String {
         val now = System.currentTimeMillis()
         val existing = cachedOAuthToken
-        if (!forceRefresh && !existing.isNullOrBlank() && (now - cachedOAuthFetchedAtMs) < OAUTH_SOFT_TTL_MS) {
-            return existing
+        if (!existing.isNullOrBlank() && (now - cachedOAuthFetchedAtMs) < OAUTH_SOFT_TTL_MS) {
+            // Deduplicate concurrent 401 refreshes: if another thread already rotated away from
+            // `failedToken`, reuse the freshly minted token instead of clearing it!
+            if (!forceRefresh || (failedToken != null && existing != failedToken)) {
+                return existing
+            }
         }
 
         val client = Identity.getAuthorizationClient(context)
@@ -177,9 +181,13 @@ class ServiceAccountTokenManager(
         throw DriveAuthException("Google Play Services returned an empty Drive access token.")
     }
 
-    private fun getServiceAccountTokenLocked(forceRefresh: Boolean): String {
+    private fun getServiceAccountTokenLocked(forceRefresh: Boolean, failedToken: String?): String {
         val credentials = cachedCredentials ?: loadCredentialsLocked().also {
             cachedCredentials = it
+        }
+        val currentToken = credentials.accessToken?.tokenValue
+        if (forceRefresh && failedToken != null && !currentToken.isNullOrBlank() && currentToken != failedToken) {
+            return currentToken
         }
         try {
             if (forceRefresh || credentials.accessToken == null) {

@@ -217,7 +217,7 @@ fun CollectionCoverArtwork(
                 color = if (isSelected) {
                     MaterialTheme.colorScheme.primary
                 } else {
-                    Color.White.copy(alpha = 0.08f)
+                    MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)
                 },
                 shape = coverShape
             )

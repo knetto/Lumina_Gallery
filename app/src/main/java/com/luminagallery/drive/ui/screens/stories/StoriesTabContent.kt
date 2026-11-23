@@ -8,6 +8,7 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -40,6 +41,7 @@ import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.HourglassEmpty
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -76,11 +78,13 @@ import coil3.request.ImageRequest
 import coil3.request.crossfade
 import com.luminagallery.drive.LocalGalleryImageLoader
 import com.luminagallery.drive.data.remote.DriveConstants
+import com.luminagallery.drive.data.repository.LocalThumbnailRequest
 import com.luminagallery.drive.domain.model.GalleryStory
 import com.luminagallery.drive.domain.model.MediaItem
 import com.luminagallery.drive.domain.model.StoryCategory
 import com.luminagallery.drive.ui.components.oneUiClickable
 import kotlinx.coroutines.delay
+import kotlin.math.abs
 
 /**
  * Samsung One UI Gallery-inspired Stories Tab:
@@ -526,10 +530,15 @@ private fun StoryCoverImage(
 ) {
     val context = LocalContext.current
     val imageLoader = LocalGalleryImageLoader.current
-    val request = remember(item.id, item.isLocal, item.localContentUri, item.thumbnailLink, isUnmeteredWifi) {
+    val request = remember(item.id, item.isLocal, item.isVideo, item.localContentUri, item.thumbnailLink, isUnmeteredWifi) {
         if (item.isLocal && !item.localContentUri.isNullOrBlank()) {
+            val data: Any = if (item.isVideo) {
+                LocalThumbnailRequest(item.localContentUri, isVideo = true)
+            } else {
+                item.localContentUri
+            }
             ImageRequest.Builder(context)
-                .data(item.localContentUri)
+                .data(data)
                 .crossfade(200)
                 .build()
         } else {
@@ -557,27 +566,32 @@ private fun StoryCoverImage(
 }
 
 /**
- * Full-screen cinematic Ken Burns animated Story Player (slow smooth zoom + crossfade + top progress bars).
+ * Full-screen cinematic Ken Burns animated Story Player:
+ *  - Plays all items in the story (no silent 20-item cutoff!)
+ *  - Hold anywhere to pause, tap left/right or swipe horizontally to jump slides
+ *  - Shows a crisp video badge on video memories
  */
 @Composable
 fun StorySlideshowDialog(
     story: GalleryStory,
     isUnmeteredWifi: Boolean,
     onToggleFavorite: (() -> Unit)? = null,
+    onOpenItem: ((MediaItem) -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
-    val slides = remember(story.id) { story.items.take(20) }
+    val slides = remember(story.id, story.items) { story.items }
     if (slides.isEmpty()) {
-        onDismiss()
+        LaunchedEffect(story.id) { onDismiss() }
         return
     }
 
     var currentIndex by remember(story.id) { mutableIntStateOf(0) }
     var isPaused by remember(story.id) { mutableStateOf(false) }
+    var isHoldingPause by remember(story.id) { mutableStateOf(false) }
     var slideProgress by remember(story.id) { mutableFloatStateOf(0f) }
 
-    LaunchedEffect(currentIndex, isPaused) {
-        if (isPaused) return@LaunchedEffect
+    LaunchedEffect(currentIndex, isPaused, isHoldingPause) {
+        if (isPaused || isHoldingPause) return@LaunchedEffect
         val steps = 90
         val startStep = (slideProgress * steps).toInt()
         for (step in startStep..steps) {
@@ -591,6 +605,9 @@ fun StorySlideshowDialog(
             onDismiss()
         }
     }
+
+    val safeIndex = currentIndex.coerceIn(0, slides.lastIndex)
+    val activeItem = slides[safeIndex]
 
     val kenBurnsScale by animateFloatAsState(
         targetValue = 1.0f + slideProgress * 0.09f,
@@ -611,6 +628,11 @@ fun StorySlideshowDialog(
                 .background(Color.Black)
                 .pointerInput(slides.size) {
                     detectTapGestures(
+                        onPress = {
+                            isHoldingPause = true
+                            tryAwaitRelease()
+                            isHoldingPause = false
+                        },
                         onTap = { tapOffset ->
                             if (tapOffset.x < size.width * 0.32f) {
                                 if (currentIndex > 0) {
@@ -628,25 +650,91 @@ fun StorySlideshowDialog(
                         }
                     )
                 }
+                .pointerInput(slides.size) {
+                    var dragAccum = 0f
+                    detectHorizontalDragGestures(
+                        onDragStart = {
+                            dragAccum = 0f
+                            isHoldingPause = true
+                        },
+                        onHorizontalDrag = { _, dragAmount ->
+                            dragAccum += dragAmount
+                        },
+                        onDragCancel = { isHoldingPause = false },
+                        onDragEnd = {
+                            isHoldingPause = false
+                            if (abs(dragAccum) > 70f) {
+                                if (dragAccum < 0f) {
+                                    if (currentIndex < slides.lastIndex) {
+                                        currentIndex++
+                                        slideProgress = 0f
+                                    } else {
+                                        onDismiss()
+                                    }
+                                } else if (currentIndex > 0) {
+                                    currentIndex--
+                                    slideProgress = 0f
+                                }
+                            }
+                        }
+                    )
+                }
         ) {
             Crossfade(
-                targetState = slides[currentIndex],
+                targetState = activeItem,
                 animationSpec = tween(durationMillis = 550),
                 label = "storySlideCrossfade"
             ) { activeSlide ->
-                StoryCoverImage(
-                    item = activeSlide,
-                    isUnmeteredWifi = isUnmeteredWifi,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .graphicsLayer {
-                            scaleX = kenBurnsScale
-                            scaleY = kenBurnsScale
+                Box(modifier = Modifier.fillMaxSize()) {
+                    StoryCoverImage(
+                        item = activeSlide,
+                        isUnmeteredWifi = isUnmeteredWifi,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                scaleX = kenBurnsScale
+                                scaleY = kenBurnsScale
+                            }
+                    )
+                    if (activeSlide.isVideo) {
+                        Surface(
+                            shape = RoundedCornerShape(50),
+                            color = Color.Black.copy(alpha = 0.62f),
+                            modifier = Modifier
+                                .align(Alignment.Center)
+                                .then(
+                                    if (onOpenItem != null) {
+                                        Modifier.clickable {
+                                            isPaused = true
+                                            onDismiss()
+                                            onOpenItem(activeSlide)
+                                        }
+                                    } else Modifier
+                                )
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Videocam,
+                                    contentDescription = null,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Text(
+                                    text = if (onOpenItem != null) "Play video" else "Video clip",
+                                    color = Color.White,
+                                    style = MaterialTheme.typography.labelLarge
+                                )
+                            }
                         }
-                )
+                    }
+                }
             }
 
-            // Top progress bars + header
+            // Top progress bar(s) + header
             Column(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
@@ -660,26 +748,39 @@ fun StorySlideshowDialog(
                     .padding(horizontal = 14.dp, vertical = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    slides.indices.forEach { idx ->
-                        val p = when {
-                            idx < currentIndex -> 1f
-                            idx == currentIndex -> slideProgress
-                            else -> 0f
+                if (slides.size <= 20) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        slides.indices.forEach { idx ->
+                            val p = when {
+                                idx < safeIndex -> 1f
+                                idx == safeIndex -> slideProgress
+                                else -> 0f
+                            }
+                            LinearProgressIndicator(
+                                progress = { p },
+                                color = Color.White,
+                                trackColor = Color.White.copy(alpha = 0.28f),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(2.5.dp)
+                                    .clip(CircleShape)
+                            )
                         }
-                        LinearProgressIndicator(
-                            progress = { p },
-                            color = Color.White,
-                            trackColor = Color.White.copy(alpha = 0.28f),
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(2.5.dp)
-                                .clip(CircleShape)
-                        )
                     }
+                } else {
+                    val overallProgress = ((safeIndex + slideProgress) / slides.size.toFloat()).coerceIn(0f, 1f)
+                    LinearProgressIndicator(
+                        progress = { overallProgress },
+                        color = Color.White,
+                        trackColor = Color.White.copy(alpha = 0.28f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(3.dp)
+                            .clip(CircleShape)
+                    )
                 }
 
                 Row(
@@ -695,7 +796,7 @@ fun StorySlideshowDialog(
                             overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            text = slides[currentIndex].fullDateLabel,
+                            text = activeItem.fullDateLabel,
                             style = MaterialTheme.typography.labelSmall,
                             color = Color.White.copy(alpha = 0.78f)
                         )
@@ -727,7 +828,7 @@ fun StorySlideshowDialog(
             }
 
             // Bottom caption
-            Box(
+            Row(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
@@ -737,13 +838,30 @@ fun StorySlideshowDialog(
                         )
                     )
                     .navigationBarsPadding()
-                    .padding(horizontal = 20.dp, vertical = 22.dp)
+                    .padding(horizontal = 20.dp, vertical = 22.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Text(
-                    text = "${currentIndex + 1} of ${slides.size} · ${story.dateRangeLabel}",
+                    text = "${safeIndex + 1} of ${slides.size} · ${story.dateRangeLabel}",
                     style = MaterialTheme.typography.labelMedium,
                     color = Color.White.copy(alpha = 0.85f)
                 )
+                if (onOpenItem != null) {
+                    Text(
+                        text = "Open",
+                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                        color = Color.White,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .background(Color.White.copy(alpha = 0.16f))
+                            .clickable {
+                                onDismiss()
+                                onOpenItem(activeItem)
+                            }
+                            .padding(horizontal = 12.dp, vertical = 5.dp)
+                    )
+                }
             }
         }
     }

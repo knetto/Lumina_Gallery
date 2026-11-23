@@ -7,6 +7,7 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.media.MediaMuxer
+import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -70,26 +71,59 @@ class VideoTrimmer(
                 val rotation = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
                     ?.toIntOrNull() ?: 0
 
-                val muxer = MediaMuxer(tempOutputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+                // Detect compatible container & tracks before opening MediaMuxer
+                val videoTracks = mutableListOf<Pair<Int, MediaFormat>>()
+                val audioTracks = mutableListOf<Pair<Int, MediaFormat>>()
+                var maxBufferSize = 2 * 1024 * 1024
+                var isWebmSource = false
+
+                for (i in 0 until extractor.trackCount) {
+                    val format = extractor.getTrackFormat(i)
+                    val mime = format.getString(MediaFormat.KEY_MIME).orEmpty().lowercase()
+                    if (mime.startsWith("video/")) {
+                        if (mime in WEBM_VIDEO_MIMES) isWebmSource = true
+                        videoTracks.add(i to format)
+                    } else if (mime.startsWith("audio/")) {
+                        if (mime in WEBM_AUDIO_MIMES) isWebmSource = true
+                        audioTracks.add(i to format)
+                    }
+                    if (format.containsKey(MediaFormat.KEY_MAX_INPUT_SIZE)) {
+                        maxBufferSize = maxOf(maxBufferSize, format.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE))
+                    }
+                }
+
+                val allowedVideo = if (isWebmSource) WEBM_VIDEO_MIMES else MP4_VIDEO_MIMES
+                val allowedAudio = if (isWebmSource) WEBM_AUDIO_MIMES else MP4_AUDIO_MIMES
+                val selectedVideo = videoTracks.firstOrNull { (_, fmt) ->
+                    fmt.getString(MediaFormat.KEY_MIME).orEmpty().lowercase() in allowedVideo
+                }
+                val selectedAudio = audioTracks.firstOrNull { (_, fmt) ->
+                    fmt.getString(MediaFormat.KEY_MIME).orEmpty().lowercase() in allowedAudio
+                }
+                if (selectedVideo == null && selectedAudio == null) {
+                    throw IOException("This video codec cannot be losslessly trimmed on-device")
+                }
+
+                val muxerFormat = if (isWebmSource) {
+                    MediaMuxer.OutputFormat.MUXER_OUTPUT_WEBM
+                } else {
+                    MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4
+                }
+                val outExt = if (isWebmSource) "webm" else "mp4"
+                val outMime = if (isWebmSource) "video/webm" else "video/mp4"
+
+                val muxer = MediaMuxer(tempOutputFile.absolutePath, muxerFormat)
                 val trackIndexMap = HashMap<Int, Int>()
-                var maxBufferSize = 1024 * 1024
+                val videoSrcTrack = selectedVideo?.first
 
                 try {
-                    for (i in 0 until extractor.trackCount) {
-                        val format = extractor.getTrackFormat(i)
-                        val mime = format.getString(MediaFormat.KEY_MIME).orEmpty()
-                        if (mime.startsWith("video/") || mime.startsWith("audio/")) {
-                            extractor.selectTrack(i)
-                            val dstIndex = muxer.addTrack(format)
-                            trackIndexMap[i] = dstIndex
-                            if (format.containsKey(MediaFormat.KEY_MAX_INPUT_SIZE)) {
-                                maxBufferSize = maxOf(maxBufferSize, format.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE))
-                            }
-                        }
+                    selectedVideo?.let { (idx, fmt) ->
+                        extractor.selectTrack(idx)
+                        trackIndexMap[idx] = muxer.addTrack(fmt)
                     }
-
-                    if (trackIndexMap.isEmpty()) {
-                        throw IOException("No compatible audio/video tracks found")
+                    selectedAudio?.let { (idx, fmt) ->
+                        extractor.selectTrack(idx)
+                        trackIndexMap[idx] = muxer.addTrack(fmt)
                     }
 
                     muxer.setOrientationHint(rotation)
@@ -99,12 +133,21 @@ class VideoTrimmer(
                     val endUs = endMs * 1000L
                     extractor.seekTo(startUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
 
-                    val buffer = ByteBuffer.allocate(maxBufferSize.coerceAtMost(4 * 1024 * 1024))
+                    var buffer = ByteBuffer.allocate(maxBufferSize.coerceIn(1024 * 1024, 16 * 1024 * 1024))
                     val bufferInfo = MediaCodec.BufferInfo()
                     var basePtsUs = -1L
+                    var seenVideoSync = (videoSrcTrack == null)
 
                     while (true) {
-                        val sampleSize = extractor.readSampleData(buffer, 0)
+                        var sampleSize = try {
+                            extractor.readSampleData(buffer, 0)
+                        } catch (_: IllegalArgumentException) {
+                            // Grow buffer dynamically for ultra-high-bitrate 4K/8K keyframes
+                            val nextCap = (buffer.capacity() * 2).coerceAtMost(32 * 1024 * 1024)
+                            if (nextCap <= buffer.capacity()) throw IOException("Video frame exceeds trim buffer limit")
+                            buffer = ByteBuffer.allocate(nextCap)
+                            extractor.readSampleData(buffer, 0)
+                        }
                         if (sampleSize < 0) break
 
                         val sampleTimeUs = extractor.sampleTime
@@ -112,14 +155,30 @@ class VideoTrimmer(
 
                         val srcTrack = extractor.sampleTrackIndex
                         val dstTrack = trackIndexMap[srcTrack]
-                        if (dstTrack != null && sampleTimeUs >= startUs - 500_000L) {
-                            if (basePtsUs < 0L) basePtsUs = sampleTimeUs
-                            bufferInfo.offset = 0
-                            bufferInfo.size = sampleSize
-                            bufferInfo.presentationTimeUs = (sampleTimeUs - basePtsUs).coerceAtLeast(0L)
-                            @Suppress("DEPRECATION")
-                            bufferInfo.flags = extractor.sampleFlags
-                            muxer.writeSampleData(dstTrack, buffer, bufferInfo)
+                        if (dstTrack != null) {
+                            val rawFlags = extractor.sampleFlags
+                            val isSync = (rawFlags and MediaExtractor.SAMPLE_FLAG_SYNC) != 0
+                            // Always start the video stream on a real IDR keyframe (never drop it!)
+                            // so trimmed clips never begin with green/frozen/corrupted frames.
+                            if (!seenVideoSync) {
+                                if (srcTrack == videoSrcTrack && isSync) {
+                                    seenVideoSync = true
+                                    basePtsUs = sampleTimeUs
+                                } else {
+                                    extractor.advance()
+                                    continue
+                                }
+                            } else if (basePtsUs < 0L) {
+                                basePtsUs = sampleTimeUs
+                            }
+
+                            if (sampleTimeUs >= basePtsUs) {
+                                bufferInfo.offset = 0
+                                bufferInfo.size = sampleSize
+                                bufferInfo.presentationTimeUs = (sampleTimeUs - basePtsUs).coerceAtLeast(0L)
+                                bufferInfo.flags = mapExtractorFlagsToMuxerFlags(rawFlags)
+                                muxer.writeSampleData(dstTrack, buffer, bufferInfo)
+                            }
                         }
                         extractor.advance()
                     }
@@ -130,8 +189,8 @@ class VideoTrimmer(
 
                 // Publish trimmed clip cleanly into Movies/LuminaGallery
                 val stem = item.name.substringBeforeLast('.').take(80).ifBlank { "video" }
-                val outName = "${stem}_trimmed_${System.currentTimeMillis() % 100000}.mp4"
-                saveMp4ToMediaStore(tempOutputFile, outName)
+                val outName = "${stem}_trimmed_${System.currentTimeMillis() % 100000}.$outExt"
+                saveVideoToMediaStore(tempOutputFile, outName, outMime)
                 outName
             } finally {
                 runCatching { extractor.release() }
@@ -142,12 +201,12 @@ class VideoTrimmer(
         }
     }
 
-    private fun saveMp4ToMediaStore(sourceFile: File, displayName: String) {
+    private fun saveVideoToMediaStore(sourceFile: File, displayName: String, mimeType: String) {
         val resolver = context.contentResolver
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val values = ContentValues().apply {
                 put(MediaStore.Video.Media.DISPLAY_NAME, displayName)
-                put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                put(MediaStore.Video.Media.MIME_TYPE, mimeType)
                 put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/LuminaGallery")
                 put(MediaStore.Video.Media.IS_PENDING, 1)
             }
@@ -168,7 +227,46 @@ class VideoTrimmer(
             @Suppress("DEPRECATION")
             val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), "LuminaGallery")
             if (!dir.exists()) dir.mkdirs()
-            sourceFile.copyTo(File(dir, displayName), overwrite = true)
+            val outFile = File(dir, displayName)
+            sourceFile.copyTo(outFile, overwrite = true)
+            MediaScannerConnection.scanFile(context, arrayOf(outFile.absolutePath), arrayOf(mimeType), null)
+        }
+    }
+
+    companion object {
+        private val MP4_VIDEO_MIMES = setOf(
+            MediaFormat.MIMETYPE_VIDEO_AVC,
+            MediaFormat.MIMETYPE_VIDEO_HEVC,
+            MediaFormat.MIMETYPE_VIDEO_MPEG4,
+            MediaFormat.MIMETYPE_VIDEO_H263,
+            "video/av01"
+        )
+        private val MP4_AUDIO_MIMES = setOf(
+            MediaFormat.MIMETYPE_AUDIO_AAC,
+            MediaFormat.MIMETYPE_AUDIO_AMR_NB,
+            MediaFormat.MIMETYPE_AUDIO_AMR_WB,
+            MediaFormat.MIMETYPE_AUDIO_MPEG
+        )
+        private val WEBM_VIDEO_MIMES = setOf(
+            MediaFormat.MIMETYPE_VIDEO_VP8,
+            MediaFormat.MIMETYPE_VIDEO_VP9
+        )
+        private val WEBM_AUDIO_MIMES = setOf(
+            MediaFormat.MIMETYPE_AUDIO_OPUS,
+            MediaFormat.MIMETYPE_AUDIO_VORBIS
+        )
+
+        /**
+         * Converts `MediaExtractor.sampleFlags` into `MediaCodec.BufferInfo.flags`.
+         * Never pass raw extractor flags directly because `SAMPLE_FLAG_PARTIAL_FRAME` (4)
+         * collides with `MediaCodec.BUFFER_FLAG_END_OF_STREAM` (4).
+         */
+        internal fun mapExtractorFlagsToMuxerFlags(sampleFlags: Int): Int {
+            var flags = 0
+            if ((sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC) != 0) {
+                flags = flags or MediaCodec.BUFFER_FLAG_KEY_FRAME
+            }
+            return flags
         }
     }
 }

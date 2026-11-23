@@ -9,10 +9,13 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -291,7 +294,19 @@ fun CollectionScreen(
             val singleSelectedCol = selectedItems.singleOrNull() as? AlbumGridItem.CollectionEntry
             val hasDrive = selectedItems.any { it is AlbumGridItem.AlbumEntry && !it.folder.isLocal }
             val moveTargets = remember(uiState.allCollections, uiState.selectedIds, uiState.collectionId) {
-                uiState.allCollections.filter { it.id != uiState.collectionId && it.id !in uiState.selectedIds }
+                val blocked = buildSet {
+                    add(uiState.collectionId)
+                    addAll(uiState.selectedIds)
+                    val childrenByParent = uiState.allCollections.groupBy { it.parentCollectionId }
+                    val queue = ArrayDeque(uiState.selectedIds)
+                    while (queue.isNotEmpty()) {
+                        val curr = queue.removeFirst()
+                        for (child in childrenByParent[curr].orEmpty()) {
+                            if (add(child.id)) queue.addLast(child.id)
+                        }
+                    }
+                }
+                uiState.allCollections.filter { it.id !in blocked }
             }
 
             AlbumSelectionActionBar(
@@ -444,8 +459,20 @@ fun CollectionScreen(
     }
 
     if (showMoveSelectedSheet) {
-        val destinations = uiState.allCollections.filter {
-            it.id != uiState.collectionId && it.id !in uiState.selectedIds
+        val destinations = remember(uiState.allCollections, uiState.selectedIds, uiState.collectionId) {
+            val blocked = buildSet {
+                add(uiState.collectionId)
+                addAll(uiState.selectedIds)
+                val childrenByParent = uiState.allCollections.groupBy { it.parentCollectionId }
+                val queue = ArrayDeque(uiState.selectedIds)
+                while (queue.isNotEmpty()) {
+                    val curr = queue.removeFirst()
+                    for (child in childrenByParent[curr].orEmpty()) {
+                        if (add(child.id)) queue.addLast(child.id)
+                    }
+                }
+            }
+            uiState.allCollections.filter { it.id !in blocked }
         }
         ModalBottomSheet(
             onDismissRequest = { showMoveSelectedSheet = false },
@@ -463,18 +490,24 @@ fun CollectionScreen(
                     style = MaterialTheme.typography.titleMedium,
                     modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp)
                 )
-                destinations.forEach { dest ->
-                    ListItem(
-                        headlineContent = { Text(dest.name) },
-                        leadingContent = {
-                            Icon(Icons.AutoMirrored.Rounded.DriveFileMove, contentDescription = null)
-                        },
-                        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                        modifier = Modifier.clickable {
-                            viewModel.moveSelectedIntoCollection(dest.id)
-                            showMoveSelectedSheet = false
-                        }
-                    )
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 420.dp)
+                ) {
+                    items(destinations, key = { it.id }) { dest ->
+                        ListItem(
+                            headlineContent = { Text(dest.name) },
+                            leadingContent = {
+                                Icon(Icons.AutoMirrored.Rounded.DriveFileMove, contentDescription = null)
+                            },
+                            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                            modifier = Modifier.clickable {
+                                viewModel.moveSelectedIntoCollection(dest.id)
+                                showMoveSelectedSheet = false
+                            }
+                        )
+                    }
                 }
             }
         }

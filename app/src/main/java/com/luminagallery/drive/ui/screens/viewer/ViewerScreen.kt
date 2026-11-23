@@ -17,8 +17,6 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.EnterExitState
 import androidx.compose.animation.ExitTransition
-import androidx.compose.animation.ExperimentalSharedTransitionApi
-import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
@@ -102,6 +100,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RangeSlider
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
@@ -146,8 +146,14 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem as Media3Item
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
@@ -177,6 +183,7 @@ import com.luminagallery.drive.ui.components.MoveCopyToAlbumSheet
 import com.luminagallery.drive.ui.components.OneUiMotion
 import com.luminagallery.drive.ui.components.SecureWindowEffect
 import com.luminagallery.drive.ui.components.TrashConfirmMode
+import com.luminagallery.drive.ui.components.findActivity
 import com.luminagallery.drive.ui.components.oneUiClickable
 import com.luminagallery.drive.ui.components.topViewerScrim
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -187,11 +194,10 @@ import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
-@OptIn(ExperimentalSharedTransitionApi::class, ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ViewerScreen(
     viewModel: ViewerViewModel,
-    sharedTransitionScope: SharedTransitionScope,
     animatedVisibilityScope: AnimatedVisibilityScope,
     initialItemId: String = "",
     isRectMorphing: Boolean = false,
@@ -238,7 +244,7 @@ fun ViewerScreen(
 
     // Samsung Gallery "Maximum brightness" & "Keep screen on" viewer flags
     DisposableEffect(prefs.maxViewerBrightness, prefs.keepScreenOnViewer) {
-        val window = (context as? Activity)?.window
+        val window = context.findActivity()?.window
         val previousBrightness = window?.attributes?.screenBrightness
             ?: WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
         if (window != null) {
@@ -265,9 +271,23 @@ fun ViewerScreen(
         }
     }
 
+    // Force crisp white status & nav bar icons over pure-black Viewer canvas even in Light Mode
+    DisposableEffect(view) {
+        val window = context.findActivity()?.window
+        val controller = window?.let { WindowCompat.getInsetsController(it, view) }
+        val prevLightStatus = controller?.isAppearanceLightStatusBars
+        val prevLightNav = controller?.isAppearanceLightNavigationBars
+        controller?.isAppearanceLightStatusBars = false
+        controller?.isAppearanceLightNavigationBars = false
+        onDispose {
+            if (prevLightStatus != null) controller.isAppearanceLightStatusBars = prevLightStatus
+            if (prevLightNav != null) controller.isAppearanceLightNavigationBars = prevLightNav
+        }
+    }
+
     // Sync system status & navigation bar visibility with immersive chrome toggle
     DisposableEffect(chromeVisible) {
-        val window = (context as? Activity)?.window
+        val window = context.findActivity()?.window
         val controller = window?.let { WindowCompat.getInsetsController(it, view) }
         controller?.systemBarsBehavior =
             WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
@@ -287,9 +307,20 @@ fun ViewerScreen(
         viewModel.onTrashCompleted(result.resultCode == Activity.RESULT_OK)
     }
 
+    val favoriteLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        viewModel.onFavoriteRequestCompleted(result.resultCode == Activity.RESULT_OK)
+    }
+
     LaunchedEffect(uiState.pendingTrashIntentSender) {
         val sender = uiState.pendingTrashIntentSender ?: return@LaunchedEffect
         trashLauncher.launch(IntentSenderRequest.Builder(sender).build())
+    }
+
+    LaunchedEffect(uiState.pendingFavoriteIntentSender) {
+        val sender = uiState.pendingFavoriteIntentSender ?: return@LaunchedEffect
+        favoriteLauncher.launch(IntentSenderRequest.Builder(sender).build())
     }
 
     LaunchedEffect(uiState.pendingShareUris) {
@@ -306,13 +337,17 @@ fun ViewerScreen(
 
     val items = uiState.items
     if (items.isEmpty()) {
+        if (uiState.hasLoadedOnce) {
+            // Last item was trashed / unfavorited — dismiss cleanly instead of spinning forever
+            LaunchedEffect(Unit) { onDismiss() }
+        }
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(if (isRectMorphing) Color.Transparent else Color.Black),
             contentAlignment = Alignment.Center
         ) {
-            if (!isRectMorphing) {
+            if (!isRectMorphing && !uiState.hasLoadedOnce) {
                 CircularProgressIndicator(color = Color.White)
             }
         }
@@ -370,7 +405,7 @@ fun ViewerScreen(
         }
     }
 
-    LaunchedEffect(settledItem.id) {
+    LaunchedEffect(settledItem.id, items.size) {
         if (!settledItem.isVideo) {
             val offlinePath = appContainer.offlineMediaManager.getOfflineFilePath(settledItem.id)
             val detected = appContainer.motionPhotoDetector.detect(
@@ -516,6 +551,7 @@ fun ViewerScreen(
                     item = pageItem,
                     isUnmeteredWifi = uiState.isUnmeteredWifi,
                     swipeDownToDismiss = prefs.swipeDownToDismiss,
+                    startMuted = prefs.startVideosMuted,
                     isClosing = isViewerClosing && isActivePage,
                     motionPhotoInfo = if (isActivePage) currentMotionInfo else null,
                     isPlayingMotion = isActivePage && isPlayingMotionPhoto,
@@ -684,7 +720,7 @@ fun ViewerScreen(
                             "Open in another gallery"
                         }
                         DropdownMenuItem(
-                            text = { Text(openInLabel) },
+                            text = { Text(openInLabel, color = Color.White) },
                             leadingIcon = {
                                 Icon(
                                     imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
@@ -740,7 +776,7 @@ fun ViewerScreen(
                         )
                         if (!currentItem.isVideo) {
                             DropdownMenuItem(
-                                text = { Text("Edit photo") },
+                                text = { Text("Edit photo", color = Color.White) },
                                 onClick = {
                                     showOverflowMenu = false
                                     onOpenEditor(
@@ -752,7 +788,7 @@ fun ViewerScreen(
                                 }
                             )
                             DropdownMenuItem(
-                                text = { Text("Edit in another app") },
+                                text = { Text("Edit in another app", color = Color.White) },
                                 onClick = {
                                     showOverflowMenu = false
                                     coroutineScope.launch {
@@ -778,7 +814,7 @@ fun ViewerScreen(
                                 }
                             )
                             DropdownMenuItem(
-                                text = { Text("Set as wallpaper") },
+                                text = { Text("Set as wallpaper", color = Color.White) },
                                 onClick = {
                                     showOverflowMenu = false
                                     showWallpaperSheet = true
@@ -786,9 +822,10 @@ fun ViewerScreen(
                             )
                         } else {
                             DropdownMenuItem(
-                                text = { Text("Trim video") },
+                                text = { Text("Trim video", color = Color.White) },
                                 onClick = {
                                     showOverflowMenu = false
+                                    activeVideoController.pause()
                                     showTrimSheet = true
                                 }
                             )
@@ -796,7 +833,7 @@ fun ViewerScreen(
 
                         if (!currentItem.parentId.isNullOrBlank()) {
                             DropdownMenuItem(
-                                text = { Text("Set as album cover") },
+                                text = { Text("Set as album cover", color = Color.White) },
                                 onClick = {
                                     showOverflowMenu = false
                                     coroutineScope.launch {
@@ -812,14 +849,14 @@ fun ViewerScreen(
 
                         if (currentItem.isLocal) {
                             DropdownMenuItem(
-                                text = { Text("Move or copy to album") },
+                                text = { Text("Move or copy to album", color = Color.White) },
                                 onClick = {
                                     showOverflowMenu = false
                                     showMoveCopySheet = true
                                 }
                             )
                             DropdownMenuItem(
-                                text = { Text("Rename") },
+                                text = { Text("Rename", color = Color.White) },
                                 onClick = {
                                     showOverflowMenu = false
                                     showRenameDialog = true
@@ -828,7 +865,10 @@ fun ViewerScreen(
                         } else {
                             DropdownMenuItem(
                                 text = {
-                                    Text(if (isCurrentOffline) "Remove offline copy" else "Keep available offline")
+                                    Text(
+                                        if (isCurrentOffline) "Remove offline copy" else "Keep available offline",
+                                        color = Color.White
+                                    )
                                 },
                                 leadingIcon = {
                                     Icon(
@@ -859,7 +899,7 @@ fun ViewerScreen(
                         }
 
                         DropdownMenuItem(
-                            text = { Text("Tags & details") },
+                            text = { Text("Tags & details", color = Color.White) },
                             onClick = {
                                 showOverflowMenu = false
                                 viewModel.openExifSheet(currentItem)
@@ -897,28 +937,24 @@ fun ViewerScreen(
             Column(
                 modifier = Modifier.fillMaxWidth()
             ) {
-                // 1. Floating Samsung Video Pill Row (sits gracefully over bottom edge of video!)
+                // 1. Floating Samsung Video Pill Row + Dedicated Full-Width Seekbar
+                // Isolated state reads inside SamsungVideoControlBar prevent 20fps recomposition of
+                // the filmstrip LazyRow and action bar!
                 AnimatedVisibility(
                     visible = currentItem.isVideo,
                     enter = fadeIn(tween(180)),
                     exit = fadeOut(tween(120))
                 ) {
                     SamsungVideoControlBar(
-                        isPlaying = activeVideoController.isPlaying,
-                        isEnded = activeVideoController.isEnded,
-                        isMuted = activeVideoController.isMuted,
-                        playbackSpeed = activeVideoController.playbackSpeed,
-                        positionMs = activeVideoController.currentPositionMs,
-                        durationMs = activeVideoController.durationMs.takeIf { it > 0L }
-                            ?: (currentItem.durationMillis ?: 0L),
-                        onCaptureFrame = activeVideoController::captureFrame,
-                        onTogglePlayPause = activeVideoController::togglePlayPause,
-                        onCycleSpeed = activeVideoController::cyclePlaybackSpeed,
-                        onOpenTrim = { showTrimSheet = true },
-                        onToggleMute = activeVideoController::toggleMute,
+                        videoController = activeVideoController,
+                        fallbackDurationMs = currentItem.durationMillis ?: 0L,
+                        onOpenTrim = {
+                            activeVideoController.pause()
+                            showTrimSheet = true
+                        },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 10.dp)
+                            .padding(horizontal = 14.dp, vertical = 8.dp)
                     )
                 }
 
@@ -935,9 +971,8 @@ fun ViewerScreen(
                             items = items,
                             currentIndex = pagerState.currentPage,
                             isUnmeteredWifi = uiState.isUnmeteredWifi,
-                            videoPositionMs = activeVideoController.currentPositionMs,
-                            videoDurationMs = activeVideoController.durationMs.takeIf { it > 0L }
-                                ?: (currentItem.durationMillis ?: 0L),
+                            videoController = activeVideoController,
+                            fallbackVideoDurationMs = currentItem.durationMillis ?: 0L,
                             onSelectPage = { targetIdx ->
                                 coroutineScope.launch {
                                     if (abs(targetIdx - pagerState.currentPage) <= 3) {
@@ -952,7 +987,6 @@ fun ViewerScreen(
                                     coroutineScope.launch { pagerState.scrollToPage(targetIdx) }
                                 }
                             },
-                            onSeekVideoMs = activeVideoController::seekTo,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(58.dp)
@@ -1164,22 +1198,37 @@ fun ViewerScreen(
                         Surface(
                             shape = RoundedCornerShape(14.dp),
                             color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(14.dp))
-                                .clickable {
-                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                                    clipboard?.setPrimaryClip(ClipData.newPlainText("Photo text", block))
-                                    viewModel.showMessage("Copied block to clipboard")
-                                }
+                            modifier = Modifier.fillMaxWidth()
                         ) {
-                            SelectionContainer {
-                                Text(
-                                    text = block,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurface,
-                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
-                                )
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(start = 14.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
+                                verticalAlignment = Alignment.Top,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                SelectionContainer(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = block,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        modifier = Modifier.padding(vertical = 2.dp)
+                                    )
+                                }
+                                IconButton(
+                                    onClick = {
+                                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                        clipboard?.setPrimaryClip(ClipData.newPlainText("Photo text", block))
+                                        viewModel.showMessage("Copied block to clipboard")
+                                    }
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.ContentCopy,
+                                        contentDescription = "Copy text block",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
                             }
                         }
                     }
@@ -1205,6 +1254,37 @@ fun ViewerScreen(
                     style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
                     modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp)
                 )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            showWallpaperSheet = false
+                            coroutineScope.launch {
+                                val quickUri = appContainer.localFileOperationsManager
+                                    .getQuickLocalOrOfflineUri(currentItem)
+                                val uri = quickUri ?: appContainer.exportMediaUseCase
+                                    .prepareShareUris(listOf(currentItem), stripLocation = false)
+                                    .getOrNull()
+                                    ?.firstOrNull()
+                                if (uri != null) {
+                                    val launched = appContainer.localFileOperationsManager
+                                        .launchNativeWallpaperCrop(context, uri, currentItem.mimeType)
+                                    if (!launched) {
+                                        viewModel.showMessage("Wallpaper cropper unavailable on this device")
+                                    }
+                                } else {
+                                    viewModel.showMessage("Could not prepare photo for wallpaper crop")
+                                }
+                            }
+                        }
+                        .padding(horizontal = 24.dp, vertical = 15.dp)
+                ) {
+                    Text(
+                        "Crop & set wallpaper (Recommended)",
+                        style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Medium),
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
                 WallpaperTarget.entries.forEach { target ->
                     Row(
                         modifier = Modifier
@@ -1338,46 +1418,68 @@ fun ViewerScreen(
                     value = range,
                     onValueChange = { updated ->
                         if (updated.endInclusive - updated.start >= 400f) {
+                            val seekTarget = if (abs(updated.start - range.start) > 1f) {
+                                updated.start.toLong()
+                            } else {
+                                updated.endInclusive.toLong()
+                            }
                             range = updated
+                            activeVideoController.pause()
+                            activeVideoController.seekTo(seekTarget)
                         }
                     },
                     valueRange = 0f..totalMs.toFloat(),
                     modifier = Modifier.fillMaxWidth()
                 )
-                Button(
-                    onClick = {
-                        if (isTrimming) return@Button
-                        isTrimming = true
-                        coroutineScope.launch {
-                            appContainer.videoTrimmer.trimAndSaveCopy(
-                                item = currentItem,
-                                startMs = range.start.toLong(),
-                                endMs = range.endInclusive.toLong()
-                            ).onSuccess { savedName ->
-                                appContainer.localMediaRepository.notifyPermissionChanged()
-                                isTrimming = false
-                                showTrimSheet = false
-                                viewModel.showMessage("Saved trimmed video: $savedName")
-                            }.onFailure { err ->
-                                isTrimming = false
-                                viewModel.showMessage(err.localizedMessage ?: "Trim failed")
-                            }
-                        }
-                    },
-                    enabled = !isTrimming,
-                    shape = RoundedCornerShape(16.dp),
-                    modifier = Modifier.fillMaxWidth()
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    if (isTrimming) {
-                        CircularProgressIndicator(
-                            color = Color.White,
-                            strokeWidth = 2.dp,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text("Trimming…")
-                    } else {
-                        Text("Save trimmed copy")
+                    TextButton(
+                        enabled = !isTrimming,
+                        onClick = {
+                            activeVideoController.seekTo(range.start.toLong())
+                            activeVideoController.play()
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Preview start")
+                    }
+                    Button(
+                        onClick = {
+                            if (isTrimming) return@Button
+                            isTrimming = true
+                            coroutineScope.launch {
+                                appContainer.videoTrimmer.trimAndSaveCopy(
+                                    item = currentItem,
+                                    startMs = range.start.toLong(),
+                                    endMs = range.endInclusive.toLong()
+                                ).onSuccess { savedName ->
+                                    appContainer.localMediaRepository.notifyPermissionChanged()
+                                    isTrimming = false
+                                    showTrimSheet = false
+                                    viewModel.showMessage("Saved trimmed video: $savedName")
+                                }.onFailure { err ->
+                                    isTrimming = false
+                                    viewModel.showMessage(err.localizedMessage ?: "Trim failed")
+                                }
+                            }
+                        },
+                        enabled = !isTrimming,
+                        shape = RoundedCornerShape(16.dp),
+                        modifier = Modifier.weight(1.4f)
+                    ) {
+                        if (isTrimming) {
+                            CircularProgressIndicator(
+                                color = Color.White,
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text("Trimming…")
+                        } else {
+                            Text("Save trimmed copy")
+                        }
                     }
                 }
             }
@@ -1386,26 +1488,24 @@ fun ViewerScreen(
 }
 
 /**
- * Samsung One UI floating video controls row sitting right above the filmstrip:
- *  - Left: Capture frame + Trim scissors
- *  - Center: Play/Pause + `00:01 / 00:02`
- *  - Right: Playback speed pill (`0.5×..2×`) + Mute / Unmute
+ * Samsung One UI floating video controls row + full-width seekbar sitting above the bottom dock.
+ * Reads `videoController` state inside this leaf composable so 20fps playhead ticks never
+ * recompose the surrounding ViewerScreen or filmstrip LazyRow!
  */
 @Composable
 private fun SamsungVideoControlBar(
-    isPlaying: Boolean,
-    isEnded: Boolean,
-    isMuted: Boolean,
-    playbackSpeed: Float,
-    positionMs: Long,
-    durationMs: Long,
-    onCaptureFrame: () -> Unit,
-    onTogglePlayPause: () -> Unit,
-    onCycleSpeed: () -> Unit,
+    videoController: ActiveVideoController,
+    fallbackDurationMs: Long,
     onOpenTrim: () -> Unit,
-    onToggleMute: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val isPlaying = videoController.isPlaying
+    val isEnded = videoController.isEnded
+    val isMuted = videoController.isMuted
+    val playbackSpeed = videoController.playbackSpeed
+    val durationMs = videoController.durationMs.takeIf { it > 0L } ?: fallbackDurationMs
+    val positionMs = videoController.currentPositionMs.coerceIn(0L, durationMs.coerceAtLeast(1L))
+
     val pillBg = Color(0xB3141416)
     val pillBorder = Color.White.copy(alpha = 0.16f)
     val speedLabel = if (playbackSpeed % 1f == 0f) {
@@ -1414,129 +1514,157 @@ private fun SamsungVideoControlBar(
         "${String.format(Locale.US, "%.2f", playbackSpeed).trimEnd('0')}×"
     }
 
-    Row(
+    Column(
         modifier = modifier,
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween
+        verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        // Left: Capture frame + Trim
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Box(
-                modifier = Modifier
-                    .size(36.dp)
-                    .clip(CircleShape)
-                    .background(pillBg)
-                    .border(0.8.dp, pillBorder, CircleShape)
-                    .clickable(onClick = onCaptureFrame),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.CropFree,
-                    contentDescription = "Capture video frame",
-                    tint = Color.White,
-                    modifier = Modifier.size(18.dp)
-                )
-            }
-            Box(
-                modifier = Modifier
-                    .size(36.dp)
-                    .clip(CircleShape)
-                    .background(pillBg)
-                    .border(0.8.dp, pillBorder, CircleShape)
-                    .clickable(onClick = onOpenTrim),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.ContentCut,
-                    contentDescription = "Trim video",
-                    tint = Color.White,
-                    modifier = Modifier.size(17.dp)
-                )
-            }
-        }
-
-        // Center: Play/Pause + "00:01 / 00:02" glass capsule
-        Surface(
-            shape = RoundedCornerShape(50),
-            color = pillBg,
-            modifier = Modifier
-                .height(36.dp)
-                .border(0.8.dp, pillBorder, RoundedCornerShape(50))
-                .clip(RoundedCornerShape(50))
-                .clickable(onClick = onTogglePlayPause)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(7.dp)
-            ) {
-                Icon(
-                    imageVector = when {
-                        isEnded -> Icons.Rounded.Replay
-                        isPlaying -> Icons.Rounded.Pause
-                        else -> Icons.Rounded.PlayArrow
-                    },
-                    contentDescription = if (isPlaying) "Pause" else "Play",
-                    tint = Color.White,
-                    modifier = Modifier.size(18.dp)
-                )
-                Text(
-                    text = "${FormatUtils.formatDurationPadded(positionMs)} / ${FormatUtils.formatDurationPadded(durationMs)}",
-                    style = TextStyle(
-                        fontSize = 12.5.sp,
-                        fontWeight = FontWeight.Medium,
-                        fontFeatureSettings = "tnum",
-                        color = Color.White
-                    ),
-                    maxLines = 1
-                )
-            }
-        }
-
-        // Right: Speed pill + Mute / Unmute circle
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Surface(
-                shape = RoundedCornerShape(50),
-                color = if (playbackSpeed != 1f) MaterialTheme.colorScheme.primary else pillBg,
-                modifier = Modifier
-                    .height(36.dp)
-                    .border(0.8.dp, pillBorder, RoundedCornerShape(50))
-                    .clip(RoundedCornerShape(50))
-                    .clickable(onClick = onCycleSpeed)
-            ) {
+            // Left: Capture frame + Trim
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Box(
-                    modifier = Modifier.padding(horizontal = 10.dp),
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(CircleShape)
+                        .background(pillBg)
+                        .border(0.8.dp, pillBorder, CircleShape)
+                        .clickable(onClick = videoController::captureFrame),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(
-                        text = speedLabel,
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold
+                    Icon(
+                        imageVector = Icons.Rounded.CropFree,
+                        contentDescription = "Capture video frame",
+                        tint = Color.White,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(CircleShape)
+                        .background(pillBg)
+                        .border(0.8.dp, pillBorder, CircleShape)
+                        .clickable(onClick = onOpenTrim),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.ContentCut,
+                        contentDescription = "Trim video",
+                        tint = Color.White,
+                        modifier = Modifier.size(17.dp)
                     )
                 }
             }
 
-            Box(
+            // Center: Play/Pause + "00:01 / 00:02" glass capsule
+            Surface(
+                shape = RoundedCornerShape(50),
+                color = pillBg,
                 modifier = Modifier
-                    .size(36.dp)
-                    .clip(CircleShape)
-                    .background(pillBg)
-                    .border(0.8.dp, pillBorder, CircleShape)
-                    .clickable(onClick = onToggleMute),
-                contentAlignment = Alignment.Center
+                    .height(36.dp)
+                    .border(0.8.dp, pillBorder, RoundedCornerShape(50))
+                    .clip(RoundedCornerShape(50))
+                    .clickable(onClick = videoController::togglePlayPause)
             ) {
-                Icon(
-                    imageVector = if (isMuted) {
-                        Icons.AutoMirrored.Rounded.VolumeOff
-                    } else {
-                        Icons.AutoMirrored.Rounded.VolumeUp
-                    },
-                    contentDescription = if (isMuted) "Unmute" else "Mute",
-                    tint = Color.White,
-                    modifier = Modifier.size(19.dp)
-                )
+                Row(
+                    modifier = Modifier.padding(horizontal = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(7.dp)
+                ) {
+                    Icon(
+                        imageVector = when {
+                            isEnded -> Icons.Rounded.Replay
+                            isPlaying -> Icons.Rounded.Pause
+                            else -> Icons.Rounded.PlayArrow
+                        },
+                        contentDescription = if (isPlaying) "Pause" else "Play",
+                        tint = Color.White,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Text(
+                        text = "${FormatUtils.formatDurationPadded(positionMs)} / ${FormatUtils.formatDurationPadded(durationMs)}",
+                        style = TextStyle(
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.Medium,
+                            fontFeatureSettings = "tnum",
+                            color = Color.White
+                        ),
+                        maxLines = 1
+                    )
+                }
             }
+
+            // Right: Speed pill + Mute / Unmute circle
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = if (playbackSpeed != 1f) MaterialTheme.colorScheme.primary else pillBg,
+                    modifier = Modifier
+                        .height(36.dp)
+                        .border(0.8.dp, pillBorder, RoundedCornerShape(50))
+                        .clip(RoundedCornerShape(50))
+                        .clickable(onClick = videoController::cyclePlaybackSpeed)
+                ) {
+                    Box(
+                        modifier = Modifier.padding(horizontal = 10.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = speedLabel,
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+
+                Box(
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(CircleShape)
+                        .background(pillBg)
+                        .border(0.8.dp, pillBorder, CircleShape)
+                        .clickable(onClick = videoController::toggleMute),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = if (isMuted) {
+                            Icons.AutoMirrored.Rounded.VolumeOff
+                        } else {
+                            Icons.AutoMirrored.Rounded.VolumeUp
+                        },
+                        contentDescription = if (isMuted) "Unmute" else "Mute",
+                        tint = Color.White,
+                        modifier = Modifier.size(19.dp)
+                    )
+                }
+            }
+        }
+
+        // Dedicated full-width seekbar (works even when the bottom filmstrip is turned off!)
+        if (durationMs > 0L) {
+            Slider(
+                value = positionMs.toFloat(),
+                onValueChange = { newPos ->
+                    videoController.isScrubbing = true
+                    videoController.seekTo(newPos.toLong())
+                },
+                onValueChangeFinished = {
+                    videoController.isScrubbing = false
+                },
+                valueRange = 0f..durationMs.toFloat().coerceAtLeast(1f),
+                colors = SliderDefaults.colors(
+                    thumbColor = Color.White,
+                    activeTrackColor = Color.White,
+                    inactiveTrackColor = Color.White.copy(alpha = 0.28f)
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(26.dp)
+            )
         }
     }
 }
@@ -1553,11 +1681,10 @@ private fun SamsungFilmstripScrubber(
     items: List<MediaItem>,
     currentIndex: Int,
     isUnmeteredWifi: Boolean,
-    videoPositionMs: Long,
-    videoDurationMs: Long,
+    videoController: ActiveVideoController,
+    fallbackVideoDurationMs: Long,
     onSelectPage: (Int) -> Unit,
     onScrubPage: (Int) -> Unit,
-    onSeekVideoMs: (Long) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -1679,22 +1806,31 @@ private fun SamsungFilmstripScrubber(
                         .width(safeTileWidth),
                     contentAlignment = Alignment.Center
                 ) {
-                    val safeDuration = videoDurationMs.coerceAtLeast(1L)
                     val tileWidthPx = with(density) { safeTileWidth.toPx() }.coerceAtLeast(1f)
+                    val latestTileWidthPx by rememberUpdatedState(tileWidthPx)
+                    val latestFallbackDuration by rememberUpdatedState(fallbackVideoDurationMs)
 
                     val scrubModifier = if (isVideoActive) {
                         Modifier
-                            .pointerInput(item.id, safeDuration, tileWidthPx) {
+                            .pointerInput(item.id) {
                                 detectTapGestures { offset ->
-                                    val fraction = (offset.x / tileWidthPx).coerceIn(0f, 1f)
-                                    onSeekVideoMs((fraction * safeDuration).toLong())
+                                    val dur = (videoController.durationMs.takeIf { it > 0L }
+                                        ?: latestFallbackDuration).coerceAtLeast(1L)
+                                    val fraction = (offset.x / latestTileWidthPx).coerceIn(0f, 1f)
+                                    videoController.seekTo((fraction * dur).toLong())
                                 }
                             }
-                            .pointerInput(item.id, safeDuration, tileWidthPx) {
-                                detectHorizontalDragGestures { change, _ ->
+                            .pointerInput(item.id) {
+                                detectHorizontalDragGestures(
+                                    onDragStart = { videoController.isScrubbing = true },
+                                    onDragEnd = { videoController.isScrubbing = false },
+                                    onDragCancel = { videoController.isScrubbing = false }
+                                ) { change, _ ->
                                     change.consume()
-                                    val fraction = (change.position.x / tileWidthPx).coerceIn(0f, 1f)
-                                    onSeekVideoMs((fraction * safeDuration).toLong())
+                                    val dur = (videoController.durationMs.takeIf { it > 0L }
+                                        ?: latestFallbackDuration).coerceAtLeast(1L)
+                                    val fraction = (change.position.x / latestTileWidthPx).coerceIn(0f, 1f)
+                                    videoController.seekTo((fraction * dur).toLong())
                                 }
                             }
                     } else {
@@ -1717,7 +1853,7 @@ private fun SamsungFilmstripScrubber(
                             modifier = Modifier.fillMaxSize()
                         )
 
-                        // Tiny white play triangle on neighboring video thumbnails (like Screenshot 2!)
+                        // Tiny white play triangle on neighboring video thumbnails
                         if (item.isVideo && !isCurrent) {
                             Icon(
                                 imageVector = Icons.Rounded.PlayArrow,
@@ -1731,24 +1867,39 @@ private fun SamsungFilmstripScrubber(
                         }
                     }
 
-                    // Samsung's signature vertical white video playhead needle spanning above & below tile!
+                    // Isolated playhead needle: only this tiny Box recomposes at 20fps during playback!
                     if (isVideoActive) {
-                        val playFraction = (videoPositionMs.toFloat() / safeDuration.toFloat()).coerceIn(0f, 1f)
-                        val needleOffsetX = ((playFraction - 0.5f) * (tileWidthPx - with(density) { 4.dp.toPx() })).roundToInt()
-                        Box(
-                            modifier = Modifier
-                                .offset { IntOffset(needleOffsetX, 0) }
-                                .width(3.dp)
-                                .fillMaxHeight()
-                                .clip(RoundedCornerShape(50))
-                                .background(Color.White)
-                                .border(0.4.dp, Color.Black.copy(alpha = 0.35f), RoundedCornerShape(50))
+                        FilmstripPlayheadNeedle(
+                            videoController = videoController,
+                            fallbackDurationMs = fallbackVideoDurationMs,
+                            tileWidthPx = tileWidthPx
                         )
                     }
                 }
             }
         }
     }
+}
+
+@Composable
+private fun FilmstripPlayheadNeedle(
+    videoController: ActiveVideoController,
+    fallbackDurationMs: Long,
+    tileWidthPx: Float
+) {
+    val density = LocalDensity.current
+    val safeDuration = (videoController.durationMs.takeIf { it > 0L } ?: fallbackDurationMs).coerceAtLeast(1L)
+    val playFraction = (videoController.currentPositionMs.toFloat() / safeDuration.toFloat()).coerceIn(0f, 1f)
+    val needleOffsetX = ((playFraction - 0.5f) * (tileWidthPx - with(density) { 4.dp.toPx() })).roundToInt()
+    Box(
+        modifier = Modifier
+            .offset { IntOffset(needleOffsetX, 0) }
+            .width(3.dp)
+            .fillMaxHeight()
+            .clip(RoundedCornerShape(50))
+            .background(Color.White)
+            .border(0.4.dp, Color.Black.copy(alpha = 0.35f), RoundedCornerShape(50))
+    )
 }
 
 /**
@@ -1765,6 +1916,7 @@ private fun ZoomablePhotoPage(
     item: MediaItem,
     isUnmeteredWifi: Boolean,
     swipeDownToDismiss: Boolean = true,
+    startMuted: Boolean = false,
     isClosing: Boolean = false,
     motionPhotoInfo: MotionPhotoInfo? = null,
     isPlayingMotion: Boolean = false,
@@ -1778,6 +1930,8 @@ private fun ZoomablePhotoPage(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val density = LocalDensity.current
     val appContainer = LocalAppContainer.current
     val imageLoader = LocalGalleryImageLoader.current
     val haptic = LocalHapticFeedback.current
@@ -1804,11 +1958,13 @@ private fun ZoomablePhotoPage(
     }
 
     var containerSize by remember { mutableStateOf(IntSize.Zero) }
+    var resolvedImageAspect by remember(item.id) { mutableStateOf<Float?>(null) }
     val offlinePath = remember(item.id) { appContainer.offlineMediaManager.getOfflineFilePath(item.id) }
 
     // Motion / Live Photo ExoPlayer (Samsung + Xiaomi + Pixel + iPhone Live Photos)
     var motionVideoUri by remember(item.id, motionPhotoInfo) { mutableStateOf<android.net.Uri?>(null) }
     var motionFirstFrameReady by remember(item.id, isPlayingMotion) { mutableStateOf(false) }
+    var motionPlayer by remember(item.id) { mutableStateOf<ExoPlayer?>(null) }
 
     LaunchedEffect(item.id, motionPhotoInfo, isPlayingMotion) {
         if (isPlayingMotion && motionPhotoInfo != null && motionVideoUri == null) {
@@ -1823,25 +1979,30 @@ private fun ZoomablePhotoPage(
         }
     }
 
-    val motionPlayer: ExoPlayer? = remember(item.id, isPlayingMotion, motionVideoUri) {
+    DisposableEffect(item.id, isPlayingMotion, motionVideoUri, lifecycleOwner) {
         val uri = motionVideoUri
         if (!isPlayingMotion || uri == null) {
-            null
-        } else {
-            ExoPlayer.Builder(context).build().apply {
+            motionFirstFrameReady = false
+            motionPlayer = null
+            return@DisposableEffect onDispose {}
+        }
+        val audioAttrs = AudioAttributes.Builder()
+            .setUsage(C.USAGE_MEDIA)
+            .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+            .build()
+        val playerInstance = ExoPlayer.Builder(context)
+            .setAudioAttributes(audioAttrs, true)
+            .setHandleAudioBecomingNoisy(true)
+            .build()
+            .apply {
                 setMediaItem(Media3Item.fromUri(uri))
                 repeatMode = Player.REPEAT_MODE_OFF
+                volume = if (startMuted) 0f else 1f
                 playWhenReady = true
                 prepare()
             }
-        }
-    }
+        motionPlayer = playerInstance
 
-    DisposableEffect(motionPlayer) {
-        if (motionPlayer == null) {
-            motionFirstFrameReady = false
-            return@DisposableEffect onDispose {}
-        }
         val listener = object : Player.Listener {
             override fun onRenderedFirstFrame() {
                 motionFirstFrameReady = true
@@ -1851,18 +2012,30 @@ private fun ZoomablePhotoPage(
                     onMotionPlayStateChanged(false)
                 }
             }
+            override fun onPlayerError(error: PlaybackException) {
+                onMotionPlayStateChanged(false)
+            }
         }
-        motionPlayer.addListener(listener)
+        val lifecycleObserver = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) {
+                playerInstance.pause()
+                onMotionPlayStateChanged(false)
+            }
+        }
+        playerInstance.addListener(listener)
+        lifecycleOwner.lifecycle.addObserver(lifecycleObserver)
         onDispose {
-            motionPlayer.removeListener(listener)
-            motionPlayer.stop()
-            motionPlayer.release()
+            lifecycleOwner.lifecycle.removeObserver(lifecycleObserver)
+            playerInstance.removeListener(listener)
+            playerInstance.stop()
+            playerInstance.release()
+            if (motionPlayer === playerInstance) motionPlayer = null
             motionFirstFrameReady = false
         }
     }
 
     val fullResRequest = remember(item.isLocal, item.localContentUri, item.id, offlinePath, isUnmeteredWifi) {
-        if (!offlinePath.isNullOrBlank() && File(offlinePath).exists()) {
+        if (!offlinePath.isNullOrBlank()) {
             ImageRequest.Builder(context)
                 .data(File(offlinePath))
                 .size(VIEWER_MAX_DECODE_PX)
@@ -1902,14 +2075,20 @@ private fun ZoomablePhotoPage(
     val latestMotionInfo by rememberUpdatedState(motionPhotoInfo)
     val latestSwipeDown by rememberUpdatedState(swipeDownToDismiss)
 
+    // Clamp pan strictly to the actual fitted image bounds (never allowing panning into black letterbox voids)
     fun clampOffset(x: Float, y: Float, scale: Float): Offset {
-        val maxX = ((scale - 1f) * containerSize.width / 2f).coerceAtLeast(0f)
-        val maxY = ((scale - 1f) * containerSize.height / 2f).coerceAtLeast(0f)
+        val cw = containerSize.width.toFloat()
+        val ch = containerSize.height.toFloat()
+        val fitted = fittedViewerContentRect(item, cw, ch, resolvedImageAspect)
+        val contentW = fitted?.width ?: cw
+        val contentH = fitted?.height ?: ch
+        val maxX = ((contentW * scale - cw) / 2f).coerceAtLeast(0f)
+        val maxY = ((contentH * scale - ch) / 2f).coerceAtLeast(0f)
         return Offset(x.coerceIn(-maxX, maxX), y.coerceIn(-maxY, maxY))
     }
 
-    // Only downward drag scales & dims for dismiss — upward swipe for Details keeps photo rock-solid!
-    val dismissFraction = (dismissOffsetY.value / 420f).coerceIn(0f, 1f)
+    val dismissRangePx = with(density) { 160.dp.toPx() }.coerceAtLeast(1f)
+    val dismissFraction = (dismissOffsetY.value / dismissRangePx).coerceIn(0f, 1f)
     val dismissScale = 1f - (dismissFraction * 0.22f)
 
     Box(
@@ -1959,7 +2138,12 @@ private fun ZoomablePhotoPage(
                     var verticalDragMode = 0 // 0 = undecided, 1 = swipe down dismiss, -1 = swipe up details
                     var swipeUpAccumulatedPx = 0f
                     var detailsTriggered = false
-                    var gestureStartedZoomed = scaleAnim.value > 1.02f
+                    var curScale = scaleAnim.value
+                    var curOffX = offsetXAnim.value
+                    var curOffY = offsetYAnim.value
+                    var curDismissY = dismissOffsetY.value
+                    var gestureStartedZoomed = curScale > 1.02f
+                    var mutatedTransform = false
 
                     do {
                         val event = awaitPointerEvent()
@@ -1971,46 +2155,55 @@ private fun ZoomablePhotoPage(
                             val panChange = event.calculatePan()
                             val centroid = event.calculateCentroid()
 
-                            val prevScale = scaleAnim.value
+                            val prevScale = curScale.coerceAtLeast(0.01f)
                             val nextScale = (prevScale * zoomChange).coerceIn(1f, 5f)
+                            val scaleRatio = nextScale / prevScale
                             val centerX = containerSize.width / 2f
                             val centerY = containerSize.height / 2f
 
-                            val focusShiftX = (centroid.x - centerX) * (1f - nextScale / prevScale)
-                            val focusShiftY = (centroid.y - centerY) * (1f - nextScale / prevScale)
+                            val focusShiftX = (centroid.x - centerX) * (1f - scaleRatio)
+                            val focusShiftY = (centroid.y - centerY) * (1f - scaleRatio)
                             val clamped = clampOffset(
-                                x = offsetXAnim.value + panChange.x + focusShiftX,
-                                y = offsetYAnim.value + panChange.y + focusShiftY,
+                                x = curOffX * scaleRatio + panChange.x + focusShiftX,
+                                y = curOffY * scaleRatio + panChange.y + focusShiftY,
                                 scale = nextScale
                             )
+                            curScale = nextScale
+                            curOffX = clamped.x
+                            curOffY = clamped.y
+                            mutatedTransform = true
 
                             coroutineScope.launch {
-                                scaleAnim.snapTo(nextScale)
-                                offsetXAnim.snapTo(clamped.x)
-                                offsetYAnim.snapTo(clamped.y)
+                                scaleAnim.snapTo(curScale)
+                                offsetXAnim.snapTo(curOffX)
+                                offsetYAnim.snapTo(curOffY)
                             }
                             onZoomStateChanged(nextScale > 1.02f)
                             gestureStartedZoomed = nextScale > 1.02f
                             event.changes.forEach { if (it.positionChanged()) it.consume() }
                         } else if (pressedPointers == 1) {
                             val pan = event.calculatePan()
-                            val currentScale = scaleAnim.value
 
-                            if (currentScale > 1.02f) {
+                            if (curScale > 1.02f) {
                                 val nextClamped = clampOffset(
-                                    x = offsetXAnim.value + pan.x,
-                                    y = offsetYAnim.value + pan.y,
-                                    scale = currentScale
+                                    x = curOffX + pan.x,
+                                    y = curOffY + pan.y,
+                                    scale = curScale
                                 )
                                 val atHorizontalEdge =
-                                    abs(nextClamped.x - offsetXAnim.value) < 0.5f &&
+                                    abs(nextClamped.x - curOffX) < 0.5f &&
                                         abs(pan.x) > abs(pan.y) * 1.4f
+                                curOffX = nextClamped.x
+                                curOffY = nextClamped.y
+                                mutatedTransform = true
 
                                 coroutineScope.launch {
-                                    offsetXAnim.snapTo(nextClamped.x)
-                                    offsetYAnim.snapTo(nextClamped.y)
+                                    offsetXAnim.snapTo(curOffX)
+                                    offsetYAnim.snapTo(curOffY)
                                 }
-                                if (!atHorizontalEdge) {
+                                if (atHorizontalEdge) {
+                                    onZoomStateChanged(false)
+                                } else {
                                     event.changes.forEach { if (it.positionChanged()) it.consume() }
                                 }
                             } else if (!gestureStartedZoomed) {
@@ -2022,20 +2215,18 @@ private fun ZoomablePhotoPage(
                                 }
                                 when (verticalDragMode) {
                                     1 -> {
-                                        // Smooth downward dismiss gesture (photo follows finger smoothly)
-                                        val newY = if (latestSwipeDown) {
-                                            (dismissOffsetY.value + pan.y).coerceAtLeast(0f)
+                                        curDismissY = if (latestSwipeDown) {
+                                            (curDismissY + pan.y).coerceAtLeast(0f)
                                         } else {
                                             0f
                                         }
                                         coroutineScope.launch {
-                                            dismissOffsetY.snapTo(newY)
+                                            dismissOffsetY.snapTo(curDismissY)
                                         }
-                                        onVerticalDismissProgress((newY / 420f).coerceIn(0f, 1f))
+                                        onVerticalDismissProgress((curDismissY / dismissRangePx).coerceIn(0f, 1f))
                                         event.changes.forEach { if (it.positionChanged()) it.consume() }
                                     }
                                     -1 -> {
-                                        // Silky swipe-up for Details: photo stays rock-solid (zero awkward shift!)
                                         swipeUpAccumulatedPx += -pan.y
                                         if (!detailsTriggered && swipeUpAccumulatedPx > 95f) {
                                             detailsTriggered = true
@@ -2050,10 +2241,9 @@ private fun ZoomablePhotoPage(
                     } while (event.changes.any { it.pressed })
 
                     if (verticalDragMode == 1) {
-                        val dismissThresholdPx = (containerSize.height * 0.16f).coerceAtLeast(210f)
-                        if (latestSwipeDown && dismissOffsetY.value > dismissThresholdPx) {
-                            // Keep the current drag offset & backdrop level: the close morph picks
-                            // up from exactly here (no snap back to full screen before flying home).
+                        val dismissThresholdPx = (containerSize.height * 0.16f)
+                            .coerceAtLeast(with(density) { 84.dp.toPx() })
+                        if (latestSwipeDown && curDismissY > dismissThresholdPx) {
                             onDismiss()
                         } else {
                             coroutineScope.launch {
@@ -2072,13 +2262,15 @@ private fun ZoomablePhotoPage(
                             haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                             onSwipeUpForDetails()
                         }
-                    } else if (scaleAnim.value < 1.05f) {
+                    } else if (mutatedTransform && curScale < 1.05f) {
                         onZoomStateChanged(false)
                         coroutineScope.launch {
                             launch { scaleAnim.animateTo(1f, spring()) }
                             launch { offsetXAnim.animateTo(0f, spring()) }
                             launch { offsetYAnim.animateTo(0f, spring()) }
                         }
+                    } else if (curScale > 1.02f) {
+                        onZoomStateChanged(true)
                     }
                 }
             },
@@ -2094,7 +2286,9 @@ private fun ZoomablePhotoPage(
                 if (intrinsic.width > 1f && intrinsic.height > 1f &&
                     !intrinsic.width.isNaN() && !intrinsic.height.isNaN()
                 ) {
-                    onImageAspectResolved(intrinsic.width / intrinsic.height)
+                    val aspect = intrinsic.width / intrinsic.height
+                    resolvedImageAspect = aspect
+                    onImageAspectResolved(aspect)
                 }
             },
             modifier = modifier
@@ -2108,7 +2302,8 @@ private fun ZoomablePhotoPage(
                 }
         )
 
-        if (motionPlayer != null) {
+        val activeMotionPlayer = motionPlayer
+        if (activeMotionPlayer != null) {
             AndroidView(
                 factory = { ctx ->
                     (LayoutInflater.from(ctx).inflate(R.layout.view_exo_texture_player, null) as PlayerView).apply {
@@ -2119,11 +2314,11 @@ private fun ZoomablePhotoPage(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.MATCH_PARENT
                         )
-                        player = motionPlayer
+                        player = activeMotionPlayer
                     }
                 },
                 update = { pv ->
-                    if (pv.player !== motionPlayer) pv.player = motionPlayer
+                    if (pv.player !== activeMotionPlayer) pv.player = activeMotionPlayer
                 },
                 onRelease = { pv ->
                     pv.player = null
@@ -2131,6 +2326,11 @@ private fun ZoomablePhotoPage(
                 modifier = Modifier
                     .fillMaxSize()
                     .graphicsLayer {
+                        val effectiveScale = scaleAnim.value * dismissScale
+                        scaleX = effectiveScale
+                        scaleY = effectiveScale
+                        translationX = offsetXAnim.value
+                        translationY = offsetYAnim.value + dismissOffsetY.value
                         alpha = if (motionFirstFrameReady) 1f else 0f
                     }
             )

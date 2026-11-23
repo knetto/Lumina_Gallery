@@ -5,10 +5,12 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.luminagallery.drive.AppContainer
+import com.luminagallery.drive.data.local.PreferencesManager
 import com.luminagallery.drive.data.local.entity.AlbumCollectionEntity
 import com.luminagallery.drive.data.remote.NetworkMonitor
 import com.luminagallery.drive.data.repository.AlbumOrganizationRepository
 import com.luminagallery.drive.domain.model.AlbumGridItem
+import com.luminagallery.drive.domain.model.AlbumSortMode
 import com.luminagallery.drive.domain.model.BreadcrumbItem
 import com.luminagallery.drive.domain.usecase.ManageRootsUseCase
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -38,6 +40,7 @@ class CollectionViewModel(
     private val collectionId: String,
     initialCollectionName: String,
     private val organizationRepository: AlbumOrganizationRepository,
+    private val preferencesManager: PreferencesManager,
     private val manageRootsUseCase: ManageRootsUseCase,
     networkMonitor: NetworkMonitor
 ) : ViewModel() {
@@ -106,6 +109,9 @@ class CollectionViewModel(
 
     fun saveReorder(ordered: List<AlbumGridItem>) {
         viewModelScope.launch {
+            if (preferencesManager.latestPreferences.albumSortMode != AlbumSortMode.CUSTOM) {
+                preferencesManager.setAlbumSortMode(AlbumSortMode.CUSTOM)
+            }
             organizationRepository.saveReorder(collectionId, ordered)
         }
     }
@@ -268,6 +274,7 @@ class CollectionViewModel(
             collectionId = collectionId,
             initialCollectionName = collectionName,
             organizationRepository = container.albumOrganizationRepository,
+            preferencesManager = container.preferencesManager,
             manageRootsUseCase = container.manageRootsUseCase,
             networkMonitor = container.networkMonitor
         ) as T

@@ -10,7 +10,12 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerFactory
 import androidx.work.WorkerParameters
+import com.luminagallery.drive.data.local.LocalMediaRepository
+import com.luminagallery.drive.data.remote.auth.DriveAuthException
+import com.luminagallery.drive.data.repository.GalleryExtrasRepository
 import com.luminagallery.drive.data.repository.GalleryRepository
+import com.luminagallery.drive.data.repository.OcrIndexerManager
+import kotlinx.coroutines.flow.first
 import java.util.concurrent.TimeUnit
 
 /**
@@ -28,12 +33,47 @@ class DriveSyncWorker(
 
     override suspend fun doWork(): Result {
         val result = repository.performSmartSync(forceFullRescan = false)
-        return if (result.isSuccess) Result.success() else Result.retry()
+        if (result.isSuccess) return Result.success()
+        val err = result.exceptionOrNull()
+        // Never retry endlessly when signed out or missing Google OAuth consent
+        if (err is DriveAuthException || runAttemptCount >= 4) {
+            return Result.failure()
+        }
+        return Result.retry()
+    }
+}
+
+/**
+ * Battery-aware background media indexer for GPS location & offline OCR caches.
+ * Runs only while battery is not low (and prefers charging/idle windows) so cold app launch
+ * stays snappy and foreground sessions never burn battery indexing thousands of older photos.
+ */
+class MediaIndexWorker(
+    appContext: Context,
+    workerParams: WorkerParameters,
+    private val localMediaRepository: LocalMediaRepository,
+    private val extrasRepository: GalleryExtrasRepository,
+    private val ocrIndexerManager: OcrIndexerManager
+) : CoroutineWorker(appContext, workerParams) {
+
+    override suspend fun doWork(): Result {
+        if (!localMediaRepository.hasMediaPermission()) return Result.success()
+        val localItems = runCatching {
+            localMediaRepository.observeAllLocalMedia().first()
+        }.getOrDefault(emptyList())
+        if (localItems.isEmpty()) return Result.success()
+
+        runCatching { extrasRepository.syncLocationsIndex(localItems) }
+        runCatching { ocrIndexerManager.syncOcrIndex(localItems, maxNewItemsPerRun = 150) }
+        return Result.success()
     }
 }
 
 class LuminaWorkerFactory(
-    private val repository: GalleryRepository
+    private val repository: GalleryRepository,
+    private val localMediaRepository: LocalMediaRepository,
+    private val extrasRepository: GalleryExtrasRepository,
+    private val ocrIndexerManager: OcrIndexerManager
 ) : WorkerFactory() {
 
     override fun createWorker(
@@ -46,7 +86,38 @@ class LuminaWorkerFactory(
             workerParams = workerParameters,
             repository = repository
         )
+        MediaIndexWorker::class.java.name -> MediaIndexWorker(
+            appContext = appContext,
+            workerParams = workerParameters,
+            localMediaRepository = localMediaRepository,
+            extrasRepository = extrasRepository,
+            ocrIndexerManager = ocrIndexerManager
+        )
         else -> null
+    }
+}
+
+object MediaIndexScheduler {
+    private const val UNIQUE_WORK_NAME = "lumina_media_background_indexer"
+
+    fun ensureScheduled(context: Context) {
+        val constraints = Constraints.Builder()
+            .setRequiresBatteryNotLow(true)
+            .setRequiresCharging(true)
+            .build()
+        val request = PeriodicWorkRequestBuilder<MediaIndexWorker>(
+            repeatInterval = 24,
+            repeatIntervalTimeUnit = TimeUnit.HOURS,
+            flexTimeInterval = 4,
+            flexTimeIntervalUnit = TimeUnit.HOURS
+        )
+            .setConstraints(constraints)
+            .build()
+        WorkManager.getInstance(context).enqueueUniquePeriodicWork(
+            UNIQUE_WORK_NAME,
+            ExistingPeriodicWorkPolicy.KEEP,
+            request
+        )
     }
 }
 

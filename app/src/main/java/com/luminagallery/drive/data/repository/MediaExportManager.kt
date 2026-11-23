@@ -60,17 +60,38 @@ class MediaExportManager(
                 } else {
                     val prefix = if (stripLocation && !item.isVideo) "clean_" else ""
                     val safeName = sanitizeFilename("${prefix}${item.id.take(8)}_${item.name}")
-                    val targetFile = File(shareDir, safeName)
+                    var targetFile = File(shareDir, safeName)
 
                     if (!targetFile.exists() || targetFile.length() == 0L) {
-                        val responseBody = driveApi.downloadFile(item.id)
-                        responseBody.use { body ->
-                            FileOutputStream(targetFile).use { output ->
-                                body.byteStream().copyTo(output, BUFFER_SIZE)
+                        val partFile = File(shareDir, "$safeName.part")
+                        if (partFile.exists()) partFile.delete()
+                        try {
+                            val responseBody = driveApi.downloadFile(item.id)
+                            responseBody.use { body ->
+                                FileOutputStream(partFile).use { output ->
+                                    body.byteStream().copyTo(output, BUFFER_SIZE)
+                                }
                             }
-                        }
-                        if (stripLocation && !item.isVideo && !item.isRaw) {
-                            stripExifFromFile(targetFile, item.mimeType)
+                            if (partFile.length() <= 0L) {
+                                throw IOException("Downloaded empty file for ${item.name}")
+                            }
+                            val finalizedPart = if (stripLocation && !item.isVideo && !item.isRaw) {
+                                stripExifFromFile(partFile, item.mimeType)
+                            } else {
+                                partFile
+                            }
+                            val finalExt = finalizedPart.extension
+                            if (finalExt.isNotBlank() && !safeName.endsWith(".$finalExt", ignoreCase = true) && finalizedPart != partFile) {
+                                targetFile = File(shareDir, "${safeName.substringBeforeLast('.')}.$finalExt")
+                            }
+                            if (targetFile.exists()) targetFile.delete()
+                            if (!finalizedPart.renameTo(targetFile)) {
+                                finalizedPart.copyTo(targetFile, overwrite = true)
+                                finalizedPart.delete()
+                            }
+                        } catch (e: Exception) {
+                            runCatching { partFile.delete() }
+                            throw e
                         }
                     }
                     uris.add(FileProvider.getUriForFile(context, authority, targetFile))
@@ -85,13 +106,17 @@ class MediaExportManager(
         val ext = item.name.substringAfterLast('.', "jpg").lowercase()
         val safeName = sanitizeFilename("clean_${item.id.take(12)}_${System.currentTimeMillis()}.$ext")
         val targetFile = File(shareDir, safeName)
-        context.contentResolver.openInputStream(srcUri)?.use { input ->
-            FileOutputStream(targetFile).use { output ->
-                input.copyTo(output, BUFFER_SIZE)
-            }
-        } ?: throw IOException("Unable to read ${item.name} for privacy share")
-        stripExifFromFile(targetFile, item.mimeType)
-        return targetFile
+        try {
+            context.contentResolver.openInputStream(srcUri)?.use { input ->
+                FileOutputStream(targetFile).use { output ->
+                    input.copyTo(output, BUFFER_SIZE)
+                }
+            } ?: throw IOException("Unable to read ${item.name} for privacy share")
+            return stripExifFromFile(targetFile, item.mimeType)
+        } catch (e: Exception) {
+            runCatching { targetFile.delete() }
+            throw e
+        }
     }
 
     private fun copyLocalFileForShare(item: MediaItem, srcUri: Uri): File {
@@ -124,21 +149,27 @@ class MediaExportManager(
             val ext = displayName.substringAfterLast('.', "jpg").lowercase()
             val safeName = sanitizeFilename("clean_ext_${System.currentTimeMillis()}.$ext")
             val targetFile = File(shareDir, safeName)
-            context.contentResolver.openInputStream(srcUri)?.use { input ->
-                FileOutputStream(targetFile).use { output ->
-                    input.copyTo(output, BUFFER_SIZE)
-                }
-            } ?: throw IOException("Unable to read $displayName for sharing")
-            stripExifFromFile(targetFile, mimeType)
-            FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", targetFile)
+            val cleanedFile = try {
+                context.contentResolver.openInputStream(srcUri)?.use { input ->
+                    FileOutputStream(targetFile).use { output ->
+                        input.copyTo(output, BUFFER_SIZE)
+                    }
+                } ?: throw IOException("Unable to read $displayName for sharing")
+                stripExifFromFile(targetFile, mimeType)
+            } catch (e: Exception) {
+                runCatching { targetFile.delete() }
+                throw e
+            }
+            FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", cleanedFile)
         }
     }
 
     /**
      * Removes GPS coordinates and identifying device EXIF metadata from a temporary shared copy
      * while leaving the user's original file untouched.
+     * Returns the resulting sanitized file (with matching extension if re-encoded).
      */
-    private fun stripExifFromFile(file: File, mimeType: String) {
+    private fun stripExifFromFile(file: File, mimeType: String): File {
         val strippedInPlace = runCatching {
             val exif = ExifInterface(file.absolutePath)
             SENSITIVE_EXIF_TAGS.forEach { tag ->
@@ -148,33 +179,45 @@ class MediaExportManager(
             true
         }.getOrDefault(false)
 
-        if (!strippedInPlace && mimeType.startsWith("image/", ignoreCase = true)) {
-            // Fallback for formats where ExifInterface cannot write in-place (e.g., HEIC/certain PNGs):
-            // re-encode clean pixels without EXIF blocks.
-            runCatching {
-                val bitmap = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        if (strippedInPlace) return file
+
+        if (mimeType.startsWith("image/", ignoreCase = true)) {
+            // Fallback for formats where ExifInterface cannot write in-place (e.g., HEIC/WebP):
+            // re-encode clean pixels without EXIF blocks and match the file extension to the codec.
+            val bitmap = runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                     ImageDecoder.decodeBitmap(ImageDecoder.createSource(file)) { dec, _, _ ->
                         dec.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
                     }
                 } else {
                     BitmapFactory.decodeFile(file.absolutePath)
                 }
-                if (bitmap != null) {
-                    try {
-                        val format = if (mimeType.contains("png", ignoreCase = true)) {
-                            Bitmap.CompressFormat.PNG
-                        } else {
-                            Bitmap.CompressFormat.JPEG
+            }.getOrNull()
+            if (bitmap != null) {
+                val isPng = mimeType.contains("png", ignoreCase = true)
+                val format = if (isPng) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG
+                val newExt = if (isPng) "png" else "jpg"
+                val outFile = if (file.extension.equals(newExt, ignoreCase = true)) {
+                    file
+                } else {
+                    File(file.parentFile, "${file.nameWithoutExtension}.$newExt")
+                }
+                try {
+                    FileOutputStream(outFile).use { out ->
+                        if (!bitmap.compress(format, 95, out)) {
+                            throw IOException("Failed to re-encode clean share image")
                         }
-                        FileOutputStream(file).use { out ->
-                            bitmap.compress(format, 95, out)
-                        }
-                    } finally {
-                        bitmap.recycle()
                     }
+                    if (outFile != file) {
+                        runCatching { file.delete() }
+                    }
+                    return outFile
+                } finally {
+                    bitmap.recycle()
                 }
             }
         }
+        throw IOException("Could not strip private EXIF/GPS metadata from ${file.name}")
     }
 
     suspend fun saveToDeviceGallery(

@@ -1,8 +1,5 @@
 package com.luminagallery.drive.ui.components
 
-import androidx.compose.animation.AnimatedVisibilityScope
-import androidx.compose.animation.ExperimentalSharedTransitionApi
-import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
@@ -27,7 +24,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Check
-import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.OfflinePin
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -76,15 +72,13 @@ private val SelectionSpringSpec = spring<Dp>(
 )
 private val TilePressSpringSpec = spring<Float>(dampingRatio = 0.75f, stiffness = 580f)
 
-@OptIn(ExperimentalSharedTransitionApi::class, ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun MediaGridItem(
     item: MediaItem,
     isUnmeteredWifi: Boolean,
     isSelectionMode: Boolean,
     isSelected: Boolean,
-    sharedTransitionScope: SharedTransitionScope,
-    animatedVisibilityScope: AnimatedVisibilityScope,
     onClick: () -> Unit,
     onLongClick: (() -> Unit)? = null,
     isFavorite: Boolean = false,
@@ -98,26 +92,20 @@ fun MediaGridItem(
     val hostView = LocalView.current
     val tileBoundsRef = remember { arrayOf<androidx.compose.ui.geometry.Rect?>(null) }
 
-    // Avoid allocating selection spring animations per tile during normal 120Hz scrolling
-    val insetPadding = if (isSelectionMode) {
-        animateDpAsState(
-            targetValue = if (isSelected) 7.dp else 0.dp,
-            animationSpec = SelectionSpringSpec,
-            label = "selectionInset"
-        ).value.coerceAtLeast(0.dp)
-    } else {
-        0.dp
-    }
+    // Unconditional animation state slots so toggling selection mode never causes positional-slot pops
+    val insetPaddingRaw by animateDpAsState(
+        targetValue = if (isSelectionMode && isSelected) 7.dp else 0.dp,
+        animationSpec = SelectionSpringSpec,
+        label = "selectionInset"
+    )
+    val insetPadding = insetPaddingRaw.coerceAtLeast(0.dp)
 
-    val cornerRadius = if (isSelectionMode) {
-        animateDpAsState(
-            targetValue = if (isSelected) 10.dp else 0.dp,
-            animationSpec = SelectionSpringSpec,
-            label = "selectionRadius"
-        ).value.coerceAtLeast(0.dp)
-    } else {
-        0.dp
-    }
+    val cornerRadiusRaw by animateDpAsState(
+        targetValue = if (isSelectionMode && isSelected) 10.dp else 0.dp,
+        animationSpec = SelectionSpringSpec,
+        label = "selectionRadius"
+    )
+    val cornerRadius = cornerRadiusRaw.coerceAtLeast(0.dp)
 
     val imageRequest = remember(item.isLocal, item.localContentUri, item.id, item.thumbnailLink, item.isVideo, isUnmeteredWifi) {
         if (item.isLocal && !item.localContentUri.isNullOrBlank()) {
@@ -289,7 +277,7 @@ fun MediaGridItem(
             )
         }
 
-        // Top-right subtle badges: Favorite red heart + offline pin / optional Google Drive cloud indicator
+        // Top-right subtle badges: Favorite red heart + offline pin + Google Drive icon badge
         if (isFavorite || isOfflinePinned || (showCloudBadge && !item.isLocal)) {
             Row(
                 modifier = Modifier
@@ -303,14 +291,12 @@ fun MediaGridItem(
                         imageVector = Icons.Rounded.OfflinePin,
                         contentDescription = "Available offline",
                         tint = Color(0xFF69F0AE),
-                        modifier = Modifier.size(13.dp)
+                        modifier = Modifier.size(14.dp)
                     )
-                } else if (showCloudBadge && !item.isLocal) {
-                    Icon(
-                        imageVector = Icons.Rounded.Cloud,
-                        contentDescription = "Google Drive",
-                        tint = Color.White.copy(alpha = 0.88f),
-                        modifier = Modifier.size(13.dp)
+                }
+                if (showCloudBadge && !item.isLocal) {
+                    GoogleDriveBadge(
+                        badgeSize = 18.dp
                     )
                 }
                 if (isFavorite) {

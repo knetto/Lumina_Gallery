@@ -3,6 +3,7 @@ package com.luminagallery.drive.data.repository
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
@@ -11,11 +12,18 @@ import androidx.core.content.FileProvider
 import com.luminagallery.drive.BuildConfig
 import com.luminagallery.drive.data.local.PreferencesManager
 import com.luminagallery.drive.data.remote.NetworkMonitor
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.Call
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
@@ -104,8 +112,36 @@ class AppUpdateManager(
     private val _state = MutableStateFlow<AppUpdateState>(AppUpdateState.Idle)
     val state: StateFlow<AppUpdateState> = _state.asStateFlow()
 
+    private val managerScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    @Volatile
+    private var activeDownloadJob: Job? = null
+
+    @Volatile
+    private var activeDownloadCall: Call? = null
+
     @Volatile
     private var cachedInstalledBlobSha: String? = null
+
+    fun startDownloadAndInstall(activityContext: Context, update: GitHubAppUpdate) {
+        if (activeDownloadJob?.isActive == true) return
+        val appOrActivityCtx = activityContext
+        activeDownloadJob = managerScope.launch {
+            downloadAndInstallUpdate(appOrActivityCtx, update)
+        }
+    }
+
+    fun cancelDownload() {
+        val current = _state.value
+        activeDownloadCall?.cancel()
+        activeDownloadCall = null
+        activeDownloadJob?.cancel()
+        activeDownloadJob = null
+        if (current is AppUpdateState.Downloading) {
+            runCatching { File(updatesDir, "Lumina-Gallery-${current.update.shortSha}.apk.part").delete() }
+            _state.value = AppUpdateState.Available(update = current.update, showPopup = true)
+        }
+    }
 
     suspend fun checkForUpdate(manual: Boolean): AppUpdateState = withContext(Dispatchers.IO) {
         val current = _state.value
@@ -134,8 +170,6 @@ class AppUpdateManager(
         }
 
         runCatching {
-            preferencesManager.setLastUpdateCheckEpochMs(System.currentTimeMillis())
-
             val contentsReq = Request.Builder()
                 .url(GITHUB_CONTENTS_URL)
                 .header("Accept", "application/vnd.github+json")
@@ -156,6 +190,8 @@ class AppUpdateManager(
                     else -> throw IOException("GitHub returned HTTP ${resp.code}")
                 }
             }
+            // Only record last check timestamp after GitHub responded cleanly so transient errors can retry
+            preferencesManager.setLastUpdateCheckEpochMs(System.currentTimeMillis())
 
             val localBlobSha = getInstalledApkGitBlobSha1()
             if (localBlobSha != null && remoteBlobSha.equals(localBlobSha, ignoreCase = true)) {
@@ -298,7 +334,7 @@ class AppUpdateManager(
             totalBytes = update.apkSizeBytes
         )
 
-        runCatching {
+        val downloadResult = runCatching {
             pruneCachedApks(keepFileName = finalName)
             if (partFile.exists()) partFile.delete()
 
@@ -307,42 +343,55 @@ class AppUpdateManager(
                 .header("User-Agent", USER_AGENT)
                 .build()
 
-            httpClient.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) {
-                    throw IOException("Download failed (HTTP ${resp.code})")
-                }
-                val body = resp.body ?: throw IOException("Empty APK response")
-                val totalBytes = body.contentLength().takeIf { it > 0L } ?: update.apkSizeBytes
-                var downloaded = 0L
-                var lastEmitTime = 0L
+            val call = httpClient.newCall(req)
+            activeDownloadCall = call
+            try {
+                call.execute().use { resp ->
+                    if (!resp.isSuccessful) {
+                        throw IOException("Download failed (HTTP ${resp.code})")
+                    }
+                    val body = resp.body ?: throw IOException("Empty APK response")
+                    val totalBytes = body.contentLength().takeIf { it > 0L } ?: update.apkSizeBytes
+                    var downloaded = 0L
+                    var lastEmitTime = 0L
 
-                body.byteStream().use { input ->
-                    FileOutputStream(partFile).use { output ->
-                        val buffer = ByteArray(32 * 1024)
-                        while (true) {
-                            val read = input.read(buffer)
-                            if (read < 0) break
-                            output.write(buffer, 0, read)
-                            downloaded += read
-                            val now = System.currentTimeMillis()
-                            if (now - lastEmitTime >= 80L || downloaded == totalBytes) {
-                                lastEmitTime = now
-                                _state.value = AppUpdateState.Downloading(
-                                    update = update,
-                                    downloadedBytes = downloaded,
-                                    totalBytes = totalBytes
-                                )
+                    body.byteStream().use { input ->
+                        FileOutputStream(partFile).use { output ->
+                            val buffer = ByteArray(32 * 1024)
+                            while (isActive) {
+                                val read = input.read(buffer)
+                                if (read < 0) break
+                                output.write(buffer, 0, read)
+                                downloaded += read
+                                val now = System.currentTimeMillis()
+                                if (now - lastEmitTime >= 80L || downloaded == totalBytes) {
+                                    lastEmitTime = now
+                                    _state.value = AppUpdateState.Downloading(
+                                        update = update,
+                                        downloadedBytes = downloaded,
+                                        totalBytes = totalBytes
+                                    )
+                                }
                             }
+                            if (!isActive) throw CancellationException("Update download cancelled")
                         }
                     }
                 }
+            } finally {
+                if (activeDownloadCall === call) activeDownloadCall = null
             }
 
-            // Verify downloaded APK integrity against GitHub's exact Git blob SHA-1
+            // 1. Verify downloaded APK matches GitHub's Git blob SHA-1
             val downloadedSha = computeGitBlobSha1(partFile)
             if (downloadedSha == null || !downloadedSha.equals(update.apkBlobSha, ignoreCase = true)) {
                 partFile.delete()
                 throw IOException("Downloaded APK integrity check failed — please retry")
+            }
+
+            // 2. Verify APK package name & signing certificate SHA-256 match the installed app
+            if (!verifyApkSignatureMatchesInstalled(partFile)) {
+                partFile.delete()
+                throw IOException("Update APK signature does not match installed Lumina Gallery — blocked for security")
             }
 
             if (finalFile.exists()) finalFile.delete()
@@ -352,13 +401,72 @@ class AppUpdateManager(
             }
 
             handleReadyApk(activityContext, update, finalFile)
-        }.onFailure { err ->
-            partFile.delete()
+        }
+        downloadResult.onFailure { err ->
+            runCatching { partFile.delete() }
+            if (err is CancellationException) {
+                if (_state.value is AppUpdateState.Downloading) {
+                    _state.value = AppUpdateState.Available(update = update, showPopup = true)
+                }
+                throw err
+            }
             _state.value = AppUpdateState.Error(
                 message = err.localizedMessage ?: "Failed to download update",
                 update = update,
                 showPopup = true
             )
+        }
+    }
+
+    private fun verifyApkSignatureMatchesInstalled(apkFile: File): Boolean = runCatching {
+        val pm = context.packageManager
+        val installedSigners = readInstalledSigningCertSha256s(pm)
+        if (installedSigners.isEmpty()) return@runCatching true
+        val archiveInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            @Suppress("DEPRECATION")
+            pm.getPackageArchiveInfo(apkFile.absolutePath, PackageManager.GET_SIGNING_CERTIFICATES)
+        } else {
+            @Suppress("DEPRECATION")
+            pm.getPackageArchiveInfo(apkFile.absolutePath, PackageManager.GET_SIGNATURES)
+        } ?: return@runCatching false
+
+        // Allow base package match (release vs .debug suffix)
+        val installedBasePkg = context.packageName.removeSuffix(".debug")
+        val archiveBasePkg = archiveInfo.packageName.orEmpty().removeSuffix(".debug")
+        if (archiveBasePkg != installedBasePkg) return@runCatching false
+
+        val archiveSigners = extractSignerSha256s(archiveInfo)
+        archiveSigners.isNotEmpty() && archiveSigners.any { it in installedSigners }
+    }.getOrDefault(false)
+
+    private fun readInstalledSigningCertSha256s(pm: PackageManager): Set<String> = runCatching {
+        val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            pm.getPackageInfo(context.packageName, PackageManager.GET_SIGNING_CERTIFICATES)
+        } else {
+            @Suppress("DEPRECATION")
+            pm.getPackageInfo(context.packageName, PackageManager.GET_SIGNATURES)
+        }
+        extractSignerSha256s(info)
+    }.getOrDefault(emptySet())
+
+    @Suppress("DEPRECATION")
+    private fun extractSignerSha256s(pkgInfo: android.content.pm.PackageInfo): Set<String> {
+        val sigs = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val signingInfo = pkgInfo.signingInfo
+            if (signingInfo != null) {
+                if (signingInfo.hasMultipleSigners()) signingInfo.apkContentsSigners
+                else signingInfo.signingCertificateHistory
+            } else {
+                pkgInfo.signatures
+            }
+        } else {
+            pkgInfo.signatures
+        } ?: return emptySet()
+
+        val md = MessageDigest.getInstance("SHA-256")
+        return sigs.mapTo(HashSet()) { sig ->
+            md.reset()
+            md.digest(sig.toByteArray()).joinToString("") { "%02x".format(it) }
         }
     }
 

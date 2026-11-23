@@ -76,6 +76,7 @@ fun DraggableAlbumGrid(
     onDropToGroup: (dragged: AlbumGridItem, target: AlbumGridItem) -> Unit,
     headerContent: (@Composable () -> Unit)? = null,
     forceSelectionMode: Boolean = false,
+    dragReorderEnabled: Boolean = true,
     showCloudBadges: Boolean = true,
     modifier: Modifier = Modifier,
     gridState: LazyGridState = rememberLazyGridState()
@@ -127,6 +128,9 @@ fun DraggableAlbumGrid(
     }
 
     val headerOffset = if (headerContent != null) 1 else 0
+    val latestItems by rememberUpdatedState(items)
+    val latestIsSelectionMode by rememberUpdatedState(isSelectionMode)
+    val latestDragReorderEnabled by rememberUpdatedState(dragReorderEnabled)
     val latestHeaderOffset by rememberUpdatedState(headerOffset)
     val latestOnToggleSelect by rememberUpdatedState(onToggleSelect)
     val latestOnReorder by rememberUpdatedState(onReorderCommitted)
@@ -160,6 +164,14 @@ fun DraggableAlbumGrid(
                             val listIdx = hitInfo?.index?.minus(latestHeaderOffset)
                             val item = listIdx?.let { workingItems.getOrNull(it) }
                             if (hitInfo != null && item != null) {
+                                // Never drag-reorder while in selection mode or viewing a filtered subset
+                                if (latestIsSelectionMode || !latestDragReorderEnabled) {
+                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    latestOnToggleSelect(item)
+                                    startedItem = null
+                                    draggingItem = null
+                                    return@detectDragGesturesAfterLongPress
+                                }
                                 startedItem = item
                                 draggingItem = item
                                 floatingCoverWidthPx = hitInfo.size.width
@@ -181,7 +193,7 @@ fun DraggableAlbumGrid(
                             mergeTargetId = null
                             pendingReorderTargetIdx = null
                             autoScrollDelta = 0f
-                            workingItems = items
+                            workingItems = latestItems
                         },
                         onDragEnd = {
                             val active = draggingItem

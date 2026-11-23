@@ -3,6 +3,7 @@ package com.luminagallery.drive.ui.components
 import android.annotation.SuppressLint
 import android.graphics.PointF
 import android.os.Looper
+import android.os.SystemClock
 import android.view.MotionEvent
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
@@ -26,6 +27,7 @@ import androidx.compose.material.icons.rounded.LightMode
 import androidx.compose.material.icons.rounded.MyLocation
 import androidx.compose.material.icons.rounded.OpenInFull
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -35,6 +37,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableDoubleStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -46,6 +49,7 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -130,9 +134,12 @@ fun SamsungPhotoMap(
         true
     }
 
-    var isDarkStyle by remember { mutableStateOf(true) }
+    val defaultDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    var isDarkStyle by remember { mutableStateOf(defaultDark) }
     var mapLibreRef by remember { mutableStateOf<MapLibreMap?>(null) }
+    var mapLoadFailed by remember { mutableStateOf(false) }
     var cameraTick by remember { mutableIntStateOf(0) }
+    var lastSyncUptimeMs by remember { mutableLongStateOf(0L) }
     var currentZoom by remember { mutableDoubleStateOf(7.0) }
     var hasFittedInitial by remember(initialFocusItems) { mutableStateOf(false) }
 
@@ -181,6 +188,8 @@ fun SamsungPhotoMap(
      * whenever the camera moved, zoomed, rotated, or tilted.
      */
     fun syncCameraFromMap(map: MapLibreMap, force: Boolean = false) {
+        val now = SystemClock.uptimeMillis()
+        if (!force && now - lastSyncUptimeMs < 16L) return
         val applySync = {
             val w = mapView.width
             val h = mapView.height
@@ -213,6 +222,7 @@ fun SamsungPhotoMap(
                     abs(cam.tilt - lastProjTilt) > 1e-2
 
                 if (changed) {
+                    lastSyncUptimeMs = SystemClock.uptimeMillis()
                     lastProjCenterLat = cLat
                     lastProjCenterLon = cLon
                     lastProjZoom = liveZoom
@@ -235,14 +245,14 @@ fun SamsungPhotoMap(
             mapLibreRef?.let { syncCameraFromMap(it) }
         }
         val cameraDidChangeListener = MapView.OnCameraDidChangeListener { _ ->
-            mapLibreRef?.let { syncCameraFromMap(it) }
+            mapLibreRef?.let { syncCameraFromMap(it, force = true) }
         }
-        val renderFrameListener = MapView.OnDidFinishRenderingFrameListener { _, _, _ ->
-            mapLibreRef?.let { syncCameraFromMap(it) }
+        val failLoadListener = MapView.OnDidFailLoadingMapListener {
+            mapLoadFailed = true
         }
         mapView.addOnCameraIsChangingListener(cameraChangingListener)
         mapView.addOnCameraDidChangeListener(cameraDidChangeListener)
-        mapView.addOnDidFinishRenderingFrameListener(renderFrameListener)
+        mapView.addOnDidFailLoadingMapListener(failLoadListener)
 
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
@@ -263,7 +273,7 @@ fun SamsungPhotoMap(
         onDispose {
             mapView.removeOnCameraIsChangingListener(cameraChangingListener)
             mapView.removeOnCameraDidChangeListener(cameraDidChangeListener)
-            mapView.removeOnDidFinishRenderingFrameListener(renderFrameListener)
+            mapView.removeOnDidFailLoadingMapListener(failLoadListener)
             lifecycleOwner.lifecycle.removeObserver(observer)
             mapView.onPause()
             mapView.onStop()
@@ -271,7 +281,7 @@ fun SamsungPhotoMap(
         }
     }
 
-    // Bind MapLibreMap once ready
+    // Bind MapLibreMap once ready — expose ref immediately so photo pins render even offline!
     LaunchedEffect(mapView) {
         mapView.getMapAsync { map ->
             map.uiSettings.apply {
@@ -287,15 +297,17 @@ fun SamsungPhotoMap(
                 isFlingVelocityAnimationEnabled = true
                 isScaleVelocityAnimationEnabled = true
             }
+            mapLibreRef = map
+            syncCameraFromMap(map, force = true)
             map.setStyle(Style.Builder().fromUri(if (isDarkStyle) STYLE_OPENFREEMAP_DARK else STYLE_OPENFREEMAP_LIBERTY)) {
-                mapLibreRef = map
+                mapLoadFailed = false
                 syncCameraFromMap(map, force = true)
             }
             map.addOnCameraMoveListener {
                 syncCameraFromMap(map)
             }
             map.addOnCameraIdleListener {
-                syncCameraFromMap(map)
+                syncCameraFromMap(map, force = true)
             }
             map.addOnMapClickListener {
                 latestOnSelectCluster(null)
@@ -451,18 +463,18 @@ fun SamsungPhotoMap(
             )
         }
 
-        // Subtle OpenFreeMap attribution badge
+        // Subtle OpenFreeMap attribution / offline status badge
         Text(
-            text = "© OpenFreeMap · OSM",
+            text = if (mapLoadFailed) "Offline map · showing photo pins" else "© OpenFreeMap · OSM",
             fontSize = 9.sp,
-            color = if (isDarkStyle) Color.White.copy(alpha = 0.65f) else Color(0xFF303036).copy(alpha = 0.72f),
+            color = if (isDarkStyle) Color.White.copy(alpha = 0.72f) else Color(0xFF303036).copy(alpha = 0.80f),
             modifier = Modifier
                 .align(Alignment.TopStart)
                 .padding(start = 10.dp, top = 10.dp)
                 .clip(RoundedCornerShape(6.dp))
                 .background(
-                    if (isDarkStyle) Color.Black.copy(alpha = 0.52f)
-                    else Color.White.copy(alpha = 0.76f)
+                    if (isDarkStyle) Color.Black.copy(alpha = 0.56f)
+                    else Color.White.copy(alpha = 0.80f)
                 )
                 .padding(horizontal = 6.dp, vertical = 2.dp)
         )

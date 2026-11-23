@@ -4,8 +4,6 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
-import androidx.compose.animation.ExperimentalSharedTransitionApi
-import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -18,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -29,8 +28,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.NavBackStackEntry
 import androidx.navigation.NavDestination
 import androidx.navigation.NavDestination.Companion.hasRoute
 import androidx.navigation.compose.NavHost
@@ -40,6 +43,8 @@ import androidx.navigation.toRoute
 import com.luminagallery.drive.LocalAppContainer
 import com.luminagallery.drive.LocalGalleryImageLoader
 import com.luminagallery.drive.data.local.LocalMediaRepository
+import com.luminagallery.drive.domain.model.AlbumMediaFilter
+import com.luminagallery.drive.domain.model.AlbumMediaSort
 import com.luminagallery.drive.domain.model.MediaType
 import com.luminagallery.drive.domain.model.SpecialGalleryFilter
 import com.luminagallery.drive.ui.components.AlbumTransitionOriginTracker
@@ -48,6 +53,7 @@ import com.luminagallery.drive.ui.components.HyperOsRectMorphFrame
 import com.luminagallery.drive.ui.components.HyperOsTransitionFrame
 import com.luminagallery.drive.ui.components.LocalAlbumTransitionOrigin
 import com.luminagallery.drive.ui.components.OneUiMotion
+import com.luminagallery.drive.ui.components.findActivity
 import com.luminagallery.drive.ui.components.prefetchAlbumThumbnails
 import com.luminagallery.drive.ui.screens.cleanout.CleanOutScreen
 import com.luminagallery.drive.ui.screens.cleanout.CleanOutViewModel
@@ -107,7 +113,11 @@ data class ViewerRoute(
     val mediaTypeName: String? = null,
     val fromEpochMs: Long? = null,
     val toEpochMs: Long? = null,
-    val specialFilterName: String? = null
+    val onlyWithText: Boolean = false,
+    val specialFilterName: String? = null,
+    val albumFilterName: String? = null,
+    val albumSortName: String? = null,
+    val locationKey: String? = null
 )
 
 @Serializable
@@ -121,7 +131,8 @@ data class EditorRoute(
     val itemId: String,
     val sourceUri: String,
     val displayName: String,
-    val isLocal: Boolean
+    val isLocal: Boolean,
+    val isLocked: Boolean = false
 )
 
 @Serializable
@@ -148,31 +159,50 @@ private fun NavDestination.isMorphRoute(): Boolean =
     hasRoute<ViewerRoute>() || hasRoute<FolderRoute>() || hasRoute<CollectionRoute>()
 
 /**
- * Xiaomi HyperOS / Samsung One UI Gallery back behaviour: the close animation must start when the
- * back gesture is RELEASED, not scrub along while the finger is still dragging from the edge.
- *
- * Navigation Compose would otherwise seek every transition with the predictive-back progress.
- * This plain (non-predictive) handler is registered inside each destination, so it sits above
- * NavHost's predictive handler but below any screen-level handlers (selection mode, map sheets…)
- * that compose after it. On release it pops, and the full, smooth close animation plays.
+ * Keeps rect-morph routes (`FolderRoute`, `CollectionRoute`, `ViewerRoute`) closing cleanly
+ * on gesture release so `HyperOsRectMorphFrame` animates smoothly back into the source tile,
+ * while standard slide routes use Android's native predictive-back transitions.
  */
 @Composable
 private fun PopOnReleaseBackHandler(onBack: () -> Unit) {
     BackHandler(onBack = onBack)
 }
 
-@OptIn(ExperimentalSharedTransitionApi::class)
+private fun NavBackStackEntry.isLockedDestination(lockedIds: Set<String>): Boolean {
+    if (destination.hasRoute<EditorRoute>()) {
+        val route = runCatching { toRoute<EditorRoute>() }.getOrNull()
+        if (route?.isLocked == true || route?.sourceUri?.startsWith("file://") == true) {
+            return true
+        }
+    }
+    if (lockedIds.isEmpty()) return false
+    if (destination.hasRoute<FolderRoute>()) {
+        val route = runCatching { toRoute<FolderRoute>() }.getOrNull()
+        if (route != null && route.folderId in lockedIds) return true
+    }
+    if (destination.hasRoute<ViewerRoute>()) {
+        val route = runCatching { toRoute<ViewerRoute>() }.getOrNull()
+        if (route != null && route.folderId in lockedIds) return true
+    }
+    return false
+}
+
 @Composable
 fun LuminaNavGraph(
     externalViewUri: String? = null,
     externalViewMime: String? = null,
-    onConsumedExternalView: () -> Unit = {}
+    onConsumedExternalView: () -> Unit = {},
+    shortcutTarget: String? = null,
+    onConsumedShortcut: () -> Unit = {},
+    widgetOpenItemId: String? = null,
+    onConsumedWidgetItem: () -> Unit = {}
 ) {
     val navController = rememberNavController()
     val container = LocalAppContainer.current
     val imageLoader = LocalGalleryImageLoader.current
     val activityContext = LocalContext.current
     val appContext = activityContext.applicationContext
+    val lifecycleOwner = LocalLifecycleOwner.current
     val lockedAlbumIds by container.galleryExtrasRepository.lockedAlbumIdsFlow
         .collectAsStateWithLifecycle(initialValue = container.galleryExtrasRepository.latestLockedAlbumIds)
     val originTracker = remember { AlbumTransitionOriginTracker() }
@@ -211,6 +241,59 @@ fun LuminaNavGraph(
         }
     }
 
+    // Auto-relock private albums whenever the app goes to background (home / recents / screen lock),
+    // while ignoring transient configuration changes like device rotation.
+    DisposableEffect(lifecycleOwner, navController, activityContext) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) {
+                val activity = activityContext.findActivity()
+                if (activity?.isChangingConfigurations == true) return@LifecycleEventObserver
+                val currentLocked = container.galleryExtrasRepository.latestLockedAlbumIds
+                val entriesToCheck = buildList {
+                    navController.currentBackStackEntry?.let(::add)
+                    navController.previousBackStackEntry?.let(::add)
+                    addAll(navController.visibleEntries.value)
+                }
+                if (entriesToCheck.any { it.isLockedDestination(currentLocked) }) {
+                    pendingBackPops = 0
+                    navController.popBackStack(route = HomeRoute, inclusive = false)
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    // Handle static launcher shortcuts (Search, Favorites, Trash, Clean Out)
+    LaunchedEffect(shortcutTarget) {
+        val target = shortcutTarget ?: return@LaunchedEffect
+        pendingBackPops = 0
+        when (target) {
+            "search" -> navController.navigate(SearchRoute) { launchSingleTop = true }
+            "favorites" -> navController.navigate(SpecialCollectionRoute(SpecialGalleryFilter.FAVORITES.name))
+            "trash" -> navController.navigate(SpecialCollectionRoute(SpecialGalleryFilter.TRASH.name))
+            "cleanout" -> navController.navigate(CleanOutRoute) { launchSingleTop = true }
+        }
+        onConsumedShortcut()
+    }
+
+    // Handle Home Screen Photo Widget tap deep-link
+    LaunchedEffect(widgetOpenItemId) {
+        val itemId = widgetOpenItemId ?: return@LaunchedEffect
+        pendingBackPops = 0
+        activeViewerItemId = itemId
+        navController.navigate(
+            ViewerRoute(
+                folderId = LocalMediaRepository.LOCAL_BUCKET_ALL,
+                initialItemId = itemId
+            )
+        )
+        onConsumedWidgetItem()
+    }
+
+    fun isAlbumLocked(folderId: String): Boolean =
+        folderId in lockedAlbumIds || folderId in container.galleryExtrasRepository.latestLockedAlbumIds
+
     fun prewarmFolderAndNavigate(folderId: String, folderName: String) {
         val navigateNow: () -> Unit = {
             pendingBackPops = 0
@@ -232,9 +315,7 @@ fun LuminaNavGraph(
             navController.navigate(FolderRoute(folderId, folderName))
         }
 
-        val isLocked = folderId in lockedAlbumIds ||
-            folderId in container.galleryExtrasRepository.latestLockedAlbumIds
-        if (isLocked) {
+        if (isAlbumLocked(folderId)) {
             BiometricLockHelper.authenticate(
                 context = activityContext,
                 title = "Unlock \"$folderName\"",
@@ -255,7 +336,6 @@ fun LuminaNavGraph(
                 .fillMaxSize()
                 .background(MaterialTheme.colorScheme.background)
         ) {
-        SharedTransitionLayout {
             NavHost(
                 navController = navController,
                 startDestination = HomeRoute,
@@ -290,7 +370,6 @@ fun LuminaNavGraph(
                     }
                 },
                 popExitTransition = {
-                    // Plays only AFTER the back gesture is released (see PopOnReleaseBackHandler)
                     slideOutHorizontally(pageSlideSpec()) { it }
                 }
             ) {
@@ -309,8 +388,6 @@ fun LuminaNavGraph(
                             onConsumedLastViewedItemId = {
                                 backStackEntry.savedStateHandle[KEY_LAST_VIEWED_ITEM_ID] = null
                             },
-                            sharedTransitionScope = this@SharedTransitionLayout,
-                            animatedVisibilityScope = this@composable,
                             onOpenFolder = { folderId, folderName ->
                                 prewarmFolderAndNavigate(folderId, folderName)
                             },
@@ -353,12 +430,9 @@ fun LuminaNavGraph(
                     val filter = runCatching { SpecialGalleryFilter.valueOf(route.filterName) }
                         .getOrDefault(SpecialGalleryFilter.VIDEOS)
 
-                    PopOnReleaseBackHandler(::safePopBackStack)
                     HyperOsTransitionFrame {
                         SpecialCollectionScreen(
                             filter = filter,
-                            sharedTransitionScope = this@SharedTransitionLayout,
-                            animatedVisibilityScope = this@composable,
                             onNavigateBack = { safePopBackStack() },
                             onOpenViewer = { activeFilter, itemId ->
                                 activeViewerItemId = itemId
@@ -375,18 +449,16 @@ fun LuminaNavGraph(
                 }
 
                 composable<LocationsRoute> {
-                    PopOnReleaseBackHandler(::safePopBackStack)
                     HyperOsTransitionFrame {
                         LocationsScreen(
-                            sharedTransitionScope = this@SharedTransitionLayout,
-                            animatedVisibilityScope = this@composable,
                             onNavigateBack = { safePopBackStack() },
-                            onOpenPhoto = { item ->
+                            onOpenPhoto = { item, locKey ->
                                 activeViewerItemId = item.id
                                 navController.navigate(
                                     ViewerRoute(
                                         folderId = LocalMediaRepository.LOCAL_BUCKET_ALL,
-                                        initialItemId = item.id
+                                        initialItemId = item.id,
+                                        locationKey = locKey
                                     )
                                 )
                             }
@@ -398,11 +470,22 @@ fun LuminaNavGraph(
                     val cleanOutViewModel: CleanOutViewModel = viewModel(
                         factory = CleanOutViewModel.Factory(container)
                     )
-                    PopOnReleaseBackHandler(::safePopBackStack)
                     HyperOsTransitionFrame {
                         CleanOutScreen(
                             viewModel = cleanOutViewModel,
-                            onNavigateBack = { safePopBackStack() }
+                            onNavigateBack = { safePopBackStack() },
+                            onOpenPreview = { item ->
+                                activeViewerItemId = item.id
+                                navController.navigate(
+                                    ViewerRoute(
+                                        folderId = LocalMediaRepository.LOCAL_BUCKET_ALL,
+                                        initialItemId = item.id
+                                    )
+                                )
+                            },
+                            onOpenCompare = { ids ->
+                                navController.navigate(CompareRoute(ids.joinToString(",")))
+                            }
                         )
                     }
                 }
@@ -514,8 +597,6 @@ fun LuminaNavGraph(
                             onConsumedLastViewedItemId = {
                                 backStackEntry.savedStateHandle[KEY_LAST_VIEWED_ITEM_ID] = null
                             },
-                            sharedTransitionScope = this@SharedTransitionLayout,
-                            animatedVisibilityScope = this@composable,
                             onNavigateBack = { safePopBackStack() },
                             onNavigateHome = {
                                 navController.popBackStack(route = HomeRoute, inclusive = false)
@@ -524,21 +605,38 @@ fun LuminaNavGraph(
                                 prewarmFolderAndNavigate(subId, subName)
                             },
                             onOpenBreadcrumb = { ancestorId, ancestorName ->
-                                val popped = navController.popBackStack(
-                                    route = FolderRoute(ancestorId, ancestorName),
-                                    inclusive = false
-                                )
-                                if (!popped) {
-                                    navController.navigate(FolderRoute(ancestorId, ancestorName))
+                                val openAncestor = {
+                                    val popped = navController.popBackStack(
+                                        route = FolderRoute(ancestorId, ancestorName),
+                                        inclusive = false
+                                    )
+                                    if (!popped) {
+                                        navController.navigate(FolderRoute(ancestorId, ancestorName))
+                                    }
+                                }
+                                if (isAlbumLocked(ancestorId)) {
+                                    BiometricLockHelper.authenticate(
+                                        context = activityContext,
+                                        title = "Unlock \"$ancestorName\"",
+                                        subtitle = "Verify your identity to open locked album",
+                                        onSuccess = openAncestor,
+                                        onFailure = { msg ->
+                                            Toast.makeText(activityContext, msg, Toast.LENGTH_SHORT).show()
+                                        }
+                                    )
+                                } else {
+                                    openAncestor()
                                 }
                             },
-                            onOpenViewer = { folderId, itemId, isFlattened ->
+                            onOpenViewer = { folderId, itemId, isFlattened, filter, sort ->
                                 activeViewerItemId = itemId
                                 navController.navigate(
                                     ViewerRoute(
                                         folderId = folderId,
                                         initialItemId = itemId,
-                                        isFlattened = isFlattened
+                                        isFlattened = isFlattened,
+                                        albumFilterName = filter.name,
+                                        albumSortName = sort.name
                                     )
                                 )
                             },
@@ -556,14 +654,11 @@ fun LuminaNavGraph(
                     val searchViewModel: SearchViewModel = viewModel(
                         factory = SearchViewModel.Factory(container)
                     )
-                    PopOnReleaseBackHandler(::safePopBackStack)
                     HyperOsTransitionFrame {
                         SearchScreen(
                             viewModel = searchViewModel,
-                            sharedTransitionScope = this@SharedTransitionLayout,
-                            animatedVisibilityScope = this@composable,
                             onNavigateBack = { safePopBackStack() },
-                            onOpenViewer = { itemId, query, mediaType, fromMs, toMs ->
+                            onOpenViewer = { itemId, query, mediaType, fromMs, toMs, onlyWithText ->
                                 activeViewerItemId = itemId
                                 navController.navigate(
                                     ViewerRoute(
@@ -573,7 +668,8 @@ fun LuminaNavGraph(
                                         searchQuery = query,
                                         mediaTypeName = mediaType?.name,
                                         fromEpochMs = fromMs,
-                                        toEpochMs = toMs
+                                        toEpochMs = toMs,
+                                        onlyWithText = onlyWithText
                                     )
                                 )
                             },
@@ -614,11 +710,17 @@ fun LuminaNavGraph(
                     val specialFilter = route.specialFilterName?.let {
                         runCatching { SpecialGalleryFilter.valueOf(it) }.getOrNull()
                     }
+                    val albumFilter = route.albumFilterName?.let {
+                        runCatching { AlbumMediaFilter.valueOf(it) }.getOrNull()
+                    } ?: AlbumMediaFilter.ALL
+                    val albumSort = route.albumSortName?.let {
+                        runCatching { AlbumMediaSort.valueOf(it) }.getOrNull()
+                    } ?: AlbumMediaSort.DATE_DESC
                     val initialTappedItem = remember(route.initialItemId) {
                         originTracker.lastTappedMediaItem?.takeIf { it.id == route.initialItemId }
                     }
                     val viewerViewModel: ViewerViewModel = viewModel(
-                        key = "viewer_${route.folderId}_${route.initialItemId}_${route.isFlattened}_${route.isSearchMode}_${route.specialFilterName}",
+                        key = "viewer_${route.folderId}_${route.initialItemId}_${route.isFlattened}_${route.isSearchMode}_${route.onlyWithText}_${route.specialFilterName}_${route.albumFilterName}_${route.albumSortName}_${route.locationKey}",
                         factory = ViewerViewModel.Factory(
                             launchContext = ViewerLaunchContext(
                                 folderId = route.folderId,
@@ -629,7 +731,11 @@ fun LuminaNavGraph(
                                 mediaTypeFilter = mediaType,
                                 fromEpochMs = route.fromEpochMs,
                                 toEpochMs = route.toEpochMs,
-                                specialFilter = specialFilter
+                                onlyWithText = route.onlyWithText,
+                                specialFilter = specialFilter,
+                                albumFilter = albumFilter,
+                                albumSort = albumSort,
+                                locationKey = route.locationKey
                             ),
                             container = container,
                             initialTappedItem = initialTappedItem
@@ -653,7 +759,6 @@ fun LuminaNavGraph(
                     ) { isRectMorphing ->
                         ViewerScreen(
                             viewModel = viewerViewModel,
-                            sharedTransitionScope = this@SharedTransitionLayout,
                             animatedVisibilityScope = this@composable,
                             initialItemId = route.initialItemId,
                             isRectMorphing = isRectMorphing,
@@ -669,7 +774,8 @@ fun LuminaNavGraph(
                                         itemId = itemId,
                                         sourceUri = sourceUri,
                                         displayName = displayName,
-                                        isLocal = isLocal
+                                        isLocal = isLocal,
+                                        isLocked = isAlbumLocked(route.folderId) || sourceUri.startsWith("file://")
                                     )
                                 )
                             },
@@ -680,15 +786,18 @@ fun LuminaNavGraph(
 
                 composable<EditorRoute> { backStackEntry ->
                     val route = backStackEntry.toRoute<EditorRoute>()
-                    PopOnReleaseBackHandler(::safePopBackStack)
                     HyperOsTransitionFrame {
                         PhotoEditorScreen(
                             itemId = route.itemId,
                             sourceUri = route.sourceUri,
                             displayName = route.displayName,
                             isLocal = route.isLocal,
-                            onSavedAndClose = { safePopBackStack() },
-                            onDismiss = { safePopBackStack() }
+                            onSavedAndClose = { msg ->
+                                Toast.makeText(activityContext, msg, Toast.LENGTH_SHORT).show()
+                                safePopBackStack()
+                            },
+                            onDismiss = { safePopBackStack() },
+                            isLocked = route.isLocked
                         )
                     }
                 }
@@ -698,7 +807,6 @@ fun LuminaNavGraph(
                     val ids = remember(route.itemIdsCsv) {
                         route.itemIdsCsv.split(",").filter { it.isNotBlank() }
                     }
-                    PopOnReleaseBackHandler(::safePopBackStack)
                     HyperOsTransitionFrame {
                         CompareScreen(
                             itemIds = ids,
@@ -714,7 +822,6 @@ fun LuminaNavGraph(
                             container = container
                         )
                     )
-                    PopOnReleaseBackHandler(::safePopBackStack)
                     HyperOsTransitionFrame {
                         SettingsScreen(
                             viewModel = settingsViewModel,
@@ -723,26 +830,25 @@ fun LuminaNavGraph(
                     }
                 }
             }
-    }
 
-        if (!externalViewUri.isNullOrBlank()) {
-            ExternalMediaViewerOverlay(
-                uriString = externalViewUri,
-                mimeType = externalViewMime ?: "image/*",
-                onOpenEditor = { uri, name ->
-                    onConsumedExternalView()
-                    navController.navigate(
-                        EditorRoute(
-                            itemId = "ext_${uri.hashCode()}",
-                            sourceUri = uri,
-                            displayName = name,
-                            isLocal = true
+            if (!externalViewUri.isNullOrBlank()) {
+                ExternalMediaViewerOverlay(
+                    uriString = externalViewUri,
+                    mimeType = externalViewMime ?: "image/*",
+                    onOpenEditor = { uri, name ->
+                        onConsumedExternalView()
+                        navController.navigate(
+                            EditorRoute(
+                                itemId = "ext_${uri.hashCode()}",
+                                sourceUri = uri,
+                                displayName = name,
+                                isLocal = true
+                            )
                         )
-                    )
-                },
-                onDismiss = onConsumedExternalView
-            )
-        }
+                    },
+                    onDismiss = onConsumedExternalView
+                )
+            }
         }
     }
 }

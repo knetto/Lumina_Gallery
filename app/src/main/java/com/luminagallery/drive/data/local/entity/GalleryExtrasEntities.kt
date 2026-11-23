@@ -1,6 +1,7 @@
 package com.luminagallery.drive.data.local.entity
 
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.PrimaryKey
 
 @Entity(tableName = "favorite_items")
@@ -43,7 +44,10 @@ data class IgnoredCleanOutEntity(
     val ignoredAtEpochMs: Long
 )
 
-@Entity(tableName = "photo_location_cache")
+@Entity(
+    tableName = "photo_location_cache",
+    indices = [Index(value = ["hasLocation"])]
+)
 data class PhotoLocationEntity(
     @PrimaryKey
     val itemId: String,
@@ -76,7 +80,10 @@ data class MediaAnnotationEntity(
     val updatedAtEpochMs: Long
 )
 
-@Entity(tableName = "offline_pinned_items")
+@Entity(
+    tableName = "offline_pinned_items",
+    indices = [Index(value = ["folderId"])]
+)
 data class OfflinePinnedEntity(
     @PrimaryKey
     val itemId: String,
@@ -86,7 +93,10 @@ data class OfflinePinnedEntity(
     val pinnedAtEpochMs: Long
 )
 
-@Entity(tableName = "photo_ocr_cache")
+@Entity(
+    tableName = "photo_ocr_cache",
+    indices = [Index(value = ["hasText"])]
+)
 data class PhotoOcrEntity(
     @PrimaryKey
     val itemId: String,

@@ -7,9 +7,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.AnimatedVisibilityScope
-import androidx.compose.animation.ExperimentalSharedTransitionApi
-import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -46,10 +43,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.outlined.Map
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DeleteForever
 import androidx.compose.material.icons.rounded.GridView
 import androidx.compose.material.icons.rounded.LocationOn
 import androidx.compose.material.icons.rounded.RestoreFromTrash
+import androidx.compose.material.icons.rounded.SelectAll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -60,10 +59,10 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -119,12 +118,10 @@ import kotlinx.coroutines.launch
  *  - Recent (most recently added items)
  *  - Trash (Recycle Bin with Restore & Empty Trash)
  */
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalSharedTransitionApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SpecialCollectionScreen(
     filter: SpecialGalleryFilter,
-    sharedTransitionScope: SharedTransitionScope,
-    animatedVisibilityScope: AnimatedVisibilityScope,
     onNavigateBack: () -> Unit,
     onOpenViewer: (filter: SpecialGalleryFilter, itemId: String) -> Unit
 ) {
@@ -134,6 +131,9 @@ fun SpecialCollectionScreen(
     val gridState = rememberLazyGridState()
     val snackbarHostState = remember { SnackbarHostState() }
     val networkState by container.networkMonitor.networkState.collectAsStateWithLifecycle()
+    val prefs by container.preferencesManager.preferencesFlow
+        .collectAsStateWithLifecycle(initialValue = container.preferencesManager.latestPreferences)
+    val highResAllowed = networkState.isUnmeteredWifi || !prefs.wifiOnlyHighRes
     val favoriteIds by container.galleryExtrasRepository.favoriteItemIdsFlow
         .collectAsStateWithLifecycle(initialValue = emptySet())
 
@@ -142,10 +142,11 @@ fun SpecialCollectionScreen(
             SpecialGalleryFilter.VIDEOS -> combine(
                 container.localMediaRepository.observeAllLocalMedia(),
                 container.galleryRepository.searchMedia("", MediaType.VIDEO, null, null),
-                container.galleryExtrasRepository.lockedAlbumIdsFlow
-            ) { local, drive, lockedIds ->
+                container.galleryExtrasRepository.excludedAlbumIdsFlow
+            ) { local, drive, excludedIds ->
+                val blockedIds = container.galleryRepository.expandBlockedFolderIds(excludedIds)
                 (local.filter { it.isVideo } + drive)
-                    .filterNot { it.parentId in lockedIds }
+                    .filterNot { it.parentId in blockedIds }
                     .sortedByDescending { it.createdTimeEpochMs }
             }
 
@@ -153,20 +154,22 @@ fun SpecialCollectionScreen(
                 container.localMediaRepository.observeAllLocalMedia(),
                 container.galleryRepository.searchMedia("", null, null, null),
                 container.galleryExtrasRepository.favoriteItemIdsFlow,
-                container.galleryExtrasRepository.lockedAlbumIdsFlow
-            ) { local, drive, favIds, lockedIds ->
+                container.galleryExtrasRepository.excludedAlbumIdsFlow
+            ) { local, drive, favIds, excludedIds ->
+                val blockedIds = container.galleryRepository.expandBlockedFolderIds(excludedIds)
                 (local + drive)
-                    .filter { it.id in favIds && it.parentId !in lockedIds }
+                    .filter { it.id in favIds && it.parentId !in blockedIds }
                     .sortedByDescending { it.createdTimeEpochMs }
             }
 
             SpecialGalleryFilter.RECENT -> combine(
                 container.localMediaRepository.observeAllLocalMedia(),
                 container.galleryRepository.searchMedia("", null, null, null),
-                container.galleryExtrasRepository.lockedAlbumIdsFlow
-            ) { local, drive, lockedIds ->
+                container.galleryExtrasRepository.excludedAlbumIdsFlow
+            ) { local, drive, excludedIds ->
+                val blockedIds = container.galleryRepository.expandBlockedFolderIds(excludedIds)
                 (local + drive)
-                    .filterNot { it.parentId in lockedIds }
+                    .filterNot { it.parentId in blockedIds }
                     .sortedByDescending { it.createdTimeEpochMs }
                     .take(300)
             }
@@ -181,6 +184,10 @@ fun SpecialCollectionScreen(
     var pendingSender by remember { mutableStateOf<IntentSender?>(null) }
     var pendingMessage by remember { mutableStateOf<String?>(null) }
     var pendingTrashAction by remember { mutableStateOf<Pair<TrashConfirmMode, List<MediaItem>>?>(null) }
+
+    BackHandler(enabled = selectedTrashIds.isNotEmpty()) {
+        selectedTrashIds = emptySet()
+    }
 
     val intentSenderLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
@@ -222,8 +229,36 @@ fun SpecialCollectionScreen(
                     }
                 },
                 navigationIcon = {
-                    IconButton(onClick = onNavigateBack) {
-                        Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Back")
+                    IconButton(onClick = {
+                        if (selectedTrashIds.isNotEmpty()) {
+                            selectedTrashIds = emptySet()
+                        } else {
+                            onNavigateBack()
+                        }
+                    }) {
+                        Icon(
+                            imageVector = if (selectedTrashIds.isNotEmpty()) Icons.Rounded.Close else Icons.AutoMirrored.Rounded.ArrowBack,
+                            contentDescription = if (selectedTrashIds.isNotEmpty()) "Clear selection" else "Back"
+                        )
+                    }
+                },
+                actions = {
+                    if (filter == SpecialGalleryFilter.TRASH && mediaItems.isNotEmpty()) {
+                        val allSelected = selectedTrashIds.size == mediaItems.size
+                        IconButton(
+                            onClick = {
+                                selectedTrashIds = if (allSelected) {
+                                    emptySet()
+                                } else {
+                                    mediaItems.mapTo(LinkedHashSet()) { it.id }
+                                }
+                            }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.SelectAll,
+                                contentDescription = if (allSelected) "Clear selection" else "Select all"
+                            )
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -294,7 +329,7 @@ fun SpecialCollectionScreen(
 
                     Box(modifier = Modifier.weight(1f)) {
                         LazyVerticalGrid(
-                            columns = GridCells.Fixed(4),
+                            columns = GridCells.Fixed(prefs.gridColumns),
                             state = gridState,
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                             horizontalArrangement = Arrangement.spacedBy(1.5.dp),
@@ -306,17 +341,16 @@ fun SpecialCollectionScreen(
                                 key = { it.id }
                             ) { item ->
                                 val isTrashSelected = item.id in selectedTrashIds
+                                val trashSelectionActive = filter == SpecialGalleryFilter.TRASH && selectedTrashIds.isNotEmpty()
                                 MediaGridItem(
                                     item = item,
-                                    isUnmeteredWifi = networkState.isUnmeteredWifi,
-                                    isSelectionMode = filter == SpecialGalleryFilter.TRASH && selectedTrashIds.isNotEmpty(),
+                                    isUnmeteredWifi = highResAllowed,
+                                    isSelectionMode = trashSelectionActive,
                                     isSelected = isTrashSelected,
                                     isFavorite = item.id in favoriteIds,
-                                    sharedTransitionScope = sharedTransitionScope,
-                                    animatedVisibilityScope = animatedVisibilityScope,
-                                    showCloudBadge = true,
+                                    showCloudBadge = prefs.showCloudBadges,
                                     onClick = {
-                                        if (filter == SpecialGalleryFilter.TRASH) {
+                                        if (trashSelectionActive) {
                                             selectedTrashIds = if (isTrashSelected) {
                                                 selectedTrashIds - item.id
                                             } else {
@@ -328,7 +362,11 @@ fun SpecialCollectionScreen(
                                     },
                                     onLongClick = {
                                         if (filter == SpecialGalleryFilter.TRASH) {
-                                            selectedTrashIds = selectedTrashIds + item.id
+                                            selectedTrashIds = if (isTrashSelected) {
+                                                selectedTrashIds - item.id
+                                            } else {
+                                                selectedTrashIds + item.id
+                                            }
                                         }
                                     }
                                 )
@@ -379,7 +417,7 @@ fun SpecialCollectionScreen(
                         }
                     }
                 }
-                if (container.localMediaRepository.canManageMediaDirectly()) {
+                if (container.localMediaRepository.canDeleteDirectlyWithoutDialog()) {
                     scope.launch {
                         val result = when (mode) {
                             TrashConfirmMode.RESTORE_FROM_TRASH ->
@@ -422,21 +460,19 @@ private enum class LocationsOverviewSheetMode { PEEK, HALF, EXPANDED }
  *  - Interacting with the map smoothly collapses the folder list into a slim bottom bar so you
  *    can explore the whole map freely; dragging/tapping the bottom bar brings your folders right back!
  */
-@OptIn(
-    ExperimentalMaterial3Api::class,
-    ExperimentalSharedTransitionApi::class
-)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LocationsScreen(
-    sharedTransitionScope: SharedTransitionScope,
-    animatedVisibilityScope: AnimatedVisibilityScope,
     onNavigateBack: () -> Unit,
-    onOpenPhoto: (MediaItem) -> Unit
+    onOpenPhoto: (MediaItem, String?) -> Unit
 ) {
     val container = LocalAppContainer.current
     val context = LocalContext.current
     val imageLoader = LocalGalleryImageLoader.current
     val networkState by container.networkMonitor.networkState.collectAsStateWithLifecycle()
+    val prefs by container.preferencesManager.preferencesFlow
+        .collectAsStateWithLifecycle(initialValue = container.preferencesManager.latestPreferences)
+    val highResAllowed = networkState.isUnmeteredWifi || !prefs.wifiOnlyHighRes
     val favoriteIds by container.galleryExtrasRepository.favoriteItemIdsFlow
         .collectAsStateWithLifecycle(initialValue = emptySet())
 
@@ -455,16 +491,19 @@ fun LocationsScreen(
 
     val scanProgress by container.galleryExtrasRepository.locationProgressFlow
         .collectAsStateWithLifecycle()
-    val lockedAlbumIds by container.galleryExtrasRepository.lockedAlbumIdsFlow
-        .collectAsStateWithLifecycle(initialValue = container.galleryExtrasRepository.latestLockedAlbumIds)
+    val excludedAlbumIds by container.galleryExtrasRepository.excludedAlbumIdsFlow
+        .collectAsStateWithLifecycle(
+            initialValue = container.galleryExtrasRepository.latestLockedAlbumIds +
+                container.galleryExtrasRepository.latestHiddenAlbumIds
+        )
 
-    val visibleLocationGroups = remember(scanProgress.groups, lockedAlbumIds) {
-        if (lockedAlbumIds.isEmpty()) {
+    val visibleLocationGroups = remember(scanProgress.groups, excludedAlbumIds) {
+        if (excludedAlbumIds.isEmpty()) {
             scanProgress.groups
         } else {
             scanProgress.groups.mapNotNull { group ->
-                val allowedItems = group.items.filterNot { it.parentId in lockedAlbumIds }
-                val allowedGeo = group.geoItems.filterNot { it.item.parentId in lockedAlbumIds }
+                val allowedItems = group.items.filterNot { it.parentId in excludedAlbumIds }
+                val allowedGeo = group.geoItems.filterNot { it.item.parentId in excludedAlbumIds }
                 if (allowedItems.isEmpty()) {
                     null
                 } else {
@@ -539,7 +578,7 @@ fun LocationsScreen(
                         )
                         val sub = when {
                             selectedLocation != null -> FormatUtils.formatMediaBreakdown(selectedLocation.items)
-                            scanProgress.groups.isNotEmpty() -> "${scanProgress.groups.size} places"
+                            visibleLocationGroups.isNotEmpty() -> "${visibleLocationGroups.size} ${if (visibleLocationGroups.size == 1) "place" else "places"}"
                             else -> null
                         }
                         if (!sub.isNullOrBlank()) {
@@ -692,7 +731,7 @@ fun LocationsScreen(
 
                     activeCity != null && isGridOnly -> {
                         LazyVerticalGrid(
-                            columns = GridCells.Fixed(4),
+                            columns = GridCells.Fixed(prefs.gridColumns),
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                             horizontalArrangement = Arrangement.spacedBy(1.5.dp),
                             verticalArrangement = Arrangement.spacedBy(1.5.dp),
@@ -701,28 +740,25 @@ fun LocationsScreen(
                             items(activeCity.items, key = { it.id }) { item ->
                                 MediaGridItem(
                                     item = item,
-                                    isUnmeteredWifi = networkState.isUnmeteredWifi,
+                                    isUnmeteredWifi = highResAllowed,
                                     isSelectionMode = false,
                                     isSelected = false,
                                     isFavorite = item.id in favoriteIds,
-                                    sharedTransitionScope = sharedTransitionScope,
-                                    animatedVisibilityScope = animatedVisibilityScope,
-                                    onClick = { onOpenPhoto(item) }
+                                    onClick = { onOpenPhoto(item, activeCity.locationKey) }
                                 )
                             }
                         }
                     }
 
                     activeCity != null -> {
-                        // Full-screen City Samsung Interactive Vector Map + Draggable Dark Photo Drawer
+                        // Full-screen City Samsung Interactive Vector Map + Draggable Photo Drawer
                         SamsungLocationMapDetailView(
                             geoItems = activeCity.geoItems,
                             initialFocusItems = activeCity.geoItems,
-                            isUnmeteredWifi = networkState.isUnmeteredWifi,
+                            gridColumns = prefs.gridColumns,
+                            isUnmeteredWifi = highResAllowed,
                             favoriteIds = favoriteIds,
-                            sharedTransitionScope = sharedTransitionScope,
-                            animatedVisibilityScope = animatedVisibilityScope,
-                            onOpenPhoto = onOpenPhoto
+                            onOpenPhoto = { item -> onOpenPhoto(item, activeCity.locationKey) }
                         )
                     }
 
@@ -837,10 +873,10 @@ fun LocationsScreen(
                                 )
                             }
 
-                            // 2. Overlapping Samsung Dark Overflow Card with 3-State Drag Handle & Country Folders!
+                            // 2. Overlapping Samsung Overflow Card with 3-State Drag Handle & Country Folders!
                             Surface(
                                 shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
-                                color = Color(0xFF0A0A0D),
+                                color = MaterialTheme.colorScheme.surfaceContainer,
                                 shadowElevation = 16.dp,
                                 modifier = Modifier
                                     .align(Alignment.BottomCenter)
@@ -848,7 +884,7 @@ fun LocationsScreen(
                                     .height(cardHeight)
                                     .border(
                                         width = 0.8.dp,
-                                        color = Color.White.copy(alpha = 0.11f),
+                                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f),
                                         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
                                     )
                             ) {
@@ -911,7 +947,7 @@ fun LocationsScreen(
                                                 .width(38.dp)
                                                 .height(4.dp)
                                                 .clip(CircleShape)
-                                                .background(Color.White.copy(alpha = 0.34f))
+                                                .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.42f))
                                         )
                                         val activePin = overviewSelectedPin
                                         when {
@@ -920,15 +956,15 @@ fun LocationsScreen(
                                                 Text(
                                                     text = "${activePin.count} ${if (activePin.count == 1) "item" else "items"}",
                                                     style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Medium),
-                                                    color = Color.White
+                                                    color = MaterialTheme.colorScheme.onSurface
                                                 )
                                             }
                                             sheetMode == LocationsOverviewSheetMode.PEEK -> {
                                                 Spacer(Modifier.height(8.dp))
                                                 Text(
-                                                    text = "${scanProgress.groups.size} ${if (scanProgress.groups.size == 1) "place" else "places"}",
+                                                    text = "${visibleLocationGroups.size} ${if (visibleLocationGroups.size == 1) "place" else "places"}",
                                                     style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Medium),
-                                                    color = Color.White
+                                                    color = MaterialTheme.colorScheme.onSurface
                                                 )
                                             }
                                         }
@@ -939,7 +975,7 @@ fun LocationsScreen(
                                         if (activePin != null) {
                                             // Quick grid of photos at the tapped map pin
                                             LazyVerticalGrid(
-                                                columns = GridCells.Fixed(4),
+                                                columns = GridCells.Fixed(prefs.gridColumns),
                                                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                                                 horizontalArrangement = Arrangement.spacedBy(1.5.dp),
                                                 verticalArrangement = Arrangement.spacedBy(1.5.dp),
@@ -948,15 +984,18 @@ fun LocationsScreen(
                                                     .fillMaxWidth()
                                             ) {
                                                 items(activePin.items, key = { it.item.id }) { geo ->
+                                                    val locKey = remember(geo.item.id, visibleLocationGroups) {
+                                                        visibleLocationGroups.firstOrNull { grp ->
+                                                            grp.items.any { it.id == geo.item.id }
+                                                        }?.locationKey
+                                                    }
                                                     MediaGridItem(
                                                         item = geo.item,
-                                                        isUnmeteredWifi = networkState.isUnmeteredWifi,
+                                                        isUnmeteredWifi = highResAllowed,
                                                         isSelectionMode = false,
                                                         isSelected = false,
                                                         isFavorite = geo.item.id in favoriteIds,
-                                                        sharedTransitionScope = sharedTransitionScope,
-                                                        animatedVisibilityScope = animatedVisibilityScope,
-                                                        onClick = { onOpenPhoto(geo.item) }
+                                                        onClick = { onOpenPhoto(geo.item, locKey) }
                                                     )
                                                 }
                                             }
@@ -1060,15 +1099,13 @@ fun LocationsScreen(
     }
 }
 
-@OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 private fun SamsungLocationMapDetailView(
     geoItems: List<GeoTaggedMediaItem>,
     initialFocusItems: List<GeoTaggedMediaItem>,
+    gridColumns: Int,
     isUnmeteredWifi: Boolean,
     favoriteIds: Set<String>,
-    sharedTransitionScope: SharedTransitionScope,
-    animatedVisibilityScope: AnimatedVisibilityScope,
     onOpenPhoto: (MediaItem) -> Unit
 ) {
     var selectedCluster by remember(geoItems) { mutableStateOf<MapPhotoCluster?>(null) }
@@ -1110,52 +1147,84 @@ private fun SamsungLocationMapDetailView(
             )
         }
 
-        // Samsung Dark Draggable Bottom Sheet ("473 items")
+        // Theme-adaptive Draggable Bottom Sheet ("473 items")
         Surface(
             shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
-            color = Color(0xFF0A0A0C),
+            color = MaterialTheme.colorScheme.surfaceContainer,
+            shadowElevation = 12.dp,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
                 .height(sheetHeight)
+                .border(
+                    width = 0.8.dp,
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                    shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
+                )
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxSize()
                     .navigationBarsPadding()
             ) {
-                // Drag Handle + Count Header
+                // Drag Handle + Count Header + Clear-pin CTA
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     modifier = Modifier
                         .fillMaxWidth()
                         .pointerInput(Unit) {
-                            detectVerticalDragGestures { _, dragAmount ->
-                                if (dragAmount < -14f) sheetExpanded = true
-                                else if (dragAmount > 14f) sheetExpanded = false
-                            }
+                            var dragAccum = 0f
+                            detectVerticalDragGestures(
+                                onDragStart = { dragAccum = 0f },
+                                onVerticalDrag = { _, dragAmount -> dragAccum += dragAmount },
+                                onDragEnd = {
+                                    if (dragAccum < -28f) sheetExpanded = true
+                                    else if (dragAccum > 28f) sheetExpanded = false
+                                }
+                            )
                         }
                         .clickable { sheetExpanded = !sheetExpanded }
-                        .padding(top = 10.dp, bottom = 12.dp)
+                        .padding(top = 10.dp, bottom = 10.dp, start = 16.dp, end = 16.dp)
                 ) {
                     Box(
                         modifier = Modifier
                             .width(38.dp)
                             .height(4.dp)
                             .clip(CircleShape)
-                            .background(Color.White.copy(alpha = 0.32f))
+                            .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.42f))
                     )
-                    Spacer(Modifier.height(10.dp))
-                    Text(
-                        text = "${displayedItems.size} ${if (displayedItems.size == 1) "item" else "items"}",
-                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Medium),
-                        color = Color.White
-                    )
+                    Spacer(Modifier.height(8.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text(
+                            text = "${displayedItems.size} ${if (displayedItems.size == 1) "item" else "items"}",
+                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Medium),
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        if (selectedCluster != null) {
+                            Surface(
+                                shape = RoundedCornerShape(50),
+                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(50))
+                                    .clickable { selectedCluster = null }
+                            ) {
+                                Text(
+                                    text = "Show all ${geoItems.size}",
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                )
+                            }
+                        }
+                    }
                 }
 
                 if (sheetExpanded) {
                     LazyVerticalGrid(
-                        columns = GridCells.Fixed(4),
+                        columns = GridCells.Fixed(gridColumns),
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                         horizontalArrangement = Arrangement.spacedBy(1.5.dp),
                         verticalArrangement = Arrangement.spacedBy(1.5.dp),
@@ -1170,8 +1239,6 @@ private fun SamsungLocationMapDetailView(
                                 isSelectionMode = false,
                                 isSelected = false,
                                 isFavorite = item.id in favoriteIds,
-                                sharedTransitionScope = sharedTransitionScope,
-                                animatedVisibilityScope = animatedVisibilityScope,
                                 onClick = { onOpenPhoto(item) }
                             )
                         }

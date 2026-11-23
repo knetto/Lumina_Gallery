@@ -47,7 +47,7 @@ import com.luminagallery.drive.data.local.entity.SyncStateEntity
         AlbumViewPrefEntity::class,
         LockedAlbumEntity::class
     ],
-    version = 10,
+    version = 11,
     exportSchema = true
 )
 abstract class GalleryDatabase : RoomDatabase() {
@@ -262,6 +262,14 @@ abstract class GalleryDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_offline_pinned_items_folderId` ON `offline_pinned_items` (`folderId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_photo_location_cache_hasLocation` ON `photo_location_cache` (`hasLocation`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_photo_ocr_cache_hasText` ON `photo_ocr_cache` (`hasText`)")
+            }
+        }
+
         fun build(context: Context): GalleryDatabase =
             Room.databaseBuilder(
                 context.applicationContext,
@@ -277,10 +285,10 @@ abstract class GalleryDatabase : RoomDatabase() {
                     MIGRATION_6_7,
                     MIGRATION_7_8,
                     MIGRATION_8_9,
-                    MIGRATION_9_10
+                    MIGRATION_9_10,
+                    MIGRATION_10_11
                 )
                 .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
-                .fallbackToDestructiveMigration(dropAllTables = true)
                 .build()
     }
 }

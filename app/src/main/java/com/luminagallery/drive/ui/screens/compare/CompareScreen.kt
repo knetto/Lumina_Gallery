@@ -57,16 +57,21 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import coil3.request.CachePolicy
 import coil3.request.ImageRequest
 import coil3.request.crossfade
+import coil3.size.Precision
 import com.luminagallery.drive.LocalAppContainer
 import com.luminagallery.drive.LocalGalleryImageLoader
 import com.luminagallery.drive.data.remote.DriveConstants
@@ -74,7 +79,10 @@ import com.luminagallery.drive.domain.model.MediaItem
 import com.luminagallery.drive.ui.components.FormatUtils
 import com.luminagallery.drive.ui.components.HyperOsTrashConfirmSheet
 import com.luminagallery.drive.ui.components.LuminaSnackbarHost
+import com.luminagallery.drive.ui.components.SecureWindowEffect
 import com.luminagallery.drive.ui.components.TrashConfirmMode
+import com.luminagallery.drive.ui.components.findActivity
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -97,9 +105,30 @@ fun CompareScreen(
 
     val favoriteIds by container.galleryExtrasRepository.favoriteItemIdsFlow
         .collectAsStateWithLifecycle(initialValue = emptySet())
+    val lockedAlbumIds by container.galleryExtrasRepository.lockedAlbumIdsFlow
+        .collectAsStateWithLifecycle(initialValue = container.galleryExtrasRepository.latestLockedAlbumIds)
     val networkState by container.networkMonitor.networkState.collectAsStateWithLifecycle()
+    val view = LocalView.current
 
     var items by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+    val isComparingLocked = remember(items, lockedAlbumIds) {
+        lockedAlbumIds.isNotEmpty() && items.any { it.parentId in lockedAlbumIds }
+    }
+    SecureWindowEffect(enabled = isComparingLocked)
+
+    // Ensure status bar icons remain crisp white over the pure-black Compare canvas even in Light Mode
+    androidx.compose.runtime.DisposableEffect(view) {
+        val window = context.findActivity()?.window
+        val controller = window?.let { WindowCompat.getInsetsController(it, view) }
+        val prevLightStatus = controller?.isAppearanceLightStatusBars
+        val prevLightNav = controller?.isAppearanceLightNavigationBars
+        controller?.isAppearanceLightStatusBars = false
+        controller?.isAppearanceLightNavigationBars = false
+        onDispose {
+            if (prevLightStatus != null) controller.isAppearanceLightStatusBars = prevLightStatus
+            if (prevLightNav != null) controller.isAppearanceLightNavigationBars = prevLightNav
+        }
+    }
     var syncZoom by remember { mutableStateOf(true) }
     var horizontalTwoUp by remember { mutableStateOf(false) }
 
@@ -128,19 +157,30 @@ fun CompareScreen(
     }
 
     LaunchedEffect(itemIds) {
-        val allLocal = container.localMediaRepository.getCachedAlbumMedia(
+        val cachedLocal = container.localMediaRepository.getCachedAlbumMedia(
             com.luminagallery.drive.data.local.LocalMediaRepository.LOCAL_BUCKET_ALL
-        ).associateBy { it.id }
+        ).ifEmpty {
+            runCatching { container.localMediaRepository.observeAllLocalMedia().first() }.getOrDefault(emptyList())
+        }
+        val allLocal = HashMap<String, MediaItem>(cachedLocal.size)
+        cachedLocal.forEach { allLocal[it.id] = it }
+        // Also search hidden/locked albums if comparing items inside a locked album
+        container.localMediaRepository.getCachedLocalAlbums()
+            .filter { it.isLocked }
+            .forEach { album ->
+                container.localMediaRepository.getCachedAlbumMedia(album.id).forEach { allLocal[it.id] = it }
+            }
 
         val resolved = ArrayList<MediaItem>(itemIds.size)
         for (id in itemIds.take(4)) {
             val localMatch = allLocal[id]
-            if (localMatch != null) {
+            if (localMatch != null && !localMatch.isVideo) {
                 resolved.add(localMatch)
-            } else {
+            } else if (localMatch == null) {
                 val driveEntity = container.database.driveItemDao().getById(id)
                 if (driveEntity != null) {
-                    resolved.add(com.luminagallery.drive.data.repository.DriveMapper.entityToMediaItem(driveEntity))
+                    val mapped = com.luminagallery.drive.data.repository.DriveMapper.entityToMediaItem(driveEntity)
+                    if (!mapped.isVideo) resolved.add(mapped)
                 }
             }
         }
@@ -226,19 +266,30 @@ fun CompareScreen(
                 val scale = if (syncZoom) sharedScale else (individualScale[item.id] ?: 1f)
                 val offset = if (syncZoom) sharedOffset else (individualOffset[item.id] ?: Offset.Zero)
                 val isFav = item.id in favoriteIds
-                val offlinePath = container.offlineMediaManager.getOfflineFilePath(item.id)
+                val offlinePath = remember(item.id) { container.offlineMediaManager.getOfflineFilePath(item.id) }
+                var paneSize by remember(item.id) { mutableStateOf(IntSize.Zero) }
+
+                fun clampPaneOffset(raw: Offset, s: Float): Offset {
+                    val maxX = ((s - 1f) * paneSize.width / 2f).coerceAtLeast(0f)
+                    val maxY = ((s - 1f) * paneSize.height / 2f).coerceAtLeast(0f)
+                    return Offset(raw.x.coerceIn(-maxX, maxX), raw.y.coerceIn(-maxY, maxY))
+                }
 
                 val request = remember(item.id, offlinePath, networkState.isUnmeteredWifi) {
                     when {
-                        !offlinePath.isNullOrBlank() && File(offlinePath).exists() -> {
+                        !offlinePath.isNullOrBlank() -> {
                             ImageRequest.Builder(context)
                                 .data(File(offlinePath))
+                                .size(2048)
+                                .precision(Precision.INEXACT)
                                 .crossfade(false)
                                 .build()
                         }
                         item.isLocal && !item.localContentUri.isNullOrBlank() -> {
                             ImageRequest.Builder(context)
                                 .data(item.localContentUri)
+                                .size(2048)
+                                .precision(Precision.INEXACT)
                                 .placeholderMemoryCacheKey(DriveConstants.stableThumbMemoryKey(item.id))
                                 .crossfade(false)
                                 .build()
@@ -251,6 +302,8 @@ fun CompareScreen(
                             }
                             ImageRequest.Builder(context)
                                 .data(url)
+                                .size(2048)
+                                .precision(Precision.INEXACT)
                                 .placeholderMemoryCacheKey(DriveConstants.stableThumbMemoryKey(item.id))
                                 .diskCachePolicy(CachePolicy.DISABLED)
                                 .crossfade(false)
@@ -261,36 +314,71 @@ fun CompareScreen(
 
                 Box(
                     modifier = paneMod
+                        .onSizeChanged { paneSize = it }
                         .clip(RoundedCornerShape(10.dp))
                         .background(Color(0xFF0E0E11))
                         .border(0.7.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(10.dp))
                         .clipToBounds()
                         .pointerInput(item.id, syncZoom) {
                             detectTapGestures(
-                                onDoubleTap = {
-                                    val nextScale = if (scale > 1.2f) 1f else 3f
+                                onDoubleTap = { tapOffset ->
+                                    val curScale = if (syncZoom) sharedScale else (individualScale[item.id] ?: 1f)
+                                    val nextScale = if (curScale > 1.2f) 1f else 3f
+                                    val targetOffset = if (nextScale == 1f) {
+                                        Offset.Zero
+                                    } else {
+                                        val cx = paneSize.width / 2f
+                                        val cy = paneSize.height / 2f
+                                        clampPaneOffset(
+                                            Offset((cx - tapOffset.x) * (nextScale - 1f), (cy - tapOffset.y) * (nextScale - 1f)),
+                                            nextScale
+                                        )
+                                    }
                                     if (syncZoom) {
                                         sharedScale = nextScale
-                                        if (nextScale == 1f) sharedOffset = Offset.Zero
+                                        sharedOffset = targetOffset
                                     } else {
                                         individualScale[item.id] = nextScale
-                                        if (nextScale == 1f) individualOffset[item.id] = Offset.Zero
+                                        individualOffset[item.id] = targetOffset
                                     }
                                 }
                             )
                         }
                         .pointerInput(item.id, syncZoom) {
-                            detectTransformGestures { _, pan, zoom, _ ->
+                            detectTransformGestures { centroid, pan, zoom, _ ->
+                                val cx = paneSize.width / 2f
+                                val cy = paneSize.height / 2f
                                 if (syncZoom) {
-                                    val next = (sharedScale * zoom).coerceIn(1f, 6f)
+                                    val prev = sharedScale
+                                    val next = (prev * zoom).coerceIn(1f, 6f)
+                                    val ratio = if (prev > 0f) next / prev else 1f
+                                    val fx = (centroid.x - cx) * (1f - ratio)
+                                    val fy = (centroid.y - cy) * (1f - ratio)
                                     sharedScale = next
-                                    sharedOffset = if (next <= 1.02f) Offset.Zero else sharedOffset + pan
+                                    sharedOffset = if (next <= 1.02f) {
+                                        Offset.Zero
+                                    } else {
+                                        clampPaneOffset(
+                                            Offset(sharedOffset.x * ratio + pan.x + fx, sharedOffset.y * ratio + pan.y + fy),
+                                            next
+                                        )
+                                    }
                                 } else {
-                                    val cur = individualScale[item.id] ?: 1f
-                                    val next = (cur * zoom).coerceIn(1f, 6f)
+                                    val prev = individualScale[item.id] ?: 1f
+                                    val next = (prev * zoom).coerceIn(1f, 6f)
+                                    val ratio = if (prev > 0f) next / prev else 1f
+                                    val fx = (centroid.x - cx) * (1f - ratio)
+                                    val fy = (centroid.y - cy) * (1f - ratio)
                                     individualScale[item.id] = next
                                     val curOff = individualOffset[item.id] ?: Offset.Zero
-                                    individualOffset[item.id] = if (next <= 1.02f) Offset.Zero else curOff + pan
+                                    individualOffset[item.id] = if (next <= 1.02f) {
+                                        Offset.Zero
+                                    } else {
+                                        clampPaneOffset(
+                                            Offset(curOff.x * ratio + pan.x + fx, curOff.y * ratio + pan.y + fy),
+                                            next
+                                        )
+                                    }
                                 }
                             }
                         }

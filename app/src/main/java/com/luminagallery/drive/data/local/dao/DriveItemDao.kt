@@ -50,28 +50,10 @@ interface DriveItemDao {
             f.parentId,
             f.name,
             f.modifiedTimeEpochMs,
-            (SELECT COUNT(*) FROM drive_items c
-             WHERE c.parentId = f.id AND c.isFolder = 1 AND c.trashed = 0) AS subfolderCount,
-            (SELECT COUNT(*) FROM drive_items m
-             WHERE m.parentId = f.id AND m.isFolder = 0 AND m.trashed = 0) AS mediaCount,
-            COALESCE(
-                (SELECT m.thumbnailLink FROM drive_items m
-                 WHERE m.parentId = f.id AND m.isFolder = 0 AND m.trashed = 0
-                 ORDER BY m.createdTimeEpochMs DESC LIMIT 1),
-                (SELECT m2.thumbnailLink FROM drive_items m2
-                 INNER JOIN drive_items sf ON m2.parentId = sf.id
-                 WHERE sf.parentId = f.id AND m2.isFolder = 0 AND m2.trashed = 0
-                 ORDER BY m2.createdTimeEpochMs DESC LIMIT 1)
-            ) AS coverThumbnailLink,
-            COALESCE(
-                (SELECT m.id FROM drive_items m
-                 WHERE m.parentId = f.id AND m.isFolder = 0 AND m.trashed = 0
-                 ORDER BY m.createdTimeEpochMs DESC LIMIT 1),
-                (SELECT m2.id FROM drive_items m2
-                 INNER JOIN drive_items sf ON m2.parentId = sf.id
-                 WHERE sf.parentId = f.id AND m2.isFolder = 0 AND m2.trashed = 0
-                 ORDER BY m2.createdTimeEpochMs DESC LIMIT 1)
-            ) AS coverItemId,
+            0 AS subfolderCount,
+            0 AS mediaCount,
+            NULL AS coverThumbnailLink,
+            NULL AS coverItemId,
             CASE WHEN EXISTS(SELECT 1 FROM pinned_roots p WHERE p.folderId = f.id)
                  THEN 1 ELSE 0 END AS isPinned
         FROM drive_items f
@@ -119,7 +101,6 @@ interface DriveItemDao {
           AND (:fromEpochMs IS NULL OR createdTimeEpochMs >= :fromEpochMs)
           AND (:toEpochMs IS NULL OR createdTimeEpochMs <= :toEpochMs)
         ORDER BY createdTimeEpochMs DESC, name COLLATE NOCASE ASC
-        LIMIT 1000
         """
     )
     fun searchMedia(
@@ -128,6 +109,27 @@ interface DriveItemDao {
         fromEpochMs: Long?,
         toEpochMs: Long?
     ): Flow<List<DriveItemEntity>>
+
+    @Query(
+        """
+        WITH RECURSIVE descendants(id, depth) AS (
+            SELECT :rootFolderId, 0
+            UNION ALL
+            SELECT d.id, descendants.depth + 1
+            FROM drive_items d
+            INNER JOIN descendants ON d.parentId = descendants.id
+            WHERE descendants.depth < 32
+        )
+        SELECT id FROM descendants
+        """
+    )
+    suspend fun getSubtreeItemIds(rootFolderId: String): List<String>
+
+    @Query("SELECT id FROM drive_items WHERE isFolder = 1 AND trashed = 0")
+    suspend fun getAllFolderIds(): List<String>
+
+    @Query("SELECT id FROM drive_items")
+    suspend fun getAllItemIds(): List<String>
 
     @Query(
         """

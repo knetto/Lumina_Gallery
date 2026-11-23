@@ -6,6 +6,7 @@ import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
@@ -22,107 +23,141 @@ import kotlinx.coroutines.isActive
 
 /**
  * Samsung / Google Photos-style continuous drag-to-select across a `LazyVerticalGrid`:
- *  - Long-press any photo tile to start selecting (or deselecting if the start tile was already selected).
- *  - Drag across rows and columns to sweep-select every photo in range with smooth edge auto-scroll
- *    and subtle haptic feedback.
+ *  - O(1) index lookup via cached `indexById` map.
+ *  - Batches range updates via [onSetRangeSelected] (or falls back to [onSetItemSelected])
+ *    so dragging across 500 items never floods `StateFlow` per frame.
+ *  - Continues updating range selection smoothly while auto-scrolling at top/bottom edges.
  */
 fun Modifier.photoGridDragSelect(
     gridState: LazyGridState,
     orderedItemIds: List<String>,
     keyToItemId: (Any) -> String?,
     selectedIds: Set<String>,
-    onSetItemSelected: (String, Boolean) -> Unit
+    onSetItemSelected: (String, Boolean) -> Unit,
+    onSetRangeSelected: ((Set<String>, Boolean) -> Unit)? = null
 ): Modifier = composed {
     val haptic = LocalHapticFeedback.current
     val density = LocalDensity.current
     val autoScrollZonePx = remember(density) { with(density) { 64.dp.toPx() } }
     val maxAutoScrollSpeedPx = remember(density) { with(density) { 18.dp.toPx() } }
 
-    val latestOrderedIds by rememberUpdatedState(orderedItemIds)
-    val latestSelectedIds by rememberUpdatedState(selectedIds)
-    val latestKeyMapper by rememberUpdatedState(keyToItemId)
-    val latestOnSetSelected by rememberUpdatedState(onSetItemSelected)
-
-    var autoScrollSpeed by remember { mutableFloatStateOf(0f) }
-
-    LaunchedEffect(autoScrollSpeed) {
-        if (autoScrollSpeed == 0f) return@LaunchedEffect
-        while (isActive && autoScrollSpeed != 0f) {
-            gridState.scrollBy(autoScrollSpeed)
-            delay(16L)
+    val indexById = remember(orderedItemIds) {
+        HashMap<String, Int>(orderedItemIds.size * 2).apply {
+            orderedItemIds.forEachIndexed { idx, id -> put(id, idx) }
         }
     }
 
+    val latestOrderedIds by rememberUpdatedState(orderedItemIds)
+    val latestIndexById by rememberUpdatedState(indexById)
+    val latestSelectedIds by rememberUpdatedState(selectedIds)
+    val latestKeyMapper by rememberUpdatedState(keyToItemId)
+    val latestOnSetSelected by rememberUpdatedState(onSetItemSelected)
+    val latestOnSetRange by rememberUpdatedState(onSetRangeSelected)
+
+    var autoScrollSpeed by remember { mutableFloatStateOf(0f) }
+    var lastDragPosition by remember { mutableStateOf<Offset?>(null) }
+    val dragSessionRef = remember { DragSelectSession() }
+
     fun itemIdAtOffset(offset: Offset): String? {
         val layoutInfo = gridState.layoutInfo
+        val adjustedY = offset.y - layoutInfo.beforeContentPadding
         val hit = layoutInfo.visibleItemsInfo.firstOrNull { itemInfo ->
             val left = itemInfo.offset.x.toFloat()
             val top = itemInfo.offset.y.toFloat()
             val right = left + itemInfo.size.width
             val bottom = top + itemInfo.size.height
-            offset.x in left..right && offset.y in top..bottom
+            offset.x in left..right && adjustedY in top..bottom
         } ?: return null
         return latestKeyMapper(hit.key)
     }
 
-    pointerInput(gridState) {
-        var anchorIndex = -1
-        var lastTargetIndex = -1
-        var selectTargetState = true
-        var baselineSelection: Set<String> = emptySet()
+    fun applyBatch(ids: Set<String>, selected: Boolean) {
+        if (ids.isEmpty()) return
+        val batchCb = latestOnSetRange
+        if (batchCb != null) {
+            batchCb(ids, selected)
+        } else {
+            ids.forEach { latestOnSetSelected(it, selected) }
+        }
+    }
 
-        fun applyRange(currentIndex: Int) {
-            val ids = latestOrderedIds
-            if (anchorIndex !in ids.indices || currentIndex !in ids.indices) return
-            val low = minOf(anchorIndex, currentIndex)
-            val high = maxOf(anchorIndex, currentIndex)
-            val prevLow = if (lastTargetIndex in ids.indices) minOf(anchorIndex, lastTargetIndex) else low
-            val prevHigh = if (lastTargetIndex in ids.indices) maxOf(anchorIndex, lastTargetIndex) else high
+    fun applyRange(currentIndex: Int) {
+        val ids = latestOrderedIds
+        val anchor = dragSessionRef.anchorIndex
+        if (anchor !in ids.indices || currentIndex !in ids.indices) return
+        if (currentIndex == dragSessionRef.lastTargetIndex) return
 
-            // Restore items that fell outside the shrunk range back to their pre-drag state
-            for (idx in prevLow..prevHigh) {
-                if (idx !in low..high && idx in ids.indices) {
-                    val id = ids[idx]
-                    latestOnSetSelected(id, id in baselineSelection)
-                }
-            }
-            // Apply target selection state to the active range
-            for (idx in low..high) {
+        val low = minOf(anchor, currentIndex)
+        val high = maxOf(anchor, currentIndex)
+        val prevTarget = dragSessionRef.lastTargetIndex
+        val prevLow = if (prevTarget in ids.indices) minOf(anchor, prevTarget) else low
+        val prevHigh = if (prevTarget in ids.indices) maxOf(anchor, prevTarget) else high
+
+        val toSelect = LinkedHashSet<String>()
+        val toDeselect = LinkedHashSet<String>()
+
+        // Restore items that fell outside the shrunk range back to their pre-drag state
+        for (idx in prevLow..prevHigh) {
+            if (idx !in low..high && idx in ids.indices) {
                 val id = ids[idx]
-                latestOnSetSelected(id, selectTargetState)
-            }
-            if (currentIndex != lastTargetIndex) {
-                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                lastTargetIndex = currentIndex
+                if (id in dragSessionRef.baselineSelection) toSelect.add(id) else toDeselect.add(id)
             }
         }
+        // Apply target selection state to newly added indices
+        val targetBucket = if (dragSessionRef.selectTargetState) toSelect else toDeselect
+        for (idx in low..high) {
+            if (idx !in prevLow..prevHigh || prevTarget < 0) {
+                targetBucket.add(ids[idx])
+            }
+        }
+        applyBatch(toSelect, true)
+        applyBatch(toDeselect, false)
 
+        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+        dragSessionRef.lastTargetIndex = currentIndex
+    }
+
+    LaunchedEffect(autoScrollSpeed) {
+        if (autoScrollSpeed == 0f) return@LaunchedEffect
+        while (isActive && autoScrollSpeed != 0f) {
+            gridState.scrollBy(autoScrollSpeed)
+            lastDragPosition?.let { pos ->
+                val hitId = itemIdAtOffset(pos)
+                val idx = hitId?.let { latestIndexById[it] } ?: -1
+                if (idx >= 0) applyRange(idx)
+            }
+            delay(16L)
+        }
+    }
+
+    pointerInput(gridState) {
         detectDragGesturesAfterLongPress(
             onDragStart = { startOffset ->
                 val hitId = itemIdAtOffset(startOffset) ?: return@detectDragGesturesAfterLongPress
-                val idx = latestOrderedIds.indexOf(hitId)
-                if (idx < 0) return@detectDragGesturesAfterLongPress
-                baselineSelection = latestSelectedIds
-                anchorIndex = idx
-                lastTargetIndex = idx
-                selectTargetState = hitId !in baselineSelection
+                val idx = latestIndexById[hitId] ?: return@detectDragGesturesAfterLongPress
+                dragSessionRef.baselineSelection = latestSelectedIds
+                dragSessionRef.anchorIndex = idx
+                dragSessionRef.lastTargetIndex = idx
+                dragSessionRef.selectTargetState = hitId !in dragSessionRef.baselineSelection
+                lastDragPosition = startOffset
                 haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                latestOnSetSelected(hitId, selectTargetState)
+                applyBatch(setOf(hitId), dragSessionRef.selectTargetState)
             },
             onDragEnd = {
-                anchorIndex = -1
-                lastTargetIndex = -1
+                dragSessionRef.reset()
+                lastDragPosition = null
                 autoScrollSpeed = 0f
             },
             onDragCancel = {
-                anchorIndex = -1
-                lastTargetIndex = -1
+                dragSessionRef.reset()
+                lastDragPosition = null
                 autoScrollSpeed = 0f
             },
             onDrag = { change, _ ->
-                if (anchorIndex < 0) return@detectDragGesturesAfterLongPress
+                if (dragSessionRef.anchorIndex < 0) return@detectDragGesturesAfterLongPress
                 change.consume()
                 val pos = change.position
+                lastDragPosition = pos
                 val viewportHeight = gridState.layoutInfo.viewportSize.height.toFloat()
                 autoScrollSpeed = when {
                     viewportHeight > 0f && pos.y < autoScrollZonePx -> {
@@ -136,11 +171,22 @@ fun Modifier.photoGridDragSelect(
                     else -> 0f
                 }
                 val hitId = itemIdAtOffset(pos) ?: return@detectDragGesturesAfterLongPress
-                val idx = latestOrderedIds.indexOf(hitId)
-                if (idx >= 0) {
-                    applyRange(idx)
-                }
+                val idx = latestIndexById[hitId] ?: return@detectDragGesturesAfterLongPress
+                applyRange(idx)
             }
         )
+    }
+}
+
+private class DragSelectSession {
+    var anchorIndex: Int = -1
+    var lastTargetIndex: Int = -1
+    var selectTargetState: Boolean = true
+    var baselineSelection: Set<String> = emptySet()
+
+    fun reset() {
+        anchorIndex = -1
+        lastTargetIndex = -1
+        baselineSelection = emptySet()
     }
 }

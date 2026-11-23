@@ -36,18 +36,24 @@ object DriveMapper {
     fun isSupportedGalleryDto(dto: DriveFileDto): Boolean {
         if (dto.mimeType == DriveConstants.FOLDER_MIME_TYPE) return true
         if (dto.mimeType.startsWith("image/", ignoreCase = true)) return true
-        if (dto.mimeType.startsWith("video/", ignoreCase = true)) return true
+        if (VideoFormatSupport.isVideoFile(dto.name, dto.mimeType)) return true
         val ext = dto.name.substringAfterLast('.', "").lowercase(Locale.US)
         return ext in RAW_EXTENSIONS
     }
 
     fun dtoToEntity(dto: DriveFileDto, fallbackParentId: String? = null): DriveItemEntity {
         val isFolder = dto.mimeType == DriveConstants.FOLDER_MIME_TYPE
+        val isVideo = !isFolder && VideoFormatSupport.isVideoFile(dto.name, dto.mimeType)
         val mediaType = when {
             isFolder -> TYPE_FOLDER
-            dto.mimeType.startsWith("video/", ignoreCase = true) -> MediaType.VIDEO.name
+            isVideo -> MediaType.VIDEO.name
             isRawFile(dto.name, dto.mimeType) -> MediaType.RAW.name
             else -> MediaType.PHOTO.name
+        }
+        val effectiveMimeType = if (isVideo) {
+            VideoFormatSupport.normalizeVideoMimeType(dto.name, dto.mimeType)
+        } else {
+            dto.mimeType
         }
 
         val imageMeta = dto.imageMediaMetadata
@@ -63,7 +69,7 @@ object DriveMapper {
             id = dto.id,
             parentId = dto.parents.firstOrNull() ?: fallbackParentId,
             name = dto.name.ifBlank { "Untitled" },
-            mimeType = dto.mimeType,
+            mimeType = effectiveMimeType,
             isFolder = isFolder,
             mediaType = mediaType,
             sizeBytes = dto.size?.toLongOrNull() ?: 0L,

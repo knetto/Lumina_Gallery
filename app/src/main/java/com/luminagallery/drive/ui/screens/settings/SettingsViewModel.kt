@@ -37,6 +37,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.Locale
 
 @Immutable
 data class SettingsUiState(
@@ -320,13 +321,20 @@ class SettingsViewModel(
     fun signOutGoogleAccount() {
         viewModelScope.launch {
             cloudProfileSyncManager.onSignedOut()
+            DriveSyncScheduler.setBackgroundSyncEnabled(appContext, false)
+            preferencesManager.setBackgroundSyncEnabled(false)
             withContext(Dispatchers.IO) {
                 tokenManager.clearPlayServicesTokenBlocking()
             }
             credentialStore.clearGoogleSignInSession()
             credentialStore.clearImportedCredentials()
             tokenManager.invalidate()
-            snackbarFlow.value = "Signed out of Google Drive"
+            // Purge all Drive account data, offline downloads, and Drive thumbnails so the previous
+            // Google account's private metadata never lingers after sign-out.
+            repository.clearDriveAccountData()
+            offlineMediaManager.clearAllOffline()
+            coilCacheManager.clearThumbnailCache()
+            snackbarFlow.value = "Signed out and cleared Google Drive cache"
         }
     }
 
@@ -404,7 +412,7 @@ class SettingsViewModel(
         viewModelScope.launch {
             preferencesManager.setMaxCacheSizeMb(sizeMb)
             coilCacheManager.updateMaxCacheSizeMb(sizeMb)
-            snackbarFlow.value = "Thumbnail cache limit set to ${if (sizeMb >= 1024) String.format("%.1f GB", sizeMb / 1024f) else "$sizeMb MB"}"
+            snackbarFlow.value = "Thumbnail cache limit set to ${if (sizeMb >= 1024) String.format(Locale.US, "%.1f GB", sizeMb / 1024f) else "$sizeMb MB"}"
         }
     }
 
@@ -494,7 +502,8 @@ class SettingsViewModel(
             preferencesManager.setWifiOnlyHighRes(defaults.wifiOnlyHighRes)
             preferencesManager.setExternalGallery(defaults.externalGalleryPackage, defaults.externalGalleryLabel)
             preferencesManager.setAutoCheckUpdates(defaults.autoCheckUpdates)
-            preferencesManager.setLockHiddenAlbums(defaults.lockHiddenAlbums)
+            // Never reset `lockHiddenAlbums` here — turning off biometric lock must always require
+            // explicit biometric authentication in Privacy & Security.
             preferencesManager.setBackgroundSyncEnabled(defaults.backgroundSyncEnabled)
             DriveSyncScheduler.setBackgroundSyncEnabled(appContext, false)
             preferencesManager.setMaxCacheSizeMb(defaults.maxCacheSizeMb)

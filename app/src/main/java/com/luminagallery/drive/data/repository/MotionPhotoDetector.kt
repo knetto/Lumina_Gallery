@@ -59,10 +59,11 @@ class MotionPhotoDetector(private val context: Context) {
         if (item.isVideo || item.isRaw) return@withContext null
 
         cache[item.id]?.let { return@withContext it }
-        if (negativeCache.containsKey(item.id)) return@withContext null
 
         try {
-            // 1. Check for iPhone Live Photo companion .MOV / .MP4 in the same album/folder
+            // 1. Always check for iPhone Live Photo companion .MOV / .MP4 BEFORE consulting
+            //    embedded-stream negativeCache, because Viewer boots with 1 tapped item before
+            //    siblingItems finishes loading!
             val companion = findIphoneLiveCompanion(item, siblingItems)
             if (companion != null) {
                 val uri = companion.localContentUri
@@ -71,14 +72,19 @@ class MotionPhotoDetector(private val context: Context) {
                         kind = MotionPhotoKind.IPHONE_LIVE_PHOTO,
                         videoUri = uri
                     )
+                    if (cache.size > MAX_CACHE_ENTRIES) cache.clear()
                     cache[item.id] = info
+                    negativeCache.remove(item.id)
                     return@withContext info
                 }
             }
 
+            if (negativeCache.containsKey(item.id)) return@withContext null
+
             // 2. Determine total file size without loading the file into RAM
             val totalSize = resolveFileSize(item, offlineFilePath)
             if (totalSize < 4096L || totalSize > MAX_SCAN_BYTES) {
+                if (negativeCache.size > MAX_CACHE_ENTRIES) negativeCache.clear()
                 negativeCache[item.id] = true
                 return@withContext null
             }
@@ -88,6 +94,7 @@ class MotionPhotoDetector(private val context: Context) {
                 readUpTo(stream, XMP_HEADER_WINDOW_BYTES)
             }
             if (headerBytes == null || headerBytes.size < 1024) {
+                if (negativeCache.size > MAX_CACHE_ENTRIES) negativeCache.clear()
                 negativeCache[item.id] = true
                 return@withContext null
             }
@@ -96,6 +103,7 @@ class MotionPhotoDetector(private val context: Context) {
 
             val xmpDetected = detectFromXmpHeader(headerBytes, totalSize)
             if (xmpDetected != null) {
+                if (cache.size > MAX_CACHE_ENTRIES) cache.clear()
                 cache[item.id] = xmpDetected
                 return@withContext xmpDetected
             }
@@ -106,10 +114,12 @@ class MotionPhotoDetector(private val context: Context) {
                 scanStreamForEmbeddedVideo(stream, totalSize)
             }
             if (streamDetected != null) {
+                if (cache.size > MAX_CACHE_ENTRIES) cache.clear()
                 cache[item.id] = streamDetected
                 return@withContext streamDetected
             }
 
+            if (negativeCache.size > MAX_CACHE_ENTRIES) negativeCache.clear()
             negativeCache[item.id] = true
             null
         } catch (ce: CancellationException) {
@@ -426,6 +436,7 @@ class MotionPhotoDetector(private val context: Context) {
     }
 
     private companion object {
+        const val MAX_CACHE_ENTRIES = 1_500
         const val XMP_HEADER_WINDOW_BYTES = 98_304
         const val MAX_SCAN_BYTES = 25L * 1024L * 1024L
         const val MAX_EXTRACT_SINGLE_BYTES = 20L * 1024L * 1024L

@@ -14,8 +14,10 @@ import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
 import android.widget.RemoteViews
+import com.luminagallery.drive.LuminaApplication
 import com.luminagallery.drive.MainActivity
 import com.luminagallery.drive.R
+import com.luminagallery.drive.data.local.LocalMediaRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -74,25 +76,23 @@ class LuminaPhotoWidgetProvider : AppWidgetProvider() {
         }
     }
 
-    private fun updateSingleWidget(
+    override fun onDeleted(context: Context, appWidgetIds: IntArray) {
+        super.onDeleted(context, appWidgetIds)
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val editor = prefs.edit()
+        for (id in appWidgetIds) {
+            editor.remove("idx_$id")
+        }
+        editor.apply()
+    }
+
+    private suspend fun updateSingleWidget(
         context: Context,
         manager: AppWidgetManager,
         widgetId: Int,
         advanceIndex: Boolean
     ) {
         val views = RemoteViews(context.packageName, R.layout.widget_lumina_photo)
-
-        // Tap photo -> open Lumina Gallery
-        val openIntent = Intent(context, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
-        val openPending = PendingIntent.getActivity(
-            context,
-            widgetId,
-            openIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        views.setOnClickPendingIntent(R.id.widget_root, openPending)
 
         // Tap next button -> cycle to next favorite/memory photo
         val nextIntent = Intent(context, LuminaPhotoWidgetProvider::class.java).apply {
@@ -109,6 +109,17 @@ class LuminaPhotoWidgetProvider : AppWidgetProvider() {
 
         val candidates = queryCandidatePhotos(context)
         if (candidates.isEmpty()) {
+            val openHomeIntent = Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+            val openPending = PendingIntent.getActivity(
+                context,
+                widgetId,
+                openHomeIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            views.setOnClickPendingIntent(R.id.widget_root, openPending)
+            views.setImageViewResource(R.id.widget_image, R.drawable.widget_bg_rounded)
             views.setTextViewText(R.id.widget_title, "Lumina Gallery")
             views.setTextViewText(R.id.widget_subtitle, "Tap to view your photos")
             manager.updateAppWidget(widgetId, views)
@@ -125,6 +136,20 @@ class LuminaPhotoWidgetProvider : AppWidgetProvider() {
         prefs.edit().putInt("idx_$widgetId", targetIdx).apply()
 
         val chosen = candidates[targetIdx]
+
+        // Tap photo -> deep-link directly into the displayed photo in Lumina Viewer
+        val openIntent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra(EXTRA_WIDGET_OPEN_ITEM_ID, chosen.luminaItemId)
+        }
+        val openPending = PendingIntent.getActivity(
+            context,
+            widgetId,
+            openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        views.setOnClickPendingIntent(R.id.widget_root, openPending)
+
         val bitmap = decodeWidgetBitmap(context, chosen.uri)
         if (bitmap != null) {
             views.setImageViewBitmap(R.id.widget_image, bitmap)
@@ -135,58 +160,84 @@ class LuminaPhotoWidgetProvider : AppWidgetProvider() {
     }
 
     private data class WidgetPhoto(
+        val luminaItemId: String,
         val uri: Uri,
         val albumName: String,
         val dateLabel: String
     )
 
-    private fun queryCandidatePhotos(context: Context): List<WidgetPhoto> {
-        val list = ArrayList<WidgetPhoto>(40)
+    private suspend fun queryCandidatePhotos(context: Context): List<WidgetPhoto> {
+        val extrasDao = (context.applicationContext as? LuminaApplication)
+            ?.container?.database?.galleryExtrasDao()
+        val blockedBucketIds = HashSet<String>()
+        val roomFavoriteIds = HashSet<String>()
+        if (extrasDao != null) {
+            runCatching {
+                blockedBucketIds.addAll(extrasDao.getAllLockedAlbumIds())
+                blockedBucketIds.addAll(extrasDao.getAllHiddenAlbumIds())
+                roomFavoriteIds.addAll(extrasDao.getAllFavoriteItemIds())
+            }
+        }
+
+        val favorites = ArrayList<WidgetPhoto>(40)
+        val fallback = ArrayList<WidgetPhoto>(40)
         val dateFmt = SimpleDateFormat("MMM d, yyyy", Locale.getDefault())
 
-        fun query(favoritesOnly: Boolean) {
-            val projection = arrayOf(
-                MediaStore.Images.Media._ID,
-                MediaStore.Images.Media.BUCKET_DISPLAY_NAME,
-                MediaStore.Images.Media.DATE_TAKEN,
-                MediaStore.Images.Media.DATE_MODIFIED
-            )
-            val selection = if (favoritesOnly && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                "${MediaStore.MediaColumns.IS_FAVORITE} = 1 AND ${MediaStore.MediaColumns.SIZE} > 0"
-            } else {
-                "${MediaStore.MediaColumns.SIZE} > 0"
+        val projection = buildList {
+            add(MediaStore.Images.Media._ID)
+            add(MediaStore.Images.Media.BUCKET_ID)
+            add(MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
+            add(MediaStore.Images.Media.DATE_TAKEN)
+            add(MediaStore.Images.Media.DATE_MODIFIED)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                add(MediaStore.MediaColumns.IS_FAVORITE)
             }
-            runCatching {
-                context.contentResolver.query(
-                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                    projection,
-                    selection,
-                    null,
-                    "${MediaStore.Images.Media.DATE_MODIFIED} DESC"
-                )?.use { c ->
-                    val idCol = c.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
-                    val bucketCol = c.getColumnIndex(MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
-                    val takenCol = c.getColumnIndex(MediaStore.Images.Media.DATE_TAKEN)
-                    val modCol = c.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_MODIFIED)
-                    while (c.moveToNext() && list.size < 40) {
-                        val id = c.getLong(idCol)
-                        val uri = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
-                        val album = if (bucketCol >= 0) c.getString(bucketCol) ?: "Photos" else "Photos"
-                        val taken = if (takenCol >= 0) c.getLong(takenCol) else 0L
-                        val ms = if (taken > 0L) taken else c.getLong(modCol) * 1000L
-                        list.add(WidgetPhoto(uri, album, dateFmt.format(Date(ms.coerceAtLeast(0L)))))
-                    }
+        }.toTypedArray()
+
+        runCatching {
+            context.contentResolver.query(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                projection,
+                "${MediaStore.MediaColumns.SIZE} > 0",
+                null,
+                "${MediaStore.Images.Media.DATE_MODIFIED} DESC"
+            )?.use { c ->
+                val idCol = c.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+                val bucketIdCol = c.getColumnIndex(MediaStore.Images.Media.BUCKET_ID)
+                val bucketCol = c.getColumnIndex(MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
+                val takenCol = c.getColumnIndex(MediaStore.Images.Media.DATE_TAKEN)
+                val modCol = c.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_MODIFIED)
+                val favCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    c.getColumnIndex(MediaStore.MediaColumns.IS_FAVORITE)
+                } else -1
+
+                while (c.moveToNext() && (favorites.size < 40 || fallback.size < 40)) {
+                    val rawBucket = if (bucketIdCol >= 0) c.getString(bucketIdCol) else null
+                    val luminaBucketId = "${LocalMediaRepository.LOCAL_BUCKET_PREFIX}${rawBucket ?: "default"}"
+                    // Never leak locked or hidden albums onto the Home Screen widget!
+                    if (luminaBucketId in blockedBucketIds) continue
+
+                    val id = c.getLong(idCol)
+                    val luminaItemId = "${LocalMediaRepository.LOCAL_ITEM_PREFIX}$id"
+                    val isFav = luminaItemId in roomFavoriteIds || (favCol >= 0 && c.getInt(favCol) == 1)
+                    if (!isFav && fallback.size >= 40) continue
+                    if (isFav && favorites.size >= 40) continue
+
+                    val uri = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
+                    val album = if (bucketCol >= 0) c.getString(bucketCol) ?: "Photos" else "Photos"
+                    val taken = if (takenCol >= 0) c.getLong(takenCol) else 0L
+                    val ms = if (taken > 0L) taken else c.getLong(modCol) * 1000L
+                    val photo = WidgetPhoto(
+                        luminaItemId = luminaItemId,
+                        uri = uri,
+                        albumName = album,
+                        dateLabel = dateFmt.format(Date(ms.coerceAtLeast(0L)))
+                    )
+                    if (isFav) favorites.add(photo) else fallback.add(photo)
                 }
             }
         }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            query(favoritesOnly = true)
-        }
-        if (list.isEmpty()) {
-            query(favoritesOnly = false)
-        }
-        return list
+        return favorites.ifEmpty { fallback }
     }
 
     private fun decodeWidgetBitmap(context: Context, uri: Uri): Bitmap? = runCatching {
@@ -205,12 +256,23 @@ class LuminaPhotoWidgetProvider : AppWidgetProvider() {
                 }
             }
         } else {
-            context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) }
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            context.contentResolver.openInputStream(uri)?.use {
+                BitmapFactory.decodeStream(it, null, bounds)
+            }
+            var sample = 1
+            val maxDim = maxOf(bounds.outWidth, bounds.outHeight)
+            while (maxDim / sample > targetMax) sample *= 2
+            val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+            context.contentResolver.openInputStream(uri)?.use {
+                BitmapFactory.decodeStream(it, null, opts)
+            }
         }
     }.getOrNull()
 
     companion object {
         const val ACTION_NEXT_PHOTO = "com.luminagallery.drive.widget.ACTION_NEXT_PHOTO"
+        const val EXTRA_WIDGET_OPEN_ITEM_ID = "com.luminagallery.drive.EXTRA_WIDGET_OPEN_ITEM_ID"
         private const val PREFS_NAME = "lumina_widget_prefs"
     }
 }

@@ -32,6 +32,10 @@ import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
+import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 
 enum class DateFilterPreset(val label: String) {
     ANY("Any time"),
@@ -48,6 +52,9 @@ data class SearchUiState(
     val datePreset: DateFilterPreset = DateFilterPreset.ANY,
     val customFromEpochMs: Long? = null,
     val customToEpochMs: Long? = null,
+    val pickerStartUtcMs: Long? = null,
+    val pickerEndUtcMs: Long? = null,
+    val customRangeLabel: String? = null,
     val resolvedFromEpochMs: Long? = null,
     val resolvedToEpochMs: Long? = null,
     val results: List<MediaItem> = emptyList(),
@@ -91,13 +98,34 @@ class SearchViewModel(
     private val mediaTypeFlow = MutableStateFlow<MediaType?>(null)
     private val onlyWithTextFlow = MutableStateFlow(false)
     private val datePresetFlow = MutableStateFlow(DateFilterPreset.ANY)
-    private val customRangeFlow = MutableStateFlow<Pair<Long?, Long?>>(null to null)
+    private val customRangeFlow = MutableStateFlow(CustomRangeState())
+    private val localCameraVersionFlow = MutableStateFlow(0)
 
     init {
         viewModelScope.launch(Dispatchers.IO) {
             val cachedLocal = localMediaRepository.getCachedAllMedia()
             if (cachedLocal.isNotEmpty()) {
-                ocrIndexerManager.syncOcrIndex(cachedLocal, maxNewItemsPerRun = 260)
+                ocrIndexerManager.syncOcrIndex(cachedLocal, maxNewItemsPerRun = 120)
+                // Lazily populate in-memory EXIF camera/lens index for local photos so camera search works
+                var newlyIndexed = 0
+                for (item in cachedLocal) {
+                    if (item.isVideo || localCameraMetaCache.containsKey(item.id)) continue
+                    if (newlyIndexed >= 400) break
+                    val (exif, _) = localMediaRepository.readLocalExifAndPath(item)
+                    val summary = listOfNotNull(
+                        exif.cameraMake,
+                        exif.cameraModel,
+                        exif.lens
+                    ).joinToString(" ").trim()
+                    localCameraMetaCache[item.id] = summary
+                    newlyIndexed++
+                    if (newlyIndexed % 60 == 0) {
+                        localCameraVersionFlow.update { it + 1 }
+                    }
+                }
+                if (newlyIndexed > 0) {
+                    localCameraVersionFlow.update { it + 1 }
+                }
             }
         }
     }
@@ -115,21 +143,22 @@ class SearchViewModel(
         datePresetFlow,
         customRangeFlow,
         onlyWithTextFlow
-    ) { query, type, preset, (customFrom, customTo), onlyText ->
-        val (from, to) = resolveDateRange(preset, customFrom, customTo)
+    ) { query, type, preset, custom, onlyText ->
+        val (from, to) = resolveDateRange(preset, custom.localFromMs, custom.localToMs)
         SearchQueryParams(query, type, from, to, onlyText)
     }
 
-    // Combined offline index across phone media, cached Drive media, GPS cities, custom tags/notes, and ML Kit OCR text
+    // Combined offline index excluding locked & hidden albums (and Drive descendants)
     private val allSearchableMediaFlow = combine(
         localMediaRepository.observeAllLocalMedia(),
         repository.searchMedia("", null, null, null),
-        extrasRepository.lockedAlbumIdsFlow
-    ) { local, drive, lockedIds ->
-        val visible = if (lockedIds.isEmpty()) {
+        extrasRepository.excludedAlbumIdsFlow
+    ) { local, drive, excludedIds ->
+        val blockedIds = repository.expandBlockedFolderIds(excludedIds)
+        val visible = if (blockedIds.isEmpty()) {
             local + drive
         } else {
-            (local + drive).filterNot { it.parentId in lockedIds }
+            (local + drive).filterNot { it.parentId in blockedIds }
         }
         visible.sortedByDescending { it.createdTimeEpochMs }
     }.flowOn(Dispatchers.Default)
@@ -146,34 +175,44 @@ class SearchViewModel(
             annotationsByItem = annotations,
             ocrByItem = ocrMap,
             ocrProgress = ocrProg,
-            recentSearches = recents,
-            topCities = locs.values
-                .map { it.city }
-                .filter { it.isNotBlank() && !it.contains("°") && !it.startsWith("Location") }
-                .groupingBy { it }
-                .eachCount()
-                .entries
-                .sortedByDescending { it.value }
-                .take(8)
-                .map { it.key },
-            topTags = annotations.values
-                .flatMap { it.tagsCsv.split(",") }
-                .map { it.trim() }
-                .filter { it.isNotEmpty() }
-                .groupingBy { it }
-                .eachCount()
-                .entries
-                .sortedByDescending { it.value }
-                .take(10)
-                .map { it.key }
+            recentSearches = recents
         )
     }.flowOn(Dispatchers.Default)
 
     private val searchResultsFlow = combine(
         filterParamsFlow,
         allSearchableMediaFlow,
-        enrichmentFlow
-    ) { params, allMedia, enrich ->
+        enrichmentFlow,
+        localCameraVersionFlow
+    ) { params, allMedia, enrich, _ ->
+        val visibleIds = allMedia.mapTo(HashSet(allMedia.size)) { it.id }
+
+        // Only suggest cities and tags belonging to visible (unlocked, non-hidden) media!
+        val topCities = enrich.locationsByItem.entries
+            .asSequence()
+            .filter { it.key in visibleIds }
+            .map { it.value.city }
+            .filter { it.isNotBlank() && !it.contains("°") && !it.startsWith("Location") }
+            .groupingBy { it }
+            .eachCount()
+            .entries
+            .sortedByDescending { it.value }
+            .take(8)
+            .map { it.key }
+
+        val topTags = enrich.annotationsByItem.entries
+            .asSequence()
+            .filter { it.key in visibleIds }
+            .flatMap { it.value.tagsCsv.split(",").asSequence() }
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .groupingBy { it }
+            .eachCount()
+            .entries
+            .sortedByDescending { it.value }
+            .take(10)
+            .map { it.key }
+
         val tokens = params.query.trim()
             .split(Regex("\\s+"))
             .map { it.removePrefix("#").trim() }
@@ -189,9 +228,16 @@ class SearchViewModel(
 
             val loc = enrich.locationsByItem[item.id]
             val ann = enrich.annotationsByItem[item.id]
-            tokens.all { token -> matchesToken(item, loc, ann, ocr, token) }
+            val localCameraSummary = localCameraMetaCache[item.id]
+            tokens.all { token -> matchesToken(item, loc, ann, ocr, localCameraSummary, token) }
         }
-        filtered to enrich
+        SearchComputedResult(
+            results = filtered,
+            recentSearches = enrich.recentSearches,
+            topCities = topCities,
+            topTags = topTags,
+            ocrProgress = enrich.ocrProgress
+        )
     }.flowOn(Dispatchers.Default)
 
     private val queryControlsFlow = combine(
@@ -200,8 +246,8 @@ class SearchViewModel(
         datePresetFlow,
         customRangeFlow,
         onlyWithTextFlow
-    ) { query, type, preset, range, onlyText ->
-        SearchControls(query, type, preset, range.first, range.second, onlyText)
+    ) { query, type, preset, custom, onlyText ->
+        SearchControls(query, type, preset, custom, onlyText)
     }
 
     private val interactionFlow = combine(
@@ -220,26 +266,29 @@ class SearchViewModel(
         preferencesManager.preferencesFlow,
         networkMonitor.networkState,
         interactionFlow
-    ) { controls, (results, enrich), prefs, net, interaction ->
+    ) { controls, computed, prefs, net, interaction ->
         val (resolvedFrom, resolvedTo) = resolveDateRange(
             controls.preset,
-            controls.customFrom,
-            controls.customTo
+            controls.custom.localFromMs,
+            controls.custom.localToMs
         )
         SearchUiState(
             query = controls.query,
             selectedMediaType = controls.mediaType,
             datePreset = controls.preset,
-            customFromEpochMs = controls.customFrom,
-            customToEpochMs = controls.customTo,
+            customFromEpochMs = controls.custom.localFromMs,
+            customToEpochMs = controls.custom.localToMs,
+            pickerStartUtcMs = controls.custom.pickerStartUtcMs,
+            pickerEndUtcMs = controls.custom.pickerEndUtcMs,
+            customRangeLabel = controls.custom.label,
             resolvedFromEpochMs = resolvedFrom,
             resolvedToEpochMs = resolvedTo,
-            results = results,
-            recentSearches = enrich.recentSearches,
-            suggestedCities = enrich.topCities,
-            suggestedTags = enrich.topTags,
+            results = computed.results,
+            recentSearches = computed.recentSearches,
+            suggestedCities = computed.topCities,
+            suggestedTags = computed.topTags,
             onlyWithText = controls.onlyWithText,
-            ocrProgress = enrich.ocrProgress,
+            ocrProgress = computed.ocrProgress,
             gridColumns = prefs.gridColumns,
             isUnmeteredWifi = net.isUnmeteredWifi || !prefs.wifiOnlyHighRes,
             selectedIds = interaction.selectedIds,
@@ -261,6 +310,7 @@ class SearchViewModel(
         location: PhotoLocationEntity?,
         annotation: MediaAnnotationEntity?,
         ocr: PhotoOcrEntity?,
+        localCameraSummary: String?,
         token: String
     ): Boolean {
         if (item.name.contains(token, ignoreCase = true)) return true
@@ -271,6 +321,7 @@ class SearchViewModel(
         if (item.exif.cameraMake?.contains(token, ignoreCase = true) == true) return true
         if (item.exif.cameraModel?.contains(token, ignoreCase = true) == true) return true
         if (item.exif.lens?.contains(token, ignoreCase = true) == true) return true
+        if (!localCameraSummary.isNullOrBlank() && localCameraSummary.contains(token, ignoreCase = true)) return true
         if (location != null && (
                 location.city.contains(token, ignoreCase = true) ||
                     location.country.contains(token, ignoreCase = true)
@@ -295,6 +346,13 @@ class SearchViewModel(
     fun setItemSelected(itemId: String, selected: Boolean) {
         selectedIdsFlow.update { current ->
             if (selected) current + itemId else current - itemId
+        }
+    }
+
+    fun setItemsSelectedRange(ids: Set<String>, selected: Boolean) {
+        if (ids.isEmpty()) return
+        selectedIdsFlow.update { current ->
+            if (selected) current + ids else current - ids
         }
     }
 
@@ -324,19 +382,39 @@ class SearchViewModel(
     fun onDatePresetSelected(preset: DateFilterPreset) {
         datePresetFlow.value = preset
         if (preset != DateFilterPreset.CUSTOM) {
-            customRangeFlow.value = null to null
+            customRangeFlow.value = CustomRangeState()
         }
     }
 
-    fun onCustomDateRangeSelected(fromEpochMs: Long?, toEpochMs: Long?) {
-        if (fromEpochMs == null && toEpochMs == null) {
+    fun onCustomDateRangeSelected(fromUtcMs: Long?, toUtcMs: Long?) {
+        if (fromUtcMs == null && toUtcMs == null) {
             datePresetFlow.value = DateFilterPreset.ANY
-            customRangeFlow.value = null to null
-        } else {
-            val endOfDayTo = toEpochMs?.let { it + 86_399_999L }
-            datePresetFlow.value = DateFilterPreset.CUSTOM
-            customRangeFlow.value = fromEpochMs to endOfDayTo
+            customRangeFlow.value = CustomRangeState()
+            return
         }
+        val zone = ZoneId.systemDefault()
+        val startUtc = fromUtcMs ?: toUtcMs!!
+        val endUtc = toUtcMs ?: startUtc
+        val startDate = Instant.ofEpochMilli(startUtc).atZone(ZoneOffset.UTC).toLocalDate()
+        val endDate = Instant.ofEpochMilli(endUtc).atZone(ZoneOffset.UTC).toLocalDate()
+        val orderedStart = minOf(startDate, endDate)
+        val orderedEnd = maxOf(startDate, endDate)
+        val localFromMs = orderedStart.atStartOfDay(zone).toInstant().toEpochMilli()
+        val localToMs = orderedEnd.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli() - 1L
+        val fmt = DateTimeFormatter.ofPattern("MMM d", Locale.US)
+        val label = if (orderedStart == orderedEnd) {
+            orderedStart.format(fmt)
+        } else {
+            "${orderedStart.format(fmt)} – ${orderedEnd.format(fmt)}"
+        }
+        datePresetFlow.value = DateFilterPreset.CUSTOM
+        customRangeFlow.value = CustomRangeState(
+            localFromMs = localFromMs,
+            localToMs = localToMs,
+            pickerStartUtcMs = startUtc,
+            pickerEndUtcMs = toUtcMs,
+            label = label
+        )
     }
 
     fun setGridColumns(columns: Int) {
@@ -441,22 +519,35 @@ class SearchViewModel(
         }
     }
 
+    private data class CustomRangeState(
+        val localFromMs: Long? = null,
+        val localToMs: Long? = null,
+        val pickerStartUtcMs: Long? = null,
+        val pickerEndUtcMs: Long? = null,
+        val label: String? = null
+    )
+
     private data class SearchEnrichment(
         val locationsByItem: Map<String, PhotoLocationEntity>,
         val annotationsByItem: Map<String, MediaAnnotationEntity>,
         val ocrByItem: Map<String, PhotoOcrEntity>,
         val ocrProgress: OcrIndexProgress,
+        val recentSearches: List<String>
+    )
+
+    private data class SearchComputedResult(
+        val results: List<MediaItem>,
         val recentSearches: List<String>,
         val topCities: List<String>,
-        val topTags: List<String>
+        val topTags: List<String>,
+        val ocrProgress: OcrIndexProgress
     )
 
     private data class SearchControls(
         val query: String,
         val mediaType: MediaType?,
         val preset: DateFilterPreset,
-        val customFrom: Long?,
-        val customTo: Long?,
+        val custom: CustomRangeState,
         val onlyWithText: Boolean
     )
 
@@ -468,6 +559,10 @@ class SearchViewModel(
         val pendingShareUris: List<Uri>?,
         val snackbarMessage: String?
     )
+
+    companion object {
+        private val localCameraMetaCache = ConcurrentHashMap<String, String>()
+    }
 
     class Factory(private val container: AppContainer) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")

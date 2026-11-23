@@ -121,4 +121,46 @@ class UiSafetyAuditTest {
             collectionBlock.contains("popEnterTransition = null")
         )
     }
+
+    @Test
+    fun galleryDatabase_definesExplicitMigrationAndNeverDropsUserData() {
+        val dbText = File(
+            projectSrcRoot(),
+            "java/com/luminagallery/drive/data/local/GalleryDatabase.kt"
+        ).readText()
+        assertTrue(
+            "GalleryDatabase must define explicit MIGRATION_10_11",
+            dbText.contains("MIGRATION_10_11")
+        )
+        assertFalse(
+            "GalleryDatabase must never use fallbackToDestructiveMigration",
+            dbText.contains("fallbackToDestructiveMigration")
+        )
+    }
+
+    @Test
+    fun settingsReset_neverDisablesPrivacyLockForHiddenAlbums() {
+        val settingsVm = File(
+            projectSrcRoot(),
+            "java/com/luminagallery/drive/ui/screens/settings/SettingsViewModel.kt"
+        ).readText()
+        val resetBlock = settingsVm.substringAfter("fun resetSettingsToDefaults")
+            .substringBefore("fun signOut")
+        assertFalse(
+            "Resetting settings must never turn off lockHiddenAlbums without authentication",
+            resetBlock.contains("setLockHiddenAlbums")
+        )
+    }
+
+    @Test
+    fun viewerViewModel_respectsExcludedAlbumIdsFlow() {
+        val viewerVm = File(
+            projectSrcRoot(),
+            "java/com/luminagallery/drive/ui/screens/viewer/ViewerViewModel.kt"
+        ).readText()
+        assertTrue(
+            "ViewerViewModel must filter excluded/locked/hidden albums via excludedAlbumIdsFlow",
+            viewerVm.contains("excludedAlbumIdsFlow")
+        )
+    }
 }

@@ -34,6 +34,9 @@ interface GalleryExtrasDao {
     @Query("DELETE FROM favorite_items WHERE itemId = :itemId")
     suspend fun removeFavoriteItem(itemId: String)
 
+    @Query("DELETE FROM favorite_items WHERE itemId IN (:ids)")
+    suspend fun removeFavoriteItems(ids: List<String>)
+
     @Query("DELETE FROM favorite_items WHERE itemId NOT LIKE 'local_%'")
     suspend fun clearDriveFavoriteItems()
 
@@ -106,6 +109,12 @@ interface GalleryExtrasDao {
     @Upsert
     suspend fun upsertIgnoredCleanOutItems(items: List<IgnoredCleanOutEntity>)
 
+    @Query("SELECT itemId FROM ignored_cleanout_items")
+    suspend fun getAllIgnoredCleanOutIds(): List<String>
+
+    @Query("DELETE FROM ignored_cleanout_items WHERE itemId IN (:ids)")
+    suspend fun removeIgnoredCleanOutItems(ids: List<String>)
+
     @Query("DELETE FROM ignored_cleanout_items")
     suspend fun clearAllIgnoredCleanOut()
 
@@ -117,6 +126,9 @@ interface GalleryExtrasDao {
 
     @Upsert
     suspend fun upsertPhotoLocations(items: List<PhotoLocationEntity>)
+
+    @Query("DELETE FROM photo_location_cache WHERE itemId IN (:ids)")
+    suspend fun deletePhotoLocations(ids: List<String>)
 
     // Custom album covers
     @Query("SELECT * FROM custom_album_covers")
@@ -197,12 +209,18 @@ interface GalleryExtrasDao {
     @Upsert
     suspend fun upsertOcrEntries(entries: List<PhotoOcrEntity>)
 
+    @Query("DELETE FROM photo_ocr_cache WHERE itemId IN (:ids)")
+    suspend fun deleteOcrEntries(ids: List<String>)
+
     // Per-album sort order & grouping preferences
     @Query("SELECT * FROM album_view_prefs WHERE albumId = :albumId LIMIT 1")
     fun observeAlbumViewPref(albumId: String): Flow<AlbumViewPrefEntity?>
 
     @Query("SELECT * FROM album_view_prefs WHERE albumId = :albumId LIMIT 1")
     suspend fun getAlbumViewPref(albumId: String): AlbumViewPrefEntity?
+
+    @Query("DELETE FROM album_view_prefs WHERE albumId = :albumId")
+    suspend fun deleteAlbumViewPref(albumId: String)
 
     @Query("SELECT * FROM album_view_prefs")
     fun observeAllAlbumViewPrefs(): Flow<List<AlbumViewPrefEntity>>

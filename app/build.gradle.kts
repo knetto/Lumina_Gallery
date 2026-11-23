@@ -1,3 +1,4 @@
+import java.util.Properties
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
@@ -37,11 +38,40 @@ android {
         }
     }
 
+    val keystorePropsFile = rootProject.file("keystore.properties")
+    val keystoreProps = Properties().apply {
+        if (keystorePropsFile.isFile) {
+            keystorePropsFile.inputStream().use { load(it) }
+        }
+    }
+    val releaseStorePath = System.getenv("LUMINA_KEYSTORE_PATH")
+        ?: keystoreProps.getProperty("storeFile")
+    val releaseStoreFile = releaseStorePath?.takeIf { it.isNotBlank() }?.let { rootProject.file(it) }
+    val hasReleaseSigning = releaseStoreFile != null && releaseStoreFile.isFile
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = releaseStoreFile
+                storePassword = System.getenv("LUMINA_KEYSTORE_PASSWORD")
+                    ?: keystoreProps.getProperty("storePassword", "")
+                keyAlias = System.getenv("LUMINA_KEY_ALIAS")
+                    ?: keystoreProps.getProperty("keyAlias", "")
+                keyPassword = System.getenv("LUMINA_KEY_PASSWORD")
+                    ?: keystoreProps.getProperty("keyPassword", "")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (hasReleaseSigning) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
             ndk {
                 abiFilters += listOf("arm64-v8a", "armeabi-v7a")
             }
@@ -162,11 +192,12 @@ dependencies {
     implementation(libs.coil.video)
     implementation(libs.androidx.exifinterface)
 
-    // Media3 ExoPlayer Video Streaming
+    // Media3 ExoPlayer Video Streaming + FFmpeg software codec fallback (MP2P / MPEG-2 / AC-3 / DTS)
     implementation(libs.androidx.media3.exoplayer)
     implementation(libs.androidx.media3.datasource.okhttp)
     implementation(libs.androidx.media3.ui)
     implementation(libs.androidx.media3.common)
+    implementation(libs.nextlib.media3ext)
 
     // MapLibre Native 120Hz Vector Map (API-key-free OpenFreeMap tiles)
     implementation(libs.maplibre.android.sdk)

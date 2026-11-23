@@ -36,7 +36,6 @@ import androidx.compose.material.icons.automirrored.rounded.Label
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.CameraAlt
 import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.Image
@@ -121,21 +120,30 @@ fun ExifMetadataBottomSheet(
 
     fun persistAnnotation(updatedTags: List<String>, updatedNote: String) {
         savedNote = updatedNote
-        scope.launch {
-            container.galleryExtrasRepository.saveAnnotation(item.id, updatedTags, updatedNote)
-        }
+        // Persist on repository IO scope so dismissing the sheet immediately never cancels the DB write
+        container.galleryExtrasRepository.saveAnnotationAsync(item.id, updatedTags, updatedNote)
     }
 
     fun submitTag() {
-        val clean = tagInput.trim().removePrefix("#").trim()
-        if (clean.isNotEmpty() && clean !in tags) {
+        val parts = tagInput.split(",")
+            .map { it.trim().removePrefix("#").trim() }
+            .filter { it.isNotEmpty() && it !in tags }
+            .distinct()
+        if (parts.isNotEmpty()) {
             haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-            val next = tags + clean
+            val next = tags + parts
             tags = next
             tagInput = ""
             persistAnnotation(next, noteDraft)
-            onCopiedMessage("Added tag #$clean")
+            onCopiedMessage("Added ${parts.joinToString(", ") { "#$it" }}")
         }
+    }
+
+    val handleDismiss: () -> Unit = {
+        if (noteDraft != savedNote) {
+            persistAnnotation(tags, noteDraft)
+        }
+        onDismiss()
     }
 
     val extBadge = remember(item.name, item.mimeType, item.isRaw, item.isVideo) {
@@ -152,7 +160,7 @@ fun ExifMetadataBottomSheet(
     val hairlineBorder = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)
 
     ModalBottomSheet(
-        onDismissRequest = onDismiss,
+        onDismissRequest = handleDismiss,
         sheetState = sheetState,
         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
         containerColor = MaterialTheme.colorScheme.surfaceContainer,
@@ -211,12 +219,19 @@ fun ExifMetadataBottomSheet(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(5.dp)
                         ) {
-                            Icon(
-                                imageVector = if (item.isLocal) Icons.Rounded.Smartphone else Icons.Rounded.Cloud,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(13.dp)
-                            )
+                            if (item.isLocal) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Smartphone,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                            } else {
+                                GoogleDriveGlyph(
+                                    size = 13.dp,
+                                    primaryColor = MaterialTheme.colorScheme.primary
+                                )
+                            }
                             Text(
                                 text = if (item.isLocal) "On device" else "Drive",
                                 style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
@@ -413,9 +428,13 @@ fun ExifMetadataBottomSheet(
                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                         val clipboard =
                             context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        clipboard.setPrimaryClip(
-                            ClipData.newPlainText("Path", "$driveFolderPath/${item.name}")
-                        )
+                        val copyPath = if (item.isLocal) {
+                            val rel = item.storagePath?.trim('/')?.takeIf { it.isNotBlank() }
+                            if (rel != null) "/storage/emulated/0/$rel/${item.name}" else "$driveFolderPath/${item.name}"
+                        } else {
+                            "$driveFolderPath/${item.name}"
+                        }
+                        clipboard.setPrimaryClip(ClipData.newPlainText("Path", copyPath))
                         onCopiedMessage("Copied path to clipboard")
                     }
             ) {

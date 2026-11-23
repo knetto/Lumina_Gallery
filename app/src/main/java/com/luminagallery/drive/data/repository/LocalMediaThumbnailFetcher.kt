@@ -135,9 +135,39 @@ class LocalMediaThumbnailFetcher(
             } catch (canceled: OperationCanceledException) {
                 throw CancellationException("Thumbnail load canceled", canceled)
             } catch (_: Throwable) {
-                // Fall back to direct ContentResolver stream (e.g., proprietary RAW formats)
+                // Fall back to MediaMetadataRetriever for non-standard videos (e.g. MP2P / VOB / MOD)
+                // or direct ContentResolver stream for proprietary RAW formats.
             } finally {
                 completionHandle?.dispose()
+            }
+        }
+
+        if (data.isVideo) {
+            val targetSize = resolveTargetSize(options)
+            val bmp = runCatching {
+                val retriever = MediaMetadataRetriever()
+                try {
+                    retriever.setDataSource(context, uri)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                        retriever.getScaledFrameAtTime(
+                            -1L,
+                            MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                            targetSize.width,
+                            targetSize.height
+                        )
+                    } else {
+                        retriever.frameAtTime
+                    }
+                } finally {
+                    runCatching { retriever.release() }
+                }
+            }.getOrNull()
+            if (bmp != null) {
+                return ImageFetchResult(
+                    image = bmp.asImage(),
+                    isSampled = true,
+                    dataSource = DataSource.DISK
+                )
             }
         }
 

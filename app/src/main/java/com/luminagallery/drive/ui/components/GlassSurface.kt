@@ -22,8 +22,8 @@ import androidx.compose.ui.unit.dp
 fun GlassSurface(
     modifier: Modifier = Modifier,
     shape: Shape = RoundedCornerShape(24.dp),
-    containerColor: Color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.82f),
-    borderColor: Color = Color.White.copy(alpha = 0.12f),
+    containerColor: Color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.86f),
+    borderColor: Color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f),
     tonalElevation: Dp = 0.dp,
     content: @Composable () -> Unit
 ) {

@@ -12,15 +12,20 @@ import com.luminagallery.drive.data.local.PreferencesManager
 import com.luminagallery.drive.data.remote.NetworkMonitor
 import com.luminagallery.drive.data.repository.GalleryExtrasRepository
 import com.luminagallery.drive.data.repository.GalleryRepository
+import com.luminagallery.drive.domain.model.AlbumMediaFilter
+import com.luminagallery.drive.domain.model.AlbumMediaSort
 import com.luminagallery.drive.domain.model.MediaItem
 import com.luminagallery.drive.domain.model.MediaType
 import com.luminagallery.drive.domain.model.SpecialGalleryFilter
 import com.luminagallery.drive.domain.model.UserPreferences
 import com.luminagallery.drive.domain.usecase.ExportMediaUseCase
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -34,13 +39,18 @@ data class ViewerLaunchContext(
     val mediaTypeFilter: MediaType? = null,
     val fromEpochMs: Long? = null,
     val toEpochMs: Long? = null,
-    val specialFilter: SpecialGalleryFilter? = null
+    val onlyWithText: Boolean = false,
+    val specialFilter: SpecialGalleryFilter? = null,
+    val albumFilter: AlbumMediaFilter = AlbumMediaFilter.ALL,
+    val albumSort: AlbumMediaSort = AlbumMediaSort.DATE_DESC,
+    val locationKey: String? = null
 )
 
 @Immutable
 data class ViewerUiState(
     val items: List<MediaItem> = emptyList(),
     val initialPageIndex: Int = 0,
+    val hasLoadedOnce: Boolean = false,
     val favoriteItemIds: Set<String> = emptySet(),
     val isUnmeteredWifi: Boolean = true,
     val isOnline: Boolean = true,
@@ -52,6 +62,7 @@ data class ViewerUiState(
     val pendingShareUris: List<Uri>? = null,
     val pendingShareMimeType: String = "*/*",
     val pendingTrashIntentSender: IntentSender? = null,
+    val pendingFavoriteIntentSender: IntentSender? = null,
     val snackbarMessage: String? = null
 )
 
@@ -72,69 +83,153 @@ class ViewerViewModel(
     private val showExifFlow = MutableStateFlow(false)
     private val pendingShareFlow = MutableStateFlow<Pair<List<Uri>, String>?>(null)
     private val pendingTrashFlow = MutableStateFlow<IntentSender?>(null)
+    private val pendingFavoriteFlow = MutableStateFlow<IntentSender?>(null)
     private val snackbarFlow = MutableStateFlow<String?>(null)
 
+    private val excludedAlbumIdsFlow = extrasRepository.excludedAlbumIdsFlow
+        .map { ids -> repository.expandBlockedFolderIds(ids) }
+
     private val mediaSourceFlow = when {
+        !launchContext.locationKey.isNullOrBlank() -> combine(
+            extrasRepository.locationProgressFlow,
+            excludedAlbumIdsFlow
+        ) { progress, excluded ->
+            val group = progress.groups.firstOrNull { it.locationKey == launchContext.locationKey }
+            group?.items.orEmpty().filterNot { it.parentId in excluded }
+        }.flowOn(Dispatchers.Default)
+
         launchContext.specialFilter != null -> when (launchContext.specialFilter) {
             SpecialGalleryFilter.VIDEOS -> combine(
                 localMediaRepository.observeAllLocalMedia(),
-                repository.searchMedia("", MediaType.VIDEO, null, null)
-            ) { local, drive ->
-                (local.filter { it.isVideo } + drive).sortedByDescending { it.createdTimeEpochMs }
-            }
+                repository.searchMedia("", MediaType.VIDEO, null, null),
+                excludedAlbumIdsFlow
+            ) { local, drive, excluded ->
+                (local.filter { it.isVideo } + drive)
+                    .filterNot { it.parentId in excluded }
+                    .sortedByDescending { it.createdTimeEpochMs }
+            }.flowOn(Dispatchers.Default)
 
             SpecialGalleryFilter.FAVORITES -> combine(
                 localMediaRepository.observeAllLocalMedia(),
                 repository.searchMedia("", null, null, null),
-                extrasRepository.favoriteItemIdsFlow
-            ) { local, drive, favIds ->
+                extrasRepository.favoriteItemIdsFlow,
+                excludedAlbumIdsFlow
+            ) { local, drive, favIds, excluded ->
                 (local + drive)
-                    .filter { it.id in favIds }
+                    .filter { it.id in favIds && it.parentId !in excluded }
                     .sortedByDescending { it.createdTimeEpochMs }
-            }
+            }.flowOn(Dispatchers.Default)
 
             SpecialGalleryFilter.RECENT -> combine(
                 localMediaRepository.observeAllLocalMedia(),
-                repository.searchMedia("", null, null, null)
-            ) { local, drive ->
+                repository.searchMedia("", null, null, null),
+                excludedAlbumIdsFlow
+            ) { local, drive, excluded ->
                 (local + drive)
+                    .filterNot { it.parentId in excluded }
                     .sortedByDescending { it.createdTimeEpochMs }
                     .take(300)
-            }
+            }.flowOn(Dispatchers.Default)
 
             SpecialGalleryFilter.TRASH -> localMediaRepository.observeTrashedLocalMedia()
         }
 
-        launchContext.isSearchMode -> combine(
-            localMediaRepository.searchLocalMedia(
-                query = launchContext.searchQuery,
-                mediaType = launchContext.mediaTypeFilter,
-                fromEpochMs = launchContext.fromEpochMs,
-                toEpochMs = launchContext.toEpochMs
-            ),
-            repository.searchMedia(
-                query = launchContext.searchQuery,
-                mediaType = launchContext.mediaTypeFilter,
-                fromEpochMs = launchContext.fromEpochMs,
-                toEpochMs = launchContext.toEpochMs
-            )
-        ) { localItems, driveItems ->
-            (localItems + driveItems).sortedByDescending { it.createdTimeEpochMs }
+        launchContext.isSearchMode -> {
+            val enrichmentFlow = combine(
+                extrasRepository.cachedLocationsMapFlow,
+                extrasRepository.mediaAnnotationsFlow,
+                extrasRepository.ocrTextMapFlow,
+                excludedAlbumIdsFlow
+            ) { locs, anns, ocr, excluded ->
+                SearchViewerEnrichment(locs, anns, ocr, excluded)
+            }
+            combine(
+                localMediaRepository.observeAllLocalMedia(),
+                repository.searchMedia("", null, null, null),
+                enrichmentFlow
+            ) { localItems, driveItems, enrich ->
+                val tokens = launchContext.searchQuery.trim().lowercase()
+                    .split(Regex("\\s+")).filter { it.isNotBlank() }
+                (localItems + driveItems).filter { item ->
+                    if (item.parentId in enrich.excludedIds) return@filter false
+                    if (launchContext.mediaTypeFilter != null && item.mediaType != launchContext.mediaTypeFilter) {
+                        return@filter false
+                    }
+                    if (launchContext.fromEpochMs != null && item.createdTimeEpochMs < launchContext.fromEpochMs) {
+                        return@filter false
+                    }
+                    if (launchContext.toEpochMs != null && item.createdTimeEpochMs > launchContext.toEpochMs) {
+                        return@filter false
+                    }
+                    val ocr = enrich.ocrById[item.id]
+                    if (launchContext.onlyWithText && (ocr == null || !ocr.hasText)) {
+                        return@filter false
+                    }
+                    if (tokens.isEmpty()) return@filter true
+                    val loc = enrich.locationsById[item.id]
+                    val ann = enrich.annotationsById[item.id]
+                    tokens.all { token ->
+                        item.name.contains(token, ignoreCase = true) ||
+                            item.relativePath?.contains(token, ignoreCase = true) == true ||
+                            item.storagePath?.contains(token, ignoreCase = true) == true ||
+                            item.monthYearLabel.contains(token, ignoreCase = true) ||
+                            item.daySectionLabel.contains(token, ignoreCase = true) ||
+                            item.exif.cameraMake?.contains(token, ignoreCase = true) == true ||
+                            item.exif.cameraModel?.contains(token, ignoreCase = true) == true ||
+                            item.exif.lens?.contains(token, ignoreCase = true) == true ||
+                            loc?.city?.contains(token, ignoreCase = true) == true ||
+                            loc?.country?.contains(token, ignoreCase = true) == true ||
+                            ann?.tagsCsv?.contains(token, ignoreCase = true) == true ||
+                            ann?.note?.contains(token, ignoreCase = true) == true ||
+                            ocr?.extractedText?.contains(token, ignoreCase = true) == true ||
+                            (token == "video" && item.isVideo) ||
+                            (token == "raw" && item.isRaw) ||
+                            (token == "drive" && !item.isLocal)
+                    }
+                }.sortedByDescending { it.createdTimeEpochMs }
+            }.flowOn(Dispatchers.Default)
         }
 
-        LocalMediaRepository.isLocalFolderId(launchContext.folderId) ->
-            localMediaRepository.observeLocalAlbumMedia(launchContext.folderId)
+        launchContext.folderId == LocalMediaRepository.LOCAL_BUCKET_ALL -> combine(
+            localMediaRepository.observeLocalAlbumMedia(LocalMediaRepository.LOCAL_BUCKET_ALL),
+            excludedAlbumIdsFlow
+        ) { items, excluded ->
+            items.filterNot { it.parentId in excluded }
+        }.flowOn(Dispatchers.Default)
 
-        launchContext.isFlattened -> repository.observeFlattenedMedia(launchContext.folderId)
-        else -> repository.observeMediaInFolder(launchContext.folderId)
+        LocalMediaRepository.isLocalFolderId(launchContext.folderId) -> combine(
+            localMediaRepository.observeLocalAlbumMedia(launchContext.folderId),
+            extrasRepository.favoriteItemIdsFlow
+        ) { items, favIds ->
+            applyAlbumFilterAndSort(items, favIds, launchContext.albumFilter, launchContext.albumSort)
+        }.flowOn(Dispatchers.Default)
+
+        launchContext.isFlattened -> combine(
+            repository.observeFlattenedMedia(launchContext.folderId),
+            extrasRepository.favoriteItemIdsFlow,
+            excludedAlbumIdsFlow
+        ) { items, favIds, excluded ->
+            // Allow items inside the explicitly opened folderId, but never leak locked/hidden subfolders
+            val blocked = excluded - launchContext.folderId
+            val visible = items.filterNot { it.parentId in blocked }
+            applyAlbumFilterAndSort(visible, favIds, launchContext.albumFilter, launchContext.albumSort)
+        }.flowOn(Dispatchers.Default)
+
+        else -> combine(
+            repository.observeMediaInFolder(launchContext.folderId),
+            extrasRepository.favoriteItemIdsFlow
+        ) { items, favIds ->
+            applyAlbumFilterAndSort(items, favIds, launchContext.albumFilter, launchContext.albumSort)
+        }.flowOn(Dispatchers.Default)
     }
 
     private val dialogAndActionsFlow = combine(
         pendingShareFlow,
         pendingTrashFlow,
+        pendingFavoriteFlow,
         snackbarFlow
-    ) { share, trash, snack ->
-        Triple(share, trash, snack)
+    ) { share, trash, favSender, snack ->
+        ViewerDialogEvents(share, trash, favSender, snack)
     }
 
     private val overlayFlow = combine(
@@ -143,8 +238,17 @@ class ViewerViewModel(
         activeExifItemFlow,
         showExifFlow,
         dialogAndActionsFlow
-    ) { exporting, path, exifItem, showExif, (share, trash, snack) ->
-        ViewerOverlay(exporting, path, exifItem, showExif, share, trash, snack)
+    ) { exporting, path, exifItem, showExif, events ->
+        ViewerOverlay(
+            isExporting = exporting,
+            activeDrivePath = path,
+            activeExifItem = exifItem,
+            showExifSheet = showExif,
+            pendingShare = events.pendingShare,
+            pendingTrash = events.pendingTrash,
+            pendingFavorite = events.pendingFavorite,
+            snackbarMessage = events.snackbarMessage
+        )
     }
 
     val uiState: StateFlow<ViewerUiState> = combine(
@@ -159,6 +263,7 @@ class ViewerViewModel(
         ViewerUiState(
             items = items,
             initialPageIndex = index,
+            hasLoadedOnce = true,
             favoriteItemIds = favIds,
             isUnmeteredWifi = net.isUnmeteredWifi || !prefs.wifiOnlyHighRes,
             isOnline = net.isOnline,
@@ -170,6 +275,7 @@ class ViewerViewModel(
             pendingShareUris = overlay.pendingShare?.first,
             pendingShareMimeType = overlay.pendingShare?.second ?: "*/*",
             pendingTrashIntentSender = overlay.pendingTrash,
+            pendingFavoriteIntentSender = overlay.pendingFavorite,
             snackbarMessage = overlay.snackbarMessage
         )
     }.stateIn(
@@ -178,6 +284,27 @@ class ViewerViewModel(
         initialValue = buildInstantInitialState(networkMonitor)
     )
 
+    private fun applyAlbumFilterAndSort(
+        items: List<MediaItem>,
+        favIds: Set<String>,
+        filter: AlbumMediaFilter,
+        sort: AlbumMediaSort
+    ): List<MediaItem> {
+        val filtered = when (filter) {
+            AlbumMediaFilter.ALL -> items
+            AlbumMediaFilter.IMAGES -> items.filter { !it.isVideo && !it.isRaw }
+            AlbumMediaFilter.VIDEOS -> items.filter { it.isVideo }
+            AlbumMediaFilter.RAW -> items.filter { it.isRaw }
+            AlbumMediaFilter.FAVORITES -> items.filter { it.id in favIds }
+        }
+        return when (sort) {
+            AlbumMediaSort.DATE_DESC -> filtered.sortedByDescending { it.createdTimeEpochMs }
+            AlbumMediaSort.DATE_ASC -> filtered.sortedBy { it.createdTimeEpochMs }
+            AlbumMediaSort.NAME_ASC -> filtered.sortedBy { it.name.lowercase() }
+            AlbumMediaSort.SIZE_DESC -> filtered.sortedByDescending { it.sizeBytes }
+        }
+    }
+
     /**
      * Populates frame 0 synchronously from in-memory caches (or the tapped grid item) so opening a
      * photo expands the real image immediately out of its thumbnail with zero black spinner flash.
@@ -185,16 +312,36 @@ class ViewerViewModel(
     private fun buildInstantInitialState(networkMonitor: NetworkMonitor): ViewerUiState {
         val prefs = preferencesManager.latestPreferences
         val net = networkMonitor.networkState.value
+        val excluded = repository.expandBlockedFolderIds(
+            extrasRepository.latestLockedAlbumIds + extrasRepository.latestHiddenAlbumIds
+        )
         val cached = when {
+            !launchContext.locationKey.isNullOrBlank() -> emptyList()
             launchContext.specialFilter == SpecialGalleryFilter.VIDEOS ->
                 localMediaRepository.getCachedAlbumMedia(LocalMediaRepository.LOCAL_BUCKET_VIDEOS)
+                    .filterNot { it.parentId in excluded }
             launchContext.specialFilter == SpecialGalleryFilter.RECENT ->
-                localMediaRepository.getCachedAlbumMedia(LocalMediaRepository.LOCAL_BUCKET_ALL).take(300)
+                localMediaRepository.getCachedAlbumMedia(LocalMediaRepository.LOCAL_BUCKET_ALL)
+                    .filterNot { it.parentId in excluded }
+                    .take(300)
             launchContext.specialFilter != null || launchContext.isSearchMode -> emptyList()
+            launchContext.folderId == LocalMediaRepository.LOCAL_BUCKET_ALL ->
+                localMediaRepository.getCachedAlbumMedia(LocalMediaRepository.LOCAL_BUCKET_ALL)
+                    .filterNot { it.parentId in excluded }
             LocalMediaRepository.isLocalFolderId(launchContext.folderId) ->
-                localMediaRepository.getCachedAlbumMedia(launchContext.folderId)
+                applyAlbumFilterAndSort(
+                    localMediaRepository.getCachedAlbumMedia(launchContext.folderId),
+                    extrasRepository.latestFavoriteItemIds,
+                    launchContext.albumFilter,
+                    launchContext.albumSort
+                )
             !launchContext.isFlattened && launchContext.folderId.isNotBlank() ->
-                repository.getCachedFolderMedia(launchContext.folderId).orEmpty()
+                applyAlbumFilterAndSort(
+                    repository.getCachedFolderMedia(launchContext.folderId).orEmpty(),
+                    extrasRepository.latestFavoriteItemIds,
+                    launchContext.albumFilter,
+                    launchContext.albumSort
+                )
             else -> emptyList()
         }.distinctBy { it.id }
 
@@ -215,6 +362,8 @@ class ViewerViewModel(
         return ViewerUiState(
             items = initialItems,
             initialPageIndex = initialIndex,
+            hasLoadedOnce = false,
+            favoriteItemIds = extrasRepository.latestFavoriteItemIds,
             isUnmeteredWifi = net.isUnmeteredWifi || !prefs.wifiOnlyHighRes,
             isOnline = net.isOnline,
             preferences = prefs
@@ -224,7 +373,17 @@ class ViewerViewModel(
     fun toggleFavorite(item: MediaItem) {
         val currentlyFav = item.id in uiState.value.favoriteItemIds
         viewModelScope.launch {
-            extrasRepository.toggleFavoriteItem(item.id, currentlyFav)
+            val sender = extrasRepository.toggleFavoriteItem(item.id, currentlyFav, item)
+            if (sender != null) {
+                pendingFavoriteFlow.value = sender
+            }
+        }
+    }
+
+    fun onFavoriteRequestCompleted(approved: Boolean) {
+        pendingFavoriteFlow.value = null
+        if (approved) {
+            localMediaRepository.notifyPermissionChanged()
         }
     }
 
@@ -280,22 +439,27 @@ class ViewerViewModel(
         if (!item.isLocal) return
         val isHiddenFile = com.luminagallery.drive.data.local.HiddenLockedFolderManager
             .isHiddenFileUri(item.localContentUri)
-        if (isHiddenFile || localMediaRepository.canManageMediaDirectly()) {
+        val supportsTrash = localMediaRepository.supportsMediaStoreTrash()
+        if (isHiddenFile || localMediaRepository.canDeleteDirectlyWithoutDialog()) {
             viewModelScope.launch {
                 localMediaRepository.trashLocalItemsDirectly(listOf(item), toTrash = true)
                     .onSuccess {
                         localMediaRepository.notifyPermissionChanged()
-                        snackbarFlow.value = if (isHiddenFile) "Deleted permanently" else "Moved to trash"
+                        snackbarFlow.value = when {
+                            isHiddenFile -> "Deleted permanently"
+                            supportsTrash -> "Moved to trash"
+                            else -> "Deleted from device"
+                        }
                     }
                     .onFailure { err ->
-                        if (isHiddenFile) {
+                        if (isHiddenFile || !supportsTrash) {
                             snackbarFlow.value = err.localizedMessage ?: "Could not delete file"
                         } else {
                             val sender = localMediaRepository.buildTrashIntentSender(listOf(item))
                             if (sender != null) {
                                 pendingTrashFlow.value = sender
                             } else {
-                                snackbarFlow.value = "Trash requires Android 11 or newer"
+                                snackbarFlow.value = "Could not move item to trash"
                             }
                         }
                     }
@@ -306,7 +470,17 @@ class ViewerViewModel(
         if (sender != null) {
             pendingTrashFlow.value = sender
         } else {
-            snackbarFlow.value = "Trash requires Android 11 or newer"
+            // Android 10 fallback: attempt direct delete via MediaStore
+            viewModelScope.launch {
+                localMediaRepository.deleteLocalItemsPermanentlyDirectly(listOf(item))
+                    .onSuccess {
+                        localMediaRepository.notifyPermissionChanged()
+                        snackbarFlow.value = "Deleted from device"
+                    }
+                    .onFailure { err ->
+                        snackbarFlow.value = err.localizedMessage ?: "Unable to delete file"
+                    }
+            }
         }
     }
 
@@ -330,6 +504,20 @@ class ViewerViewModel(
         snackbarFlow.value = null
     }
 
+    private data class SearchViewerEnrichment(
+        val locationsById: Map<String, com.luminagallery.drive.data.local.entity.PhotoLocationEntity>,
+        val annotationsById: Map<String, com.luminagallery.drive.data.local.entity.MediaAnnotationEntity>,
+        val ocrById: Map<String, com.luminagallery.drive.data.local.entity.PhotoOcrEntity>,
+        val excludedIds: Set<String>
+    )
+
+    private data class ViewerDialogEvents(
+        val pendingShare: Pair<List<Uri>, String>?,
+        val pendingTrash: IntentSender?,
+        val pendingFavorite: IntentSender?,
+        val snackbarMessage: String?
+    )
+
     private data class ViewerOverlay(
         val isExporting: Boolean,
         val activeDrivePath: String,
@@ -337,6 +525,7 @@ class ViewerViewModel(
         val showExifSheet: Boolean,
         val pendingShare: Pair<List<Uri>, String>?,
         val pendingTrash: IntentSender?,
+        val pendingFavorite: IntentSender?,
         val snackbarMessage: String?
     )
 

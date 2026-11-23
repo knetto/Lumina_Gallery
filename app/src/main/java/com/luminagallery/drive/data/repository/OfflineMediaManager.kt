@@ -39,15 +39,18 @@ class OfflineMediaManager(
     val offlineItemsFlow: StateFlow<List<OfflinePinnedEntity>> = extrasDao.observeAllOfflineItems()
         .map { list ->
             val validMap = HashMap<String, String>(list.size)
+            val validList = ArrayList<OfflinePinnedEntity>(list.size)
             for (entry in list) {
-                if (File(entry.localFilePath).exists()) {
+                val file = File(entry.localFilePath)
+                if (file.exists() && file.length() > 0L) {
                     validMap[entry.itemId] = entry.localFilePath
+                    validList.add(entry)
                 }
             }
             pathByItemId = validMap
-            list
+            validList
         }
-        .stateIn(scope, SharingStarted.Eagerly, emptyList())
+        .stateIn(scope, SharingStarted.WhileSubscribed(5_000L), emptyList())
 
     val offlineItemIdsFlow: Flow<Set<String>> = offlineItemsFlow.map { list ->
         list.mapTo(HashSet()) { it.itemId }
@@ -73,11 +76,26 @@ class OfflineMediaManager(
                 val ext = item.name.substringAfterLast('.', "").take(8).filter { it.isLetterOrDigit() }
                 val safeId = item.id.replace(Regex("[^A-Za-z0-9_-]"), "_")
                 val targetFile = File(offlineDir, if (ext.isNotEmpty()) "$safeId.$ext" else safeId)
+                val partFile = File(offlineDir, "${targetFile.name}.part")
+                if (partFile.exists()) partFile.delete()
 
-                driveApi.downloadFile(item.id).use { body ->
-                    FileOutputStream(targetFile).use { out ->
-                        body.byteStream().copyTo(out, 32 * 1024)
+                try {
+                    driveApi.downloadFile(item.id).use { body ->
+                        FileOutputStream(partFile).use { out ->
+                            body.byteStream().copyTo(out, 32 * 1024)
+                        }
                     }
+                    if (partFile.length() <= 0L) {
+                        throw java.io.IOException("Downloaded offline file was empty")
+                    }
+                    if (targetFile.exists()) targetFile.delete()
+                    if (!partFile.renameTo(targetFile)) {
+                        partFile.copyTo(targetFile, overwrite = true)
+                        partFile.delete()
+                    }
+                } catch (e: Exception) {
+                    runCatching { partFile.delete() }
+                    throw e
                 }
 
                 extrasDao.upsertOfflineItem(

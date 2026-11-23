@@ -15,6 +15,8 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -89,6 +91,7 @@ import kotlinx.coroutines.launch
  *  - Full-width tactile primary CTA + spacious secondary actions (never cramped!)
  *  - Silky 120Hz animated progress bar & SHA-1 integrity verification feedback
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun AppUpdateDialogHost(
     appUpdateManager: AppUpdateManager
@@ -234,10 +237,10 @@ fun AppUpdateDialogHost(
 
                                         Spacer(Modifier.height(8.dp))
 
-                                        // Clean metadata pill strip: #commit · size · date
-                                        Row(
-                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                            verticalAlignment = Alignment.CenterVertically
+                                        // Clean metadata pill strip: #commit · size · date (wraps cleanly at large font scales)
+                                        FlowRow(
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                                            verticalArrangement = Arrangement.spacedBy(6.dp)
                                         ) {
                                             MetaPill(
                                                 text = "#${s.update.shortSha}",
@@ -265,9 +268,7 @@ fun AppUpdateDialogHost(
                                         Button(
                                             onClick = {
                                                 haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                                scope.launch {
-                                                    appUpdateManager.downloadAndInstallUpdate(context, s.update)
-                                                }
+                                                appUpdateManager.startDownloadAndInstall(context, s.update)
                                             },
                                             shape = RoundedCornerShape(18.dp),
                                             contentPadding = ButtonDefaults.ContentPadding,
@@ -410,7 +411,6 @@ fun AppUpdateDialogHost(
                                                     fontFeatureSettings = "tnum",
                                                     color = primary
                                                 ),
-                                                modifier = Modifier.width(42.dp),
                                                 textAlign = TextAlign.End
                                             )
                                         }
@@ -433,14 +433,27 @@ fun AppUpdateDialogHost(
                                                     modifier = Modifier.size(16.dp)
                                                 )
                                                 Text(
-                                                    text = "SHA-1 integrity verified automatically before install",
+                                                    text = "APK signature & checksum verified before install",
                                                     style = MaterialTheme.typography.labelSmall,
                                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                                 )
                                             }
                                         }
 
-                                        Spacer(Modifier.height(6.dp))
+                                        Spacer(Modifier.height(10.dp))
+
+                                        TextButton(
+                                            onClick = {
+                                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                appUpdateManager.cancelDownload()
+                                            },
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            Text(
+                                                text = "Cancel download",
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
                                     }
                                 }
 
@@ -599,9 +612,7 @@ fun AppUpdateDialogHost(
                                             Button(
                                                 onClick = {
                                                     haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                                    scope.launch {
-                                                        appUpdateManager.downloadAndInstallUpdate(context, s.update)
-                                                    }
+                                                    appUpdateManager.startDownloadAndInstall(context, s.update)
                                                 },
                                                 shape = RoundedCornerShape(18.dp),
                                                 modifier = Modifier

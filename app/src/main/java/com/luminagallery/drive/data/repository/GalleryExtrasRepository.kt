@@ -1,6 +1,8 @@
 package com.luminagallery.drive.data.repository
 
+import android.content.IntentSender
 import androidx.compose.runtime.Immutable
+import androidx.room.withTransaction
 import com.luminagallery.drive.data.local.GalleryDatabase
 import com.luminagallery.drive.data.local.HiddenLockedFolderManager
 import com.luminagallery.drive.data.local.LocalMediaRepository
@@ -21,10 +23,13 @@ import com.luminagallery.drive.domain.model.GeoTaggedMediaItem
 import com.luminagallery.drive.domain.model.LocationPhotoGroup
 import com.luminagallery.drive.domain.model.MediaItem
 import com.luminagallery.drive.domain.model.StoryCategory
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -55,14 +60,19 @@ data class LocationScanProgress(
  * (Photo Journals, Trips from Locations, and Monthly / Highlight Memories).
  */
 class GalleryExtrasRepository(
-    database: GalleryDatabase,
+    private val database: GalleryDatabase,
     private val localMediaRepository: LocalMediaRepository,
     private val hiddenFolderManager: HiddenLockedFolderManager
 ) {
     private val extrasDao = database.galleryExtrasDao()
+    private val repoIoScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val locationScanMutex = Mutex()
     private val _locationProgressFlow = MutableStateFlow(LocationScanProgress(isScanning = true))
     val locationProgressFlow: StateFlow<LocationScanProgress> = _locationProgressFlow.asStateFlow()
+
+    // Tracks local items explicitly unfavorited inside Lumina when MediaStore IS_FAVORITE cannot be
+    // cleared immediately without a system prompt, so unfavoriting system-favorited photos always works.
+    private val suppressedSystemFavoriteIds = MutableStateFlow<Set<String>>(emptySet())
 
     @Volatile
     var latestFavoriteItemIds: Set<String> = emptySet()
@@ -70,20 +80,31 @@ class GalleryExtrasRepository(
 
     val favoriteItemIdsFlow: Flow<Set<String>> = combine(
         extrasDao.observeFavoriteItemIds(),
-        localMediaRepository.observeSystemFavoriteLocalIds()
-    ) { dbFavs, sysFavs ->
-        (dbFavs + sysFavs).toSet().also { latestFavoriteItemIds = it }
+        localMediaRepository.observeSystemFavoriteLocalIds(),
+        suppressedSystemFavoriteIds
+    ) { dbFavs, sysFavs, suppressed ->
+        ((dbFavs + sysFavs) - suppressed).toSet().also { latestFavoriteItemIds = it }
     }.flowOn(Dispatchers.Default)
+
+    @Volatile
+    var latestHiddenAlbumIds: Set<String> = emptySet()
+        private set
 
     @Volatile
     var latestLockedAlbumIds: Set<String> = emptySet()
         private set
 
     val hiddenAlbumIdsFlow: Flow<Set<String>> = extrasDao.observeHiddenAlbumIds()
-        .map { it.toSet() }
+        .map { list -> list.toSet().also { latestHiddenAlbumIds = it } }
 
     val lockedAlbumIdsFlow: Flow<Set<String>> = extrasDao.observeLockedAlbumIds()
         .map { list -> list.toSet().also { latestLockedAlbumIds = it } }
+
+    /** Combined set of album IDs that must never leak into Pictures, Search, Stories, Clean Out, or Widget. */
+    val excludedAlbumIdsFlow: Flow<Set<String>> = combine(
+        lockedAlbumIdsFlow,
+        hiddenAlbumIdsFlow
+    ) { locked, hidden -> locked + hidden }
 
     val favoriteStoryIdsFlow: Flow<Set<String>> = extrasDao.observeFavoriteStoryIds()
         .map { it.toSet() }
@@ -153,9 +174,20 @@ class GalleryExtrasRepository(
         extrasDao.deleteCustomAlbumCover(albumId)
     }
 
+    /** Fire-and-forget annotation save on repository scope so dismissing the EXIF sheet never cancels writes. */
+    fun saveAnnotationAsync(itemId: String, tags: List<String>, note: String) {
+        repoIoScope.launch {
+            runCatching { saveAnnotation(itemId, tags, note) }
+        }
+    }
+
     suspend fun saveAnnotation(itemId: String, tags: List<String>, note: String) =
         withContext(Dispatchers.IO) {
-            val cleanTags = tags.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+            val cleanTags = tags
+                .flatMap { it.split(",") }
+                .map { it.trim().removePrefix("#").trim() }
+                .filter { it.isNotEmpty() }
+                .distinct()
             val cleanNote = note.trim()
             if (cleanTags.isEmpty() && cleanNote.isEmpty()) {
                 extrasDao.deleteAnnotation(itemId)
@@ -199,6 +231,15 @@ class GalleryExtrasRepository(
             }
 
             val cachedMap = extrasDao.getAllCachedLocations().associateByTo(HashMap()) { it.itemId }
+
+            // Prune deleted local items from caches so SQLite tables don't grow unboundedly
+            val activeLocalIds = localItems.mapTo(HashSet(localItems.size)) { it.id }
+            val staleLocationIds = cachedMap.keys.filter { it.startsWith(LocalMediaRepository.LOCAL_ITEM_PREFIX) && it !in activeLocalIds }
+            if (staleLocationIds.isNotEmpty()) {
+                staleLocationIds.chunked(450).forEach { extrasDao.deletePhotoLocations(it) }
+                staleLocationIds.forEach { cachedMap.remove(it) }
+            }
+            pruneDeletedLocalExtras(activeLocalIds)
 
             fun buildProgress(isScanning: Boolean, scanned: Int, total: Int): LocationScanProgress {
                 val byCityKey = LinkedHashMap<String, MutableList<Pair<GeoTaggedMediaItem, PhotoLocationEntity>>>()
@@ -281,13 +322,14 @@ class GalleryExtrasRepository(
                             slice.map { item ->
                                 val latLon = localMediaRepository.readMediaLatLon(item)
                                 if (latLon != null && (latLon.first != 0.0 || latLon.second != 0.0)) {
-                                    val (city, country) = localMediaRepository.resolveCityAndCountry(
+                                    val (city, country, resolved) = localMediaRepository.resolveCityAndCountryWithStatus(
                                         lat = latLon.first,
                                         lon = latLon.second
                                     )
                                     PhotoLocationEntity(
                                         itemId = item.id,
-                                        dateModifiedMs = item.createdTimeEpochMs,
+                                        // Use 0L when offline geocoding failed so it retries automatically once online
+                                        dateModifiedMs = if (resolved) item.createdTimeEpochMs else 0L,
                                         hasLocation = true,
                                         latitude = latLon.first,
                                         longitude = latLon.second,
@@ -322,12 +364,90 @@ class GalleryExtrasRepository(
         }
     }
 
-    suspend fun toggleFavoriteItem(itemId: String, currentlyFavorited: Boolean) =
-        withContext(Dispatchers.IO) {
-            if (currentlyFavorited) {
-                extrasDao.removeFavoriteItem(itemId)
+    private suspend fun pruneDeletedLocalExtras(activeLocalIds: Set<String>) {
+        if (activeLocalIds.isEmpty()) return
+        val staleOcr = extrasDao.getAllOcrEntries()
+            .map { it.itemId }
+            .filter { it.startsWith(LocalMediaRepository.LOCAL_ITEM_PREFIX) && it !in activeLocalIds }
+        if (staleOcr.isNotEmpty()) {
+            staleOcr.chunked(450).forEach { extrasDao.deleteOcrEntries(it) }
+        }
+        val staleFavs = extrasDao.getAllFavoriteItemIds()
+            .filter { it.startsWith(LocalMediaRepository.LOCAL_ITEM_PREFIX) && it !in activeLocalIds }
+        if (staleFavs.isNotEmpty()) {
+            staleFavs.chunked(450).forEach { extrasDao.removeFavoriteItems(it) }
+        }
+        val staleIgnored = extrasDao.getAllIgnoredCleanOutIds()
+            .filter { it.startsWith(LocalMediaRepository.LOCAL_ITEM_PREFIX) && it !in activeLocalIds }
+        if (staleIgnored.isNotEmpty()) {
+            staleIgnored.chunked(450).forEach { extrasDao.removeIgnoredCleanOutItems(it) }
+        }
+    }
+
+    /**
+     * Toggles favorite state across both Lumina's Room DB and Android MediaStore `IS_FAVORITE`.
+     * Returns an optional [IntentSender] (Android 11+ `MediaStore.createFavoriteRequest`) when
+     * `MANAGE_MEDIA` isn't granted so the UI can also update the system gallery's favorite bit.
+     */
+    suspend fun toggleFavoriteItem(
+        itemId: String,
+        currentlyFavorited: Boolean,
+        item: MediaItem? = null
+    ): IntentSender? = withContext(Dispatchers.IO) {
+        val desiredFavorite = !currentlyFavorited
+        if (desiredFavorite) {
+            suppressedSystemFavoriteIds.value = suppressedSystemFavoriteIds.value - itemId
+            extrasDao.upsertFavoriteItem(FavoriteItemEntity(itemId, System.currentTimeMillis()))
+        } else {
+            extrasDao.removeFavoriteItem(itemId)
+            suppressedSystemFavoriteIds.value = suppressedSystemFavoriteIds.value + itemId
+        }
+
+        val resolvedItem = item ?: if (itemId.startsWith(LocalMediaRepository.LOCAL_ITEM_PREFIX)) {
+            localMediaRepository.getCachedAllMedia().firstOrNull { it.id == itemId }
+        } else null
+
+        if (resolvedItem != null && resolvedItem.isLocal) {
+            val updatedDirectly = if (localMediaRepository.canManageMediaDirectly()) {
+                localMediaRepository.setLocalFavoriteDirectly(resolvedItem, desiredFavorite)
             } else {
-                extrasDao.upsertFavoriteItem(FavoriteItemEntity(itemId, System.currentTimeMillis()))
+                false
+            }
+            if (updatedDirectly) {
+                localMediaRepository.notifyPermissionChanged()
+                return@withContext null
+            }
+            return@withContext localMediaRepository.buildFavoriteIntentSender(resolvedItem, desiredFavorite)
+        }
+        null
+    }
+
+    /** Migrates custom album cover, view prefs, hidden/locked state, and layout when a local album is renamed. */
+    suspend fun migrateLocalAlbumMetadata(oldAlbumId: String, newAlbumId: String) =
+        withContext(Dispatchers.IO) {
+            if (oldAlbumId.isBlank() || newAlbumId.isBlank() || oldAlbumId == newAlbumId) return@withContext
+            val collectionDao = database.albumCollectionDao()
+            database.withTransaction {
+                extrasDao.getAllCustomAlbumCovers().firstOrNull { it.albumId == oldAlbumId }?.let { cover ->
+                    extrasDao.deleteCustomAlbumCover(oldAlbumId)
+                    extrasDao.upsertCustomAlbumCover(cover.copy(albumId = newAlbumId))
+                }
+                extrasDao.getAlbumViewPref(oldAlbumId)?.let { pref ->
+                    extrasDao.deleteAlbumViewPref(oldAlbumId)
+                    extrasDao.upsertAlbumViewPref(pref.copy(albumId = newAlbumId))
+                }
+                if (oldAlbumId in extrasDao.getAllHiddenAlbumIds()) {
+                    extrasDao.removeHiddenAlbum(oldAlbumId)
+                    extrasDao.upsertHiddenAlbum(HiddenAlbumEntity(newAlbumId, System.currentTimeMillis()))
+                }
+                extrasDao.getLockedAlbum(oldAlbumId)?.let { locked ->
+                    extrasDao.removeLockedAlbum(oldAlbumId)
+                    extrasDao.upsertLockedAlbum(locked.copy(albumId = newAlbumId))
+                }
+                collectionDao.getAllLayouts().firstOrNull { it.itemId == oldAlbumId }?.let { layout ->
+                    collectionDao.deleteLayout(oldAlbumId)
+                    collectionDao.upsertLayout(layout.copy(itemId = newAlbumId))
+                }
             }
         }
 

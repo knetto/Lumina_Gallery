@@ -25,28 +25,10 @@ interface PinnedRootDao {
             p.folderId,
             p.displayName,
             COALESCE(f.modifiedTimeEpochMs, p.pinnedAtEpochMs) AS modifiedTimeEpochMs,
-            (SELECT COUNT(*) FROM drive_items c
-             WHERE c.parentId = p.folderId AND c.isFolder = 1 AND c.trashed = 0) AS subfolderCount,
-            (SELECT COUNT(*) FROM drive_items m
-             WHERE m.parentId = p.folderId AND m.isFolder = 0 AND m.trashed = 0) AS mediaCount,
-            COALESCE(
-                (SELECT m.thumbnailLink FROM drive_items m
-                 WHERE m.parentId = p.folderId AND m.isFolder = 0 AND m.trashed = 0
-                 ORDER BY m.createdTimeEpochMs DESC LIMIT 1),
-                (SELECT m2.thumbnailLink FROM drive_items m2
-                 INNER JOIN drive_items sf ON m2.parentId = sf.id
-                 WHERE sf.parentId = p.folderId AND m2.isFolder = 0 AND m2.trashed = 0
-                 ORDER BY m2.createdTimeEpochMs DESC LIMIT 1)
-            ) AS coverThumbnailLink,
-            COALESCE(
-                (SELECT m.id FROM drive_items m
-                 WHERE m.parentId = p.folderId AND m.isFolder = 0 AND m.trashed = 0
-                 ORDER BY m.createdTimeEpochMs DESC LIMIT 1),
-                (SELECT m2.id FROM drive_items m2
-                 INNER JOIN drive_items sf ON m2.parentId = sf.id
-                 WHERE sf.parentId = p.folderId AND m2.isFolder = 0 AND m2.trashed = 0
-                 ORDER BY m2.createdTimeEpochMs DESC LIMIT 1)
-            ) AS coverItemId
+            0 AS subfolderCount,
+            0 AS mediaCount,
+            NULL AS coverThumbnailLink,
+            NULL AS coverItemId
         FROM pinned_roots p
         LEFT JOIN drive_items f ON f.id = p.folderId
         ORDER BY p.sortOrder ASC, p.pinnedAtEpochMs ASC

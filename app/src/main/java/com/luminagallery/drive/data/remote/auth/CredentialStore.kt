@@ -37,27 +37,41 @@ class CredentialStore(
     private val context: Context,
     private val json: Json
 ) {
-    private val encryptedPrefs: SharedPreferences by lazy {
-        val masterKey = MasterKey.Builder(context)
-            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-            .build()
-        EncryptedSharedPreferences.create(
-            context,
-            PREFS_FILE_NAME,
-            masterKey,
-            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-        )
+    private val encryptedPrefs: SharedPreferences? by lazy {
+        createEncryptedPrefsWithRecovery()
+    }
+
+    private fun createEncryptedPrefsWithRecovery(): SharedPreferences? {
+        fun build(): SharedPreferences {
+            val masterKey = MasterKey.Builder(context)
+                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                .build()
+            return EncryptedSharedPreferences.create(
+                context,
+                PREFS_FILE_NAME,
+                masterKey,
+                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+            )
+        }
+        return runCatching { build() }.getOrElse {
+            // Android Keystore corruption (e.g. after backup restore / OS update) can throw
+            // AEADBadTagException / KeyStoreException; delete corrupted file and recreate cleanly
+            // instead of permanently crash-looping cold startup.
+            runCatching { context.deleteSharedPreferences(PREFS_FILE_NAME) }
+            runCatching { build() }.getOrNull()
+        }
     }
 
     private val _state = MutableStateFlow(resolveInitialState())
     val state: StateFlow<ServiceAccountState> = _state.asStateFlow()
 
     fun isGoogleSignInActive(): Boolean =
-        encryptedPrefs.getBoolean(KEY_GOOGLE_SIGN_IN_ACTIVE, false)
+        runCatching { encryptedPrefs?.getBoolean(KEY_GOOGLE_SIGN_IN_ACTIVE, false) == true }
+            .getOrDefault(false)
 
     fun readRawCredentialsJson(): String? {
-        val stored = encryptedPrefs.getString(KEY_CREDENTIALS_JSON, null)
+        val stored = runCatching { encryptedPrefs?.getString(KEY_CREDENTIALS_JSON, null) }.getOrNull()
         if (!stored.isNullOrBlank()) return stored
         return readBundledAssetsJson()
     }
@@ -66,11 +80,13 @@ class CredentialStore(
         withContext(Dispatchers.IO) {
             val cleanEmail = email.ifBlank { "Google Account" }
             val label = displayName?.takeIf { it.isNotBlank() } ?: "Google Drive"
-            encryptedPrefs.edit()
-                .putBoolean(KEY_GOOGLE_SIGN_IN_ACTIVE, true)
-                .putString(KEY_GOOGLE_EMAIL, cleanEmail)
-                .putString(KEY_GOOGLE_DISPLAY_NAME, label)
-                .apply()
+            runCatching {
+                encryptedPrefs?.edit()
+                    ?.putBoolean(KEY_GOOGLE_SIGN_IN_ACTIVE, true)
+                    ?.putString(KEY_GOOGLE_EMAIL, cleanEmail)
+                    ?.putString(KEY_GOOGLE_DISPLAY_NAME, label)
+                    ?.apply()
+            }
 
             _state.value = ServiceAccountState.Configured(
                 clientEmail = cleanEmail,
@@ -80,11 +96,13 @@ class CredentialStore(
         }
 
     suspend fun clearGoogleSignInSession() = withContext(Dispatchers.IO) {
-        encryptedPrefs.edit()
-            .remove(KEY_GOOGLE_SIGN_IN_ACTIVE)
-            .remove(KEY_GOOGLE_EMAIL)
-            .remove(KEY_GOOGLE_DISPLAY_NAME)
-            .apply()
+        runCatching {
+            encryptedPrefs?.edit()
+                ?.remove(KEY_GOOGLE_SIGN_IN_ACTIVE)
+                ?.remove(KEY_GOOGLE_EMAIL)
+                ?.remove(KEY_GOOGLE_DISPLAY_NAME)
+                ?.apply()
+        }
         _state.value = resolveInitialState()
     }
 
@@ -96,7 +114,9 @@ class CredentialStore(
                 } ?: error("Unable to open the selected file.")
 
                 val parsed = validatePayload(rawJson)
-                encryptedPrefs.edit()
+                val prefs = encryptedPrefs
+                    ?: error("Secure credential storage is unavailable on this device.")
+                prefs.edit()
                     .putBoolean(KEY_GOOGLE_SIGN_IN_ACTIVE, false)
                     .putString(KEY_CREDENTIALS_JSON, rawJson)
                     .apply()
@@ -112,19 +132,22 @@ class CredentialStore(
         }
 
     suspend fun clearImportedCredentials() = withContext(Dispatchers.IO) {
-        encryptedPrefs.edit()
-            .remove(KEY_CREDENTIALS_JSON)
-            .remove(KEY_GOOGLE_SIGN_IN_ACTIVE)
-            .remove(KEY_GOOGLE_EMAIL)
-            .remove(KEY_GOOGLE_DISPLAY_NAME)
-            .apply()
+        runCatching {
+            encryptedPrefs?.edit()
+                ?.remove(KEY_CREDENTIALS_JSON)
+                ?.remove(KEY_GOOGLE_SIGN_IN_ACTIVE)
+                ?.remove(KEY_GOOGLE_EMAIL)
+                ?.remove(KEY_GOOGLE_DISPLAY_NAME)
+                ?.apply()
+        }
         _state.value = resolveInitialState()
     }
 
     private fun resolveInitialState(): ServiceAccountState {
-        if (encryptedPrefs.getBoolean(KEY_GOOGLE_SIGN_IN_ACTIVE, false)) {
-            val email = encryptedPrefs.getString(KEY_GOOGLE_EMAIL, null) ?: "Google Account"
-            val name = encryptedPrefs.getString(KEY_GOOGLE_DISPLAY_NAME, null) ?: "Google Drive"
+        val prefs = encryptedPrefs
+        if (prefs != null && runCatching { prefs.getBoolean(KEY_GOOGLE_SIGN_IN_ACTIVE, false) }.getOrDefault(false)) {
+            val email = runCatching { prefs.getString(KEY_GOOGLE_EMAIL, null) }.getOrNull() ?: "Google Account"
+            val name = runCatching { prefs.getString(KEY_GOOGLE_DISPLAY_NAME, null) }.getOrNull() ?: "Google Drive"
             return ServiceAccountState.Configured(
                 clientEmail = email,
                 projectId = name,
@@ -132,7 +155,7 @@ class CredentialStore(
             )
         }
 
-        val stored = encryptedPrefs.getString(KEY_CREDENTIALS_JSON, null)
+        val stored = runCatching { prefs?.getString(KEY_CREDENTIALS_JSON, null) }.getOrNull()
         if (!stored.isNullOrBlank()) {
             val parsed = runCatching { validatePayload(stored) }.getOrNull()
             if (parsed != null) {

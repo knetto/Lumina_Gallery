@@ -2,9 +2,7 @@ package com.luminagallery.drive.ui.components
 
 import android.content.Context
 import androidx.compose.animation.AnimatedVisibilityScope
-import androidx.compose.animation.BoundsTransform
 import androidx.compose.animation.EnterExitState
-import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.Transition
 import androidx.compose.animation.core.animateFloat
@@ -145,15 +143,6 @@ object OneUiMotion {
         dampingRatio = 0.86f,
         stiffness = 380f
     )
-
-    /** Silky 120Hz spring for zooming a photo straight out of its thumbnail into the Viewer. */
-    @OptIn(ExperimentalSharedTransitionApi::class)
-    val SharedPhotoBoundsTransform = BoundsTransform { _, _ ->
-        spring(
-            dampingRatio = 0.85f,
-            stiffness = 370f
-        )
-    }
 }
 
 /**
@@ -256,6 +245,29 @@ fun BoxScope.OneUiCoverHighlightOverlay(
 }
 
 @Immutable
+private data class MorphRoundRectShape(
+    val left: Float,
+    val top: Float,
+    val right: Float,
+    val bottom: Float,
+    val radius: Float
+) : Shape {
+    override fun createOutline(
+        size: Size,
+        layoutDirection: LayoutDirection,
+        density: Density
+    ): Outline = Outline.Rounded(
+        RoundRect(
+            left = left,
+            top = top,
+            right = right,
+            bottom = bottom,
+            cornerRadius = CornerRadius(radius, radius)
+        )
+    )
+}
+
+@Immutable
 data class AlbumCoverMorphInfo(
     val isLocal: Boolean,
     val coverItemId: String,
@@ -282,9 +294,15 @@ class AlbumTransitionOriginTracker {
     var lastTappedMediaItem: MediaItem? = null
         private set
 
-    private val originByKey = HashMap<String, TransformOrigin>(32)
-    private val boundsByKey = HashMap<String, Rect>(128)
-    private val albumCoverByKey = HashMap<String, AlbumCoverMorphInfo>(64)
+    private fun <V> lruMap(maxEntries: Int): LinkedHashMap<String, V> =
+        object : LinkedHashMap<String, V>(64, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, V>?): Boolean =
+                size > maxEntries
+        }
+
+    private val originByKey = lruMap<TransformOrigin>(MAX_TRACKED_ENTRIES)
+    private val boundsByKey = lruMap<Rect>(MAX_TRACKED_ENTRIES)
+    private val albumCoverByKey = lruMap<AlbumCoverMorphInfo>(MAX_TRACKED_ENTRIES)
     private val morphEnabledByEntryId = mutableStateMapOf<String, Boolean>()
 
     private var activeMorphOwnerEntryId: String? = null
@@ -328,7 +346,6 @@ class AlbumTransitionOriginTracker {
         if (info == null) {
             albumCoverByKey.remove(key)
         } else {
-            if (albumCoverByKey.size > 256) albumCoverByKey.clear()
             albumCoverByKey[key] = info
         }
     }
@@ -384,6 +401,14 @@ class AlbumTransitionOriginTracker {
 
     fun recordBounds(key: String, boundsInRoot: Rect, rootWidth: Float, rootHeight: Float, markAsLast: Boolean = false) {
         if (boundsInRoot.width < 4f || boundsInRoot.height < 4f) return
+        val existing = boundsByKey[key]
+        val meaningfullyChanged = existing == null ||
+            kotlin.math.abs(existing.left - boundsInRoot.left) >= 0.5f ||
+            kotlin.math.abs(existing.top - boundsInRoot.top) >= 0.5f ||
+            kotlin.math.abs(existing.right - boundsInRoot.right) >= 0.5f ||
+            kotlin.math.abs(existing.bottom - boundsInRoot.bottom) >= 0.5f
+        if (!meaningfullyChanged && !markAsLast) return
+
         boundsByKey[key] = boundsInRoot
         if (rootWidth > 0f && rootHeight > 0f) {
             val origin = TransformOrigin(
@@ -398,6 +423,12 @@ class AlbumTransitionOriginTracker {
         } else if (markAsLast) {
             lastBounds = boundsInRoot
         }
+    }
+
+    internal fun trackedBoundsCount(): Int = boundsByKey.size
+
+    companion object {
+        internal const val MAX_TRACKED_ENTRIES = 256
     }
 
     fun originFor(key: String?): TransformOrigin =
@@ -647,21 +678,13 @@ fun AnimatedVisibilityScope.HyperOsRectMorphFrame(
                     spotShadowColor = Color.Black.copy(alpha = 0.45f)
 
                     clip = true
-                    shape = object : Shape {
-                        override fun createOutline(
-                            size: Size,
-                            layoutDirection: LayoutDirection,
-                            density: Density
-                        ): Outline = Outline.Rounded(
-                            RoundRect(
-                                left = localLeft,
-                                top = localTop,
-                                right = localLeft + localW,
-                                bottom = localTop + localH,
-                                cornerRadius = CornerRadius(localRadius, localRadius)
-                            )
-                        )
-                    }
+                    shape = MorphRoundRectShape(
+                        left = localLeft,
+                        top = localTop,
+                        right = localLeft + localW,
+                        bottom = localTop + localH,
+                        radius = localRadius
+                    )
 
                     // Keep the morphing photo or album-with-cover 100% solid throughout the flight
                     // (since the source slot is vacated and the visuals match pixel-for-pixel!).

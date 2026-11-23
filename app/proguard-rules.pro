@@ -30,6 +30,13 @@
 -keepclasseswithmembers class com.luminagallery.drive.data.repository.** {
     kotlinx.serialization.KSerializer serializer(...);
 }
+-keep,includedescriptorclasses class com.luminagallery.drive.data.remote.auth.**$$serializer { *; }
+-keepclassmembers class com.luminagallery.drive.data.remote.auth.** {
+    *** Companion;
+}
+-keepclasseswithmembers class com.luminagallery.drive.data.remote.auth.** {
+    kotlinx.serialization.KSerializer serializer(...);
+}
 
 # Retrofit 2
 -keepattributes Signature, Exceptions, RuntimeVisibleAnnotations, RuntimeVisibleParameterAnnotations
@@ -41,8 +48,9 @@
 -dontwarn retrofit2.KotlinExtensions$*
 
 # Google Auth Library (Service Account JWT / OAuth2) & Play Services Identity
--keep class com.google.auth.** { *; }
--keep class com.google.api.client.** { *; }
+-keep class com.google.auth.oauth2.** { *; }
+-keep class com.google.api.client.json.** { *; }
+-keep class com.google.api.client.http.** { *; }
 -keep class com.google.android.gms.auth.api.identity.** { *; }
 -keep class com.google.android.gms.common.api.Scope { *; }
 -keep class com.google.android.gms.common.api.ApiException { *; }
@@ -55,9 +63,19 @@
 -dontwarn org.bouncycastle.**
 -dontwarn org.openjsse.**
 
-# Media3 / ExoPlayer
--keep class androidx.media3.** { *; }
+# Media3 / ExoPlayer + NextLib FFmpeg extensions
+-keep class androidx.media3.exoplayer.DefaultRenderersFactory { *; }
+-keep class androidx.media3.exoplayer.video.MediaCodecVideoRenderer { *; }
+-keep class androidx.media3.exoplayer.audio.MediaCodecAudioRenderer { *; }
+-keep class androidx.media3.extractor.ts.PsExtractor { *; }
+-keep class androidx.media3.ui.PlayerView { *; }
+-keep class io.github.anilbeesetti.nextlib.media3ext.** { *; }
 -dontwarn androidx.media3.**
+-dontwarn io.github.anilbeesetti.nextlib.**
+
+# MapLibre Native SDK
+-keep class org.maplibre.android.** { *; }
+-dontwarn org.maplibre.**
 
 # Room
 -keep class * extends androidx.room.RoomDatabase

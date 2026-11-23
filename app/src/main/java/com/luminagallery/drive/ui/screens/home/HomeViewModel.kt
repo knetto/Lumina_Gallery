@@ -37,11 +37,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.distinctUntilChangedBy
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -84,6 +86,7 @@ data class RootPickerUiState(
 data class HomeUiState(
     val selectedTab: MainTab = MainTab.ALBUMS,
     val hasLocalMediaPermission: Boolean = false,
+    val hasPartialMediaPermission: Boolean = false,
     val localPictures: List<MediaItem> = emptyList(),
     val timelineEntries: List<PicturesTimelineEntry> = emptyList(),
     val localAlbums: List<DriveFolder> = emptyList(),
@@ -144,6 +147,7 @@ class HomeViewModel(
     private val storiesActivatedFlow = MutableStateFlow(false)
     private val albumsFilterFlow = MutableStateFlow(AlbumsTabFilter.ALL)
     private val permissionGrantedFlow = MutableStateFlow(localMediaRepository.hasMediaPermission())
+    private val partialPermissionFlow = MutableStateFlow(localMediaRepository.hasPartialMediaPermission())
     private val locationPermVersionFlow = MutableStateFlow(0)
     private val selectedPictureIdsFlow = MutableStateFlow<Set<String>>(emptySet())
     private val forcePictureSelectionFlow = MutableStateFlow(false)
@@ -160,23 +164,28 @@ class HomeViewModel(
     private val locationsFlow = MutableStateFlow<List<LocationPhotoGroup>>(emptyList())
     private val dayLocationsFlow = MutableStateFlow<Map<String, String>>(emptyMap())
 
+    private val showDayLocationsPrefFlow = preferencesManager.preferencesFlow
+        .map { it.showDayLocationHeaders }
+        .distinctUntilChanged()
+
     private val localContentFlow = combine(
-        permissionGrantedFlow,
+        combine(permissionGrantedFlow, partialPermissionFlow) { full, partial -> full to partial },
         combine(
             localMediaRepository.observeAllLocalMedia(),
             dayLocationsFlow,
-            preferencesManager.preferencesFlow,
-            extrasRepository.lockedAlbumIdsFlow
-        ) { pics, dayLocs, prefs, lockedIds ->
-            val visiblePics = if (lockedIds.isEmpty()) pics else pics.filterNot { it.parentId in lockedIds }
-            Triple(visiblePics, dayLocs, prefs.showDayLocationHeaders)
+            showDayLocationsPrefFlow,
+            extrasRepository.excludedAlbumIdsFlow
+        ) { pics, dayLocs, showDayHeaders, excludedIds ->
+            val visiblePics = if (excludedIds.isEmpty()) pics else pics.filterNot { it.parentId in excludedIds }
+            Triple(visiblePics, dayLocs, showDayHeaders)
         },
         localMediaRepository.observeLocalAlbums(),
         organizationRepository.observeGridItems(parentCollectionId = null),
         organizationRepository.observeAllCollections()
-    ) { hasPerm, (pictures, dayLocs, showDayLocations), albums, unifiedItems, allCols ->
+    ) { (hasPerm, hasPartial), (pictures, dayLocs, showDayLocations), albums, unifiedItems, allCols ->
         LocalContent(
             hasPermission = hasPerm,
+            hasPartialPermission = hasPartial,
             pictures = pictures,
             timelineEntries = buildTimelineEntries(
                 items = pictures,
@@ -197,16 +206,25 @@ class HomeViewModel(
                 repository.searchMedia("", null, null, null),
                 locationsFlow,
                 extrasRepository.favoriteStoryIdsFlow,
-                extrasRepository.lockedAlbumIdsFlow
-            ) { localPics, drivePics, locations, favStoryIds, lockedIds ->
-                val allVisible = if (lockedIds.isEmpty()) {
+                extrasRepository.excludedAlbumIdsFlow
+            ) { localPics, drivePics, locations, favStoryIds, excludedIds ->
+                val blockedIds = repository.expandBlockedFolderIds(excludedIds)
+                val allVisible = if (blockedIds.isEmpty()) {
                     localPics + drivePics
                 } else {
-                    (localPics + drivePics).filterNot { it.parentId in lockedIds }
+                    (localPics + drivePics).filterNot { it.parentId in blockedIds }
+                }
+                val visibleLocationGroups = if (blockedIds.isEmpty()) {
+                    locations
+                } else {
+                    locations.mapNotNull { group ->
+                        val items = group.items.filterNot { it.parentId in blockedIds }
+                        if (items.isEmpty()) null else group.copy(items = items)
+                    }
                 }
                 extrasRepository.generateStories(
                     allMedia = allVisible.sortedByDescending { it.createdTimeEpochMs },
-                    locations = locations,
+                    locations = visibleLocationGroups,
                     favoriteStoryIds = favStoryIds
                 )
             }.flowOn(Dispatchers.Default)
@@ -263,9 +281,21 @@ class HomeViewModel(
         )
     }
 
+    private val homePrefsSliceFlow = preferencesManager.preferencesFlow
+        .map { prefs ->
+            HomePrefsSlice(
+                gridColumns = prefs.gridColumns,
+                albumSortMode = prefs.albumSortMode,
+                showCloudBadges = prefs.showCloudBadges,
+                lockHiddenAlbums = prefs.lockHiddenAlbums,
+                wifiOnlyHighRes = prefs.wifiOnlyHighRes
+            )
+        }
+        .distinctUntilChanged()
+
     private val miscOverlayFlow = combine(
         combine(selectedTabFlow, albumsFilterFlow) { tab, filter -> tab to filter },
-        preferencesManager.preferencesFlow,
+        homePrefsSliceFlow,
         setupErrorFlow,
         snackbarFlow,
         rootPickerFlow
@@ -309,6 +339,7 @@ class HomeViewModel(
         HomeUiState(
             selectedTab = misc.selectedTab,
             hasLocalMediaPermission = local.hasPermission,
+            hasPartialMediaPermission = local.hasPartialPermission,
             localPictures = local.pictures,
             timelineEntries = local.timelineEntries,
             localAlbums = local.albums,
@@ -347,6 +378,7 @@ class HomeViewModel(
         started = SharingStarted.WhileSubscribed(5_000L),
         initialValue = HomeUiState(
             hasLocalMediaPermission = localMediaRepository.hasMediaPermission(),
+            hasPartialMediaPermission = localMediaRepository.hasPartialMediaPermission(),
             serviceAccountState = credentialStore.state.value,
             networkState = networkMonitor.networkState.value
         )
@@ -395,8 +427,8 @@ class HomeViewModel(
                 }
                 .collect { (localPics, _) ->
                     extrasRepository.syncLocationsIndex(localPics)
-                    // Light offline OCR warm-up prioritizing Screenshots/Documents so Search is instant
-                    ocrIndexerManager.syncOcrIndex(localPics, maxNewItemsPerRun = 60)
+                    // Lightweight warm-up only; bulk indexing runs in charging-constrained MediaIndexWorker
+                    ocrIndexerManager.syncOcrIndex(localPics, maxNewItemsPerRun = 20)
                 }
         }
     }
@@ -514,6 +546,7 @@ class HomeViewModel(
     fun onMediaPermissionResult() {
         val granted = localMediaRepository.hasMediaPermission()
         permissionGrantedFlow.value = granted
+        partialPermissionFlow.value = localMediaRepository.hasPartialMediaPermission()
         locationPermVersionFlow.update { it + 1 }
         localMediaRepository.notifyPermissionChanged()
     }
@@ -531,6 +564,13 @@ class HomeViewModel(
     fun setPictureSelected(itemId: String, selected: Boolean) {
         selectedPictureIdsFlow.update { current ->
             if (selected) current + itemId else current - itemId
+        }
+    }
+
+    fun setPicturesSelectedRange(ids: Set<String>, selected: Boolean) {
+        if (ids.isEmpty()) return
+        selectedPictureIdsFlow.update { current ->
+            if (selected) current + ids else current - ids
         }
     }
 
@@ -560,21 +600,26 @@ class HomeViewModel(
     fun requestTrashSelectedPictures() {
         val selected = uiState.value.localPictures.filter { it.id in selectedPictureIdsFlow.value }
         if (selected.isEmpty()) return
-        if (localMediaRepository.canManageMediaDirectly()) {
+        val supportsTrash = localMediaRepository.supportsMediaStoreTrash()
+        if (localMediaRepository.canDeleteDirectlyWithoutDialog()) {
             viewModelScope.launch {
                 localMediaRepository.trashLocalItemsDirectly(selected, toTrash = true)
                     .onSuccess { count ->
                         selectedPictureIdsFlow.value = emptySet()
                         forcePictureSelectionFlow.value = false
                         localMediaRepository.notifyPermissionChanged()
-                        snackbarFlow.value = if (count == 1) "Moved to trash" else "Moved $count items to trash"
+                        snackbarFlow.value = if (!supportsTrash) {
+                            if (count == 1) "Deleted permanently" else "Deleted $count items permanently"
+                        } else {
+                            if (count == 1) "Moved to trash" else "Moved $count items to trash"
+                        }
                     }
-                    .onFailure {
+                    .onFailure { err ->
                         val sender = localMediaRepository.buildTrashIntentSender(selected)
                         if (sender != null) {
                             pendingTrashFlow.value = sender
                         } else {
-                            snackbarFlow.value = "Move to Trash requires Android 11 or newer"
+                            snackbarFlow.value = err.localizedMessage ?: "Unable to delete selected items"
                         }
                     }
             }
@@ -584,7 +629,7 @@ class HomeViewModel(
         if (sender != null) {
             pendingTrashFlow.value = sender
         } else {
-            snackbarFlow.value = "Move to Trash requires Android 11 or newer"
+            snackbarFlow.value = "Unable to move items to trash"
         }
     }
 
@@ -908,11 +953,20 @@ class HomeViewModel(
 
     private data class LocalContent(
         val hasPermission: Boolean,
+        val hasPartialPermission: Boolean,
         val pictures: List<MediaItem>,
         val timelineEntries: List<PicturesTimelineEntry>,
         val albums: List<DriveFolder>,
         val unifiedGridItems: List<AlbumGridItem>,
         val allCollections: List<AlbumCollectionEntity>
+    )
+
+    private data class HomePrefsSlice(
+        val gridColumns: Int,
+        val albumSortMode: AlbumSortMode,
+        val showCloudBadges: Boolean,
+        val lockHiddenAlbums: Boolean,
+        val wifiOnlyHighRes: Boolean
     )
 
     private data class ExtrasBundle(

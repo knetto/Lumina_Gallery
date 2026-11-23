@@ -3,6 +3,7 @@ package com.luminagallery.drive.ui.components
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
+import android.view.Window
 import android.view.WindowManager
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
@@ -11,6 +12,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
+import java.util.WeakHashMap
 
 /**
  * Biometric & Device Credential (fingerprint / face / PIN / pattern) helper for locking
@@ -88,26 +90,60 @@ object BiometricLockHelper {
 }
 
 /**
+ * Reference-counted tracker for `FLAG_SECURE` per [Window] so overlapping protected screens
+ * (e.g. a locked `FolderScreen` beneath `ViewerScreen` or `PhotoEditorScreen`) never strip
+ * screenshot protection from the parent screen when a child screen closes.
+ */
+object SecureWindowCounter {
+    private val lock = Any()
+    private val counts = WeakHashMap<Any, Int>()
+
+    fun acquire(token: Any): Int = synchronized(lock) {
+        val next = (counts[token] ?: 0) + 1
+        counts[token] = next
+        next
+    }
+
+    fun release(token: Any): Int = synchronized(lock) {
+        val prev = counts[token] ?: 0
+        val next = (prev - 1).coerceAtLeast(0)
+        if (next == 0) {
+            counts.remove(token)
+        } else {
+            counts[token] = next
+        }
+        next
+    }
+
+    fun currentCount(token: Any): Int = synchronized(lock) { counts[token] ?: 0 }
+}
+
+/**
  * Applies `WindowManager.LayoutParams.FLAG_SECURE` while [enabled] is true so private/hidden
  * albums cannot be captured via screenshots or Android's Recents app switcher preview.
+ * Uses [SecureWindowCounter] so closing a child screen never strips protection from a parent.
  */
 @Composable
 fun SecureWindowEffect(enabled: Boolean) {
     val context = LocalContext.current
     DisposableEffect(context, enabled) {
-        val window = (context.findActivity())?.window
+        val window: Window? = context.findActivity()?.window
         if (enabled && window != null) {
-            window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            if (SecureWindowCounter.acquire(window) == 1) {
+                window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            }
         }
         onDispose {
             if (enabled && window != null) {
-                window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                if (SecureWindowCounter.release(window) == 0) {
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                }
             }
         }
     }
 }
 
-private tailrec fun Context.findActivity(): Activity? = when (this) {
+internal tailrec fun Context.findActivity(): Activity? = when (this) {
     is Activity -> this
     is ContextWrapper -> baseContext.findActivity()
     else -> null

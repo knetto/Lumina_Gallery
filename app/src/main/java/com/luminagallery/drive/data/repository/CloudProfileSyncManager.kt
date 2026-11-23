@@ -427,10 +427,25 @@ class CloudProfileSyncManager(
                 if (remote != null) {
                     val (fileId, snapshot) = remote
                     cachedAppDataFileId = fileId
-                    val summary = applySnapshotLocally(snapshot)
-                    val now = snapshot.updatedAtEpochMs.takeIf { it > 0L } ?: System.currentTimeMillis()
-                    preferencesManager.setLastCloudProfileSyncMs(now)
-                    preferencesManager.setCloudProfileDirty(false)
+                    val hasPreSignInLocalData = pinnedRootDao.getAll().isNotEmpty() ||
+                        collectionDao.getAllCollections().isNotEmpty() ||
+                        collectionDao.getAllLayouts().isNotEmpty() ||
+                        extrasDao.getAllCustomAlbumCovers().isNotEmpty() ||
+                        extrasDao.getAllAnnotations().isNotEmpty()
+                    val effectiveSnapshot = if (hasPreSignInLocalData) {
+                        mergeSnapshots(local = buildLocalSnapshot(), remote = snapshot, preferLocalConflicts = false)
+                    } else {
+                        snapshot
+                    }
+                    val summary = applySnapshotLocally(effectiveSnapshot)
+                    val now = if (hasPreSignInLocalData) {
+                        uploadSnapshotLocked(effectiveSnapshot)
+                    } else {
+                        val ts = snapshot.updatedAtEpochMs.takeIf { it > 0L } ?: System.currentTimeMillis()
+                        preferencesManager.setLastCloudProfileSyncMs(ts)
+                        preferencesManager.setCloudProfileDirty(false)
+                        ts
+                    }
                     _status.value = CloudProfileSyncStatus(
                         isSyncing = false,
                         lastSyncedEpochMs = now,
@@ -580,8 +595,27 @@ class CloudProfileSyncManager(
                         collectionDao.getAllCollections().isEmpty() &&
                         collectionDao.getAllLayouts().isEmpty()
 
-                    // Auto-restore ONLY if truly fresh install OR another phone pushed a newer snapshot
-                    if (isFreshInstall || snapshot.updatedAtEpochMs > localLastSync + 2_000L) {
+                    val remoteAdvanced = snapshot.updatedAtEpochMs > localLastSync + 2_000L
+                    if (isDirty && remoteAdvanced && !isFreshInstall) {
+                        // Both this device (offline) and another device changed — merge instead of wiping local edits!
+                        val merged = mergeSnapshots(
+                            local = buildLocalSnapshot(),
+                            remote = snapshot,
+                            preferLocalConflicts = true
+                        )
+                        val summary = applySnapshotLocally(merged)
+                        val uploadedAt = uploadSnapshotLocked(merged)
+                        _status.value = _status.value.copy(
+                            isSyncing = false,
+                            lastSyncedEpochMs = uploadedAt,
+                            needsScopeReconsent = false,
+                            lastMessage = buildRestoreMessage(summary),
+                            lastError = null
+                        )
+                        if (summary.restoredPinnedRootsCount > 0) {
+                            scope.launch { runCatching { onPinnedRootsRestored() } }
+                        }
+                    } else if (isFreshInstall || remoteAdvanced) {
                         val summary = applySnapshotLocally(snapshot)
                         preferencesManager.setLastCloudProfileSyncMs(snapshot.updatedAtEpochMs)
                         preferencesManager.setCloudProfileDirty(false)
@@ -1109,52 +1143,108 @@ class CloudProfileSyncManager(
 
         val driveFavs = favIds.filterNot { it.startsWith(LocalMediaRepository.LOCAL_ITEM_PREFIX) }
         val favStories = extrasDao.getAllFavoriteStoryIds()
-        val localMediaById = localMediaRepository.getCachedAllMedia().associateBy { it.id }
+        val localMediaList = localMediaRepository.getCachedAllMedia()
+        val localMediaById = localMediaList.associateBy { it.id }
 
-        val cloudCovers = extrasDao.getAllCustomAlbumCovers().map { cover ->
+        val cloudCovers = mutableListOf<CloudCustomAlbumCover>()
+        val coveredCoverAlbumIds = HashSet<String>()
+        for (cover in extrasDao.getAllCustomAlbumCovers()) {
             val albumIsLocal = LocalMediaRepository.isLocalFolderId(cover.albumId)
             val albumMeta = if (albumIsLocal) localById[cover.albumId] else null
             val mediaMeta = if (cover.isLocal) localMediaById[cover.coverItemId] else null
-            CloudCustomAlbumCover(
-                albumId = cover.albumId,
-                isAlbumLocal = albumIsLocal,
-                albumRelativePath = albumMeta?.relativePath,
-                albumFolderName = albumMeta?.name,
-                coverItemId = cover.coverItemId,
-                coverIsLocal = cover.isLocal,
-                coverFileName = mediaMeta?.name,
-                coverRelativePath = mediaMeta?.storagePath ?: mediaMeta?.relativePath,
-                coverThumbnailLink = if (cover.isLocal) null else cover.coverThumbnailLink,
-                coverIsVideo = cover.isVideo,
-                coverSizeBytes = cover.sizeBytes
+            cloudCovers.add(
+                CloudCustomAlbumCover(
+                    albumId = cover.albumId,
+                    isAlbumLocal = albumIsLocal,
+                    albumRelativePath = albumMeta?.relativePath,
+                    albumFolderName = albumMeta?.name,
+                    coverItemId = cover.coverItemId,
+                    coverIsLocal = cover.isLocal,
+                    coverFileName = mediaMeta?.name,
+                    coverRelativePath = mediaMeta?.storagePath ?: mediaMeta?.relativePath,
+                    coverThumbnailLink = if (cover.isLocal) null else cover.coverThumbnailLink,
+                    coverIsVideo = cover.isVideo,
+                    coverSizeBytes = cover.sizeBytes
+                )
             )
+            coveredCoverAlbumIds.add(cover.albumId)
+        }
+        // Preserve unmatched custom album covers from other devices whose local album/photo isn't on this device
+        for (oldCover in previousPending.customAlbumCovers) {
+            if (oldCover.albumId in coveredCoverAlbumIds) continue
+            val matchedAlbumHere = if (oldCover.isAlbumLocal) {
+                LocalAlbumCloudMatcher.resolveTargetBucketId(
+                    savedBucketId = oldCover.albumId,
+                    savedRelativePath = oldCover.albumRelativePath,
+                    savedFolderName = oldCover.albumFolderName,
+                    localAlbums = localAlbums
+                )
+            } else null
+            if (matchedAlbumHere != null && matchedAlbumHere in coveredCoverAlbumIds) continue
+            if (matchedAlbumHere != null) continue
+            cloudCovers.add(oldCover)
         }
 
-        val cloudAnnotations = extrasDao.getAllAnnotations().map { ann ->
+        val cloudAnnotations = mutableListOf<CloudMediaAnnotation>()
+        val coveredAnnotationIds = HashSet<String>()
+        for (ann in extrasDao.getAllAnnotations()) {
             val isLocal = ann.itemId.startsWith(LocalMediaRepository.LOCAL_ITEM_PREFIX)
             val mediaMeta = if (isLocal) localMediaById[ann.itemId] else null
-            CloudMediaAnnotation(
-                itemId = ann.itemId,
-                isLocal = isLocal,
-                localFileName = mediaMeta?.name,
-                localRelativePath = mediaMeta?.storagePath ?: mediaMeta?.relativePath,
-                localSizeBytes = mediaMeta?.sizeBytes ?: 0L,
-                tagsCsv = ann.tagsCsv,
-                note = ann.note
+            cloudAnnotations.add(
+                CloudMediaAnnotation(
+                    itemId = ann.itemId,
+                    isLocal = isLocal,
+                    localFileName = mediaMeta?.name,
+                    localRelativePath = mediaMeta?.storagePath ?: mediaMeta?.relativePath,
+                    localSizeBytes = mediaMeta?.sizeBytes ?: 0L,
+                    tagsCsv = ann.tagsCsv,
+                    note = ann.note
+                )
             )
+            coveredAnnotationIds.add(ann.itemId)
+        }
+        // Preserve unmatched local photo notes/tags from other devices
+        for (oldAnn in previousPending.mediaAnnotations) {
+            if (oldAnn.itemId in coveredAnnotationIds) continue
+            val matchedHere = LocalAlbumCloudMatcher.resolveTargetLocalMediaItem(
+                savedItemId = oldAnn.itemId,
+                savedFileName = oldAnn.localFileName,
+                savedRelativePath = oldAnn.localRelativePath,
+                savedSizeBytes = oldAnn.localSizeBytes,
+                localMedia = localMediaList
+            )
+            if (matchedHere != null) continue
+            cloudAnnotations.add(oldAnn)
         }
 
-        val cloudViewPrefs = extrasDao.getAllAlbumViewPrefs().map { pref ->
+        val cloudViewPrefs = mutableListOf<CloudAlbumViewPref>()
+        val coveredViewPrefIds = HashSet<String>()
+        for (pref in extrasDao.getAllAlbumViewPrefs()) {
             val isLocal = LocalMediaRepository.isLocalFolderId(pref.albumId)
             val albumMeta = if (isLocal) localById[pref.albumId] else null
-            CloudAlbumViewPref(
-                albumId = pref.albumId,
-                isLocal = isLocal,
-                localRelativePath = albumMeta?.relativePath,
-                localFolderName = albumMeta?.name,
-                sortName = pref.sortName,
-                groupByName = pref.groupByName
+            cloudViewPrefs.add(
+                CloudAlbumViewPref(
+                    albumId = pref.albumId,
+                    isLocal = isLocal,
+                    localRelativePath = albumMeta?.relativePath,
+                    localFolderName = albumMeta?.name,
+                    sortName = pref.sortName,
+                    groupByName = pref.groupByName
+                )
             )
+            coveredViewPrefIds.add(pref.albumId)
+        }
+        // Preserve unmatched local album view preferences from other devices
+        for (oldPref in previousPending.albumViewPrefs) {
+            if (oldPref.albumId in coveredViewPrefIds) continue
+            val matchedHere = LocalAlbumCloudMatcher.resolveTargetBucketId(
+                savedBucketId = oldPref.albumId,
+                savedRelativePath = oldPref.localRelativePath,
+                savedFolderName = oldPref.localFolderName,
+                localAlbums = localAlbums
+            )
+            if (matchedHere != null) continue
+            cloudViewPrefs.add(oldPref)
         }
 
         return CloudProfileSnapshot(
@@ -1660,6 +1750,38 @@ class CloudProfileSyncManager(
     companion object {
         private const val PROFILE_FILE_NAME = "lumina_profile_v1.json"
         private const val AUTO_BACKUP_DEBOUNCE_MS = 3_500L
+
+        internal fun mergeSnapshots(
+            local: CloudProfileSnapshot,
+            remote: CloudProfileSnapshot,
+            preferLocalConflicts: Boolean
+        ): CloudProfileSnapshot {
+            val primary = if (preferLocalConflicts) local else remote
+            val secondary = if (preferLocalConflicts) remote else local
+
+            fun <T, K> unionByKey(first: List<T>, second: List<T>, keyOf: (T) -> K): List<T> {
+                val map = LinkedHashMap<K, T>(first.size + second.size)
+                for (item in second) map[keyOf(item)] = item
+                for (item in first) map[keyOf(item)] = item
+                return map.values.toList()
+            }
+
+            return CloudProfileSnapshot(
+                schemaVersion = CloudProfileSnapshot.CURRENT_SCHEMA_VERSION,
+                updatedAtEpochMs = System.currentTimeMillis(),
+                preferences = primary.preferences,
+                pinnedDriveRoots = unionByKey(primary.pinnedDriveRoots, secondary.pinnedDriveRoots) { it.folderId },
+                collections = unionByKey(primary.collections, secondary.collections) { it.id },
+                layouts = unionByKey(primary.layouts, secondary.layouts) { it.itemId },
+                hiddenAlbums = unionByKey(primary.hiddenAlbums, secondary.hiddenAlbums) { it.albumId },
+                lockedAlbums = unionByKey(primary.lockedAlbums, secondary.lockedAlbums) { it.albumId },
+                driveFavoriteItemIds = (primary.driveFavoriteItemIds + secondary.driveFavoriteItemIds).distinct(),
+                favoriteStoryIds = (primary.favoriteStoryIds + secondary.favoriteStoryIds).distinct(),
+                customAlbumCovers = unionByKey(primary.customAlbumCovers, secondary.customAlbumCovers) { it.albumId },
+                mediaAnnotations = unionByKey(primary.mediaAnnotations, secondary.mediaAnnotations) { it.itemId },
+                albumViewPrefs = unionByKey(primary.albumViewPrefs, secondary.albumViewPrefs) { it.albumId }
+            )
+        }
 
         internal fun isScopeDeniedErrorBody(errorBody: String): Boolean {
             if (errorBody.isBlank()) return false

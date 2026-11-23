@@ -1,10 +1,14 @@
 package com.luminagallery.drive
 
+import android.media.MediaCodec
+import android.media.MediaExtractor
 import androidx.compose.ui.geometry.Rect
 import com.google.android.gms.common.api.CommonStatusCodes
 import com.luminagallery.drive.data.local.HiddenLockedFolderManager
+import com.luminagallery.drive.data.local.LocalMediaRepository
 import com.luminagallery.drive.data.remote.DriveScopes
 import com.luminagallery.drive.data.remote.auth.GoogleAuthHelper
+import com.luminagallery.drive.data.remote.dto.DriveFileDto
 import com.luminagallery.drive.data.repository.CloudAlbumCollection
 import com.luminagallery.drive.data.repository.CloudAlbumLayout
 import com.luminagallery.drive.data.repository.CloudAlbumViewPref
@@ -17,9 +21,13 @@ import com.luminagallery.drive.data.repository.CloudProfileSnapshot
 import com.luminagallery.drive.data.repository.CloudProfileSyncManager
 import com.luminagallery.drive.data.repository.CollageLayoutMath
 import com.luminagallery.drive.data.repository.CollageLayoutMode
+import com.luminagallery.drive.data.repository.DriveMapper
 import com.luminagallery.drive.data.repository.LocalAlbumCloudMatcher
+import com.luminagallery.drive.data.repository.LocalFileOperationsManager
 import com.luminagallery.drive.data.repository.MediaExportManager
 import com.luminagallery.drive.data.repository.OcrIndexerManager
+import com.luminagallery.drive.data.repository.VideoFormatSupport
+import com.luminagallery.drive.data.repository.VideoTrimmer
 import com.luminagallery.drive.domain.model.AlbumGridItem
 import com.luminagallery.drive.domain.model.DriveFolder
 import com.luminagallery.drive.domain.model.ExifMetadata
@@ -27,6 +35,7 @@ import com.luminagallery.drive.domain.model.MediaItem
 import com.luminagallery.drive.domain.model.MediaType
 import com.luminagallery.drive.ui.components.AlbumTransitionOriginTracker
 import com.luminagallery.drive.ui.components.FormatUtils
+import com.luminagallery.drive.ui.components.SecureWindowCounter
 import com.luminagallery.drive.ui.screens.editor.computeStraightenFillScale
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
@@ -38,6 +47,9 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.ByteArrayInputStream
+import java.io.File
+import java.nio.file.Files
 import java.security.MessageDigest
 
 class GalleryCoreLogicTest {
@@ -434,5 +446,181 @@ class GalleryCoreLogicTest {
         assertTrue(HiddenLockedFolderManager.isSafeFolderPathToHide("/storage/emulated/0/Pictures/Secret", root))
         assertTrue(HiddenLockedFolderManager.isHiddenFileUri("file:///storage/emulated/0/DCIM/.Private/IMG_1.jpg"))
         assertFalse(HiddenLockedFolderManager.isHiddenFileUri("content://media/external/images/media/42"))
+    }
+
+    @Test
+    fun localMediaRepository_hashStreamSha256_hashesFullStreamNotJustPrefix() {
+        val sharedPrefix = ByteArray(20 * 1024) { (it % 251).toByte() }
+        val streamA = sharedPrefix + "FRAME_A_END".toByteArray()
+        val streamB = sharedPrefix + "FRAME_B_END".toByteArray()
+        val streamACopy = sharedPrefix + "FRAME_A_END".toByteArray()
+
+        val hashA = LocalMediaRepository.hashStreamSha256(ByteArrayInputStream(streamA))
+        val hashB = LocalMediaRepository.hashStreamSha256(ByteArrayInputStream(streamB))
+        val hashACopy = LocalMediaRepository.hashStreamSha256(ByteArrayInputStream(streamACopy))
+
+        assertNotNull(hashA)
+        assertNotNull(hashB)
+        assertEquals(64, hashA!!.length)
+        assertEquals(hashA, hashACopy)
+        assertNotEquals("Files sharing >16KB header must not collide", hashA, hashB)
+    }
+
+    @Test
+    fun hiddenLockedFolderManager_mergeDirectoryContents_preservesNestedSubdirsAndCollisions() {
+        val tempRoot = Files.createTempDirectory("lumina_merge_test").toFile()
+        try {
+            val hiddenSrc = File(tempRoot, ".Secret").apply { mkdirs() }
+            val destDir = File(tempRoot, "Secret").apply { mkdirs() }
+
+            File(hiddenSrc, ".nomedia").writeText("")
+            File(hiddenSrc, ".lumina_locked").writeText("{}")
+            File(hiddenSrc, "photo.jpg").writeText("hidden_photo")
+            val nestedSrc = File(hiddenSrc, "nested/deeper").apply { mkdirs() }
+            File(nestedSrc, "clip.mp4").writeText("nested_video")
+
+            // Pre-existing conflicting file & folder in destination
+            File(destDir, "photo.jpg").writeText("existing_photo")
+            File(destDir, "nested").mkdirs()
+            File(destDir, "nested/keep.jpg").writeText("keep_me")
+
+            HiddenLockedFolderManager.mergeDirectoryContents(hiddenSrc, destDir)
+
+            assertEquals("existing_photo", File(destDir, "photo.jpg").readText())
+            assertEquals("hidden_photo", File(destDir, "photo_1.jpg").readText())
+            assertEquals("keep_me", File(destDir, "nested/keep.jpg").readText())
+            assertEquals("nested_video", File(destDir, "nested/deeper/clip.mp4").readText())
+            assertFalse(File(destDir, ".nomedia").exists())
+            assertFalse(File(destDir, ".lumina_locked").exists())
+            assertTrue(HiddenLockedFolderManager.isDirectoryEffectivelyEmpty(hiddenSrc))
+        } finally {
+            tempRoot.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun secureWindowCounter_refCountsNestedProtectedScreens() {
+        val fakeWindow = Any()
+        assertEquals(0, SecureWindowCounter.currentCount(fakeWindow))
+        assertEquals(1, SecureWindowCounter.acquire(fakeWindow))
+        assertEquals(2, SecureWindowCounter.acquire(fakeWindow))
+        // Closing child viewer while locked album stays underneath must keep count > 0
+        assertEquals(1, SecureWindowCounter.release(fakeWindow))
+        assertEquals(1, SecureWindowCounter.currentCount(fakeWindow))
+        // Closing locked album drops count cleanly to 0 (and extra releases never go negative)
+        assertEquals(0, SecureWindowCounter.release(fakeWindow))
+        assertEquals(0, SecureWindowCounter.release(fakeWindow))
+    }
+
+    @Test
+    fun videoTrimmer_mapExtractorFlagsToMuxerFlags_avoidsEosCollision() {
+        assertEquals(
+            MediaCodec.BUFFER_FLAG_KEY_FRAME,
+            VideoTrimmer.mapExtractorFlagsToMuxerFlags(MediaExtractor.SAMPLE_FLAG_SYNC)
+        )
+        val partialMapped = VideoTrimmer.mapExtractorFlagsToMuxerFlags(MediaExtractor.SAMPLE_FLAG_PARTIAL_FRAME)
+        assertEquals(0, partialMapped and MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+        assertEquals(0, partialMapped)
+
+        val combinedMapped = VideoTrimmer.mapExtractorFlagsToMuxerFlags(
+            MediaExtractor.SAMPLE_FLAG_SYNC or MediaExtractor.SAMPLE_FLAG_PARTIAL_FRAME
+        )
+        assertEquals(MediaCodec.BUFFER_FLAG_KEY_FRAME, combinedMapped)
+    }
+
+    @Test
+    fun cloudProfileSyncManager_mergeSnapshots_preservesBothLocalAndRemoteAdditions() {
+        val local = CloudProfileSnapshot(
+            updatedAtEpochMs = 2_000L,
+            preferences = CloudPreferencesPayload(gridColumns = 3),
+            pinnedDriveRoots = listOf(CloudPinnedRoot("drive_local", "Local Pin", 100L, 0)),
+            collections = listOf(CloudAlbumCollection("col_local", "Local Col", null, 100L)),
+            driveFavoriteItemIds = listOf("fav_local"),
+            mediaAnnotations = listOf(
+                CloudMediaAnnotation(itemId = "item_1", isLocal = false, tagsCsv = "local_tag", note = "local note")
+            )
+        )
+        val remote = CloudProfileSnapshot(
+            updatedAtEpochMs = 2_500L,
+            preferences = CloudPreferencesPayload(gridColumns = 5),
+            pinnedDriveRoots = listOf(CloudPinnedRoot("drive_remote", "Remote Pin", 200L, 1)),
+            collections = listOf(CloudAlbumCollection("col_remote", "Remote Col", null, 200L)),
+            driveFavoriteItemIds = listOf("fav_remote"),
+            mediaAnnotations = listOf(
+                CloudMediaAnnotation(itemId = "item_1", isLocal = false, tagsCsv = "remote_tag", note = "remote note"),
+                CloudMediaAnnotation(itemId = "item_2", isLocal = false, tagsCsv = "other_tag", note = "other note")
+            )
+        )
+
+        val preferLocal = CloudProfileSyncManager.mergeSnapshots(local, remote, preferLocalConflicts = true)
+        assertEquals(3, preferLocal.preferences.gridColumns)
+        assertEquals(setOf("drive_local", "drive_remote"), preferLocal.pinnedDriveRoots.map { it.folderId }.toSet())
+        assertEquals(setOf("col_local", "col_remote"), preferLocal.collections.map { it.id }.toSet())
+        assertEquals(setOf("fav_local", "fav_remote"), preferLocal.driveFavoriteItemIds.toSet())
+        assertEquals("local_tag", preferLocal.mediaAnnotations.first { it.itemId == "item_1" }.tagsCsv)
+        assertEquals("other_tag", preferLocal.mediaAnnotations.first { it.itemId == "item_2" }.tagsCsv)
+
+        val preferRemote = CloudProfileSyncManager.mergeSnapshots(local, remote, preferLocalConflicts = false)
+        assertEquals(5, preferRemote.preferences.gridColumns)
+        assertEquals("remote_tag", preferRemote.mediaAnnotations.first { it.itemId == "item_1" }.tagsCsv)
+    }
+
+    @Test
+    fun localFileOperationsManager_sanitizeFolderName_stripsTraversalAndIllegalChars() {
+        assertEquals("LuminaGallery", LocalFileOperationsManager.sanitizeFolderName(""))
+        assertEquals("LuminaGallery", LocalFileOperationsManager.sanitizeFolderName(".."))
+        assertEquals("LuminaGallery", LocalFileOperationsManager.sanitizeFolderName("..."))
+        assertEquals("Private", LocalFileOperationsManager.sanitizeFolderName(".Private"))
+        assertEquals("Trip_2026_Japan", LocalFileOperationsManager.sanitizeFolderName("Trip/2026:Japan"))
+    }
+
+    @Test
+    fun albumTransitionOriginTracker_boundsTrackedEntriesWithLru() {
+        val tracker = AlbumTransitionOriginTracker()
+        val rect = Rect(0f, 0f, 100f, 100f)
+        for (i in 0 until 320) {
+            tracker.recordBounds("media_$i", rect, 1080f, 2400f)
+        }
+        assertTrue(
+            "Tracked bounds must stay bounded at <= ${AlbumTransitionOriginTracker.MAX_TRACKED_ENTRIES}",
+            tracker.trackedBoundsCount() <= AlbumTransitionOriginTracker.MAX_TRACKED_ENTRIES
+        )
+        assertNotNull(tracker.boundsFor("media_319"))
+        assertNull(tracker.boundsFor("media_0"))
+    }
+
+    @Test
+    fun videoFormatSupport_andDriveMapper_handleMp2pVideosEndToEnd() {
+        assertTrue(VideoFormatSupport.isMp2pVideo("camcorder_clip.mp2p", "application/octet-stream"))
+        assertTrue(VideoFormatSupport.isMp2pVideo("clip.m2p", null))
+        assertTrue(VideoFormatSupport.isMp2pVideo("movie.mpg", "video/mpeg"))
+        assertTrue(VideoFormatSupport.isMp2pVideo("VTS_01_1.VOB", "application/octet-stream"))
+        assertTrue(VideoFormatSupport.isMp2pVideo("stream_no_ext", "video/mp2p"))
+        assertFalse(VideoFormatSupport.isMp2pVideo("vacation.mp4", "video/mp4"))
+
+        assertEquals("video/mp2p", VideoFormatSupport.normalizeVideoMimeType("clip.mp2p", "application/octet-stream"))
+        assertEquals("video/mp2p", VideoFormatSupport.normalizeVideoMimeType("MOV001.MOD", null))
+        assertEquals("video/mp2p", VideoFormatSupport.resolveExoPlayerMimeType("clip.mp2p", "application/octet-stream"))
+        assertEquals("video/mp2p", VideoFormatSupport.resolveExoPlayerMimeType("clip.mpg", "video/mpeg"))
+
+        val driveMp2pOctet = DriveFileDto(
+            id = "drive_mp2p_1",
+            name = "home_video.mp2p",
+            mimeType = "application/octet-stream",
+            parents = listOf("folder_1")
+        )
+        assertTrue(DriveMapper.isSupportedGalleryDto(driveMp2pOctet))
+        val entity = DriveMapper.dtoToEntity(driveMp2pOctet)
+        assertEquals(MediaType.VIDEO.name, entity.mediaType)
+        assertEquals("video/mp2p", entity.mimeType)
+
+        val driveMp2pMime = DriveFileDto(
+            id = "drive_mp2p_2",
+            name = "archive_clip.mpg",
+            mimeType = "video/mp2p",
+            parents = listOf("folder_1")
+        )
+        assertTrue(DriveMapper.isSupportedGalleryDto(driveMp2pMime))
+        assertEquals(MediaType.VIDEO.name, DriveMapper.dtoToEntity(driveMp2pMime).mediaType)
     }
 }

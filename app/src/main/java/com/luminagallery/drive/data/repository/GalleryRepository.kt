@@ -84,13 +84,45 @@ class GalleryRepository(
     private val folderMediaCache = ConcurrentHashMap<String, List<MediaItem>>()
     private val subfoldersCache = ConcurrentHashMap<String, List<DriveFolder>>()
 
+    @Volatile
+    private var latestFolderParentById: Map<String, String?> = emptyMap()
+
     fun getCachedFolderMedia(parentId: String): List<MediaItem>? = folderMediaCache[parentId]
     fun getCachedSubfolders(parentId: String): List<DriveFolder>? = subfoldersCache[parentId]
+
+    /**
+     * Expands a set of locked/hidden folder IDs to include all nested Drive descendant folders
+     * so locking a parent Drive album also hides its subfolders across Search, Stories, Special
+     * screens, and Flattened view.
+     */
+    fun expandBlockedFolderIds(blockedIds: Set<String>): Set<String> {
+        if (blockedIds.isEmpty()) return emptySet()
+        val parentMap = latestFolderParentById
+        if (parentMap.isEmpty()) return blockedIds
+        val expanded = HashSet<String>(blockedIds)
+        for (folderId in parentMap.keys) {
+            if (folderId in expanded) continue
+            var cursor = parentMap[folderId]
+            var depth = 0
+            while (cursor != null && depth < 32) {
+                if (cursor in blockedIds) {
+                    expanded.add(folderId)
+                    break
+                }
+                cursor = parentMap[cursor]
+                depth++
+            }
+        }
+        return expanded
+    }
 
     private val folderRollupsFlow: Flow<Map<String, FolderRollup>> = combine(
         itemDao.observeAllFoldersLight(),
         itemDao.observeParentCoverSummaries()
     ) { allFolders, mediaSummaries ->
+        val pMap = HashMap<String, String?>(allFolders.size)
+        for (f in allFolders) pMap[f.id] = f.parentId
+        latestFolderParentById = pMap
         computeRecursiveRollups(allFolders, mediaSummaries)
     }.flowOn(Dispatchers.Default).shareIn(
         scope = repoScope,
@@ -313,7 +345,10 @@ class GalleryRepository(
 
     fun observeMediaInFolder(parentId: String): Flow<List<MediaItem>> =
         itemDao.observeMediaInFolder(parentId).map { entities ->
-            entities.map(DriveMapper::entityToMediaItem).also { folderMediaCache[parentId] = it }
+            entities.map(DriveMapper::entityToMediaItem).also {
+                if (folderMediaCache.size > 120) folderMediaCache.clear()
+                folderMediaCache[parentId] = it
+            }
         }.flowOn(Dispatchers.Default)
 
     fun observeFlattenedMedia(rootFolderId: String): Flow<List<MediaItem>> =
@@ -379,7 +414,13 @@ class GalleryRepository(
             lastSyncErrorFlow.value = null
             try {
                 val state = syncStateDao.getSyncState()
+                val now = System.currentTimeMillis()
+                // Google Drive thumbnailLink URLs expire after a few hours; periodically refresh
+                // metadata so Drive covers & thumbnails never break permanently after initial scan.
+                val thumbnailsStale = state?.lastFullSyncEpochMs == null ||
+                    (now - state.lastFullSyncEpochMs) > THUMBNAIL_REFRESH_INTERVAL_MS
                 val shouldRunDelta = !forceFullRescan &&
+                    !thumbnailsStale &&
                     state != null &&
                     state.initialScanComplete &&
                     !state.changesStartPageToken.isNullOrBlank()
@@ -395,7 +436,7 @@ class GalleryRepository(
                                 ?.let { itemDao.upsert(DriveMapper.dtoToEntity(it)) }
                         }
                         if (itemDao.getChildCount(root.folderId) == 0) {
-                            syncFolderTree(root.folderId)
+                            syncFolderTree(root.folderId).getOrThrow()
                         }
                     }
                 } else {
@@ -605,7 +646,7 @@ class GalleryRepository(
     suspend fun togglePinFolder(folder: DriveFolder): Boolean = withContext(Dispatchers.IO) {
         val currentlyPinned = pinnedRootDao.getAll().any { it.folderId == folder.id }
         if (currentlyPinned) {
-            pinnedRootDao.deleteById(folder.id)
+            unpinRootFolder(folder.id)
             false
         } else {
             pinnedRootDao.upsert(
@@ -620,13 +661,54 @@ class GalleryRepository(
     }
 
     suspend fun unpinRootFolder(folderId: String) = withContext(Dispatchers.IO) {
-        pinnedRootDao.deleteById(folderId)
+        database.withTransaction {
+            pinnedRootDao.deleteById(folderId)
+            pruneUnreferencedDriveItemsLocked()
+        }
+        folderMediaCache.clear()
+        subfoldersCache.clear()
     }
 
     suspend fun resetMetadataCache() = withContext(Dispatchers.IO) {
         database.withTransaction {
             itemDao.clearAll()
             syncStateDao.clear()
+        }
+        folderMediaCache.clear()
+        subfoldersCache.clear()
+        latestFolderParentById = emptyMap()
+    }
+
+    /** Clears all Google Drive metadata, pinned roots, Drive favorites, and caches on sign-out. */
+    suspend fun clearDriveAccountData() = withContext(Dispatchers.IO) {
+        database.withTransaction {
+            itemDao.clearAll()
+            pinnedRootDao.clearAll()
+            syncStateDao.clear()
+            database.galleryExtrasDao().clearDriveFavoriteItems()
+        }
+        folderMediaCache.clear()
+        subfoldersCache.clear()
+        latestFolderParentById = emptyMap()
+        lastSyncErrorFlow.value = null
+    }
+
+    private suspend fun pruneUnreferencedDriveItemsLocked() {
+        val remainingRoots = pinnedRootDao.getAll()
+        if (remainingRoots.isEmpty()) {
+            itemDao.clearAll()
+            return
+        }
+        val reachable = HashSet<String>()
+        for (root in remainingRoots) {
+            reachable.addAll(itemDao.getSubtreeItemIds(root.folderId))
+        }
+        val allIds = itemDao.getAllItemIds()
+        val orphanIds = allIds.filterNot { it in reachable }
+        if (orphanIds.isNotEmpty()) {
+            orphanIds.chunked(SQLITE_MAX_BIND_PARAMS).forEach { chunk ->
+                itemDao.deleteByIds(chunk)
+            }
         }
     }
 
@@ -645,7 +727,10 @@ class GalleryRepository(
             }
 
             for (root in pinnedRoots) {
-                syncFolderTree(root.folderId)
+                syncFolderTree(root.folderId).getOrThrow()
+            }
+            database.withTransaction {
+                pruneUnreferencedDriveItemsLocked()
             }
         }
 
@@ -662,9 +747,13 @@ class GalleryRepository(
     }
 
     private suspend fun runDeltaSyncLocked(startPageToken: String) {
+        val pinnedRootIds = pinnedRootDao.getAll().mapTo(HashSet()) { it.folderId }
+        val knownFolderIds = itemDao.getAllFolderIds().toHashSet().apply { addAll(pinnedRootIds) }
+        val knownItemIds = itemDao.getAllItemIds().toHashSet()
+
         var pageToken: String? = startPageToken
         var newStartPageToken: String? = null
-        val upserts = mutableListOf<DriveItemEntity>()
+        val pendingUpserts = mutableListOf<DriveItemEntity>()
         val removals = mutableListOf<String>()
 
         while (!pageToken.isNullOrBlank()) {
@@ -672,9 +761,12 @@ class GalleryRepository(
             for (change in response.changes) {
                 val fileDto = change.file
                 if (change.removed || fileDto == null || fileDto.trashed) {
-                    removals.add(change.fileId)
+                    if (change.fileId in knownItemIds) {
+                        removals.add(change.fileId)
+                    }
                 } else if (DriveMapper.isSupportedGalleryDto(fileDto)) {
-                    upserts.add(DriveMapper.dtoToEntity(fileDto))
+                    val entity = DriveMapper.dtoToEntity(fileDto)
+                    pendingUpserts.add(entity)
                 }
             }
             if (!response.newStartPageToken.isNullOrBlank()) {
@@ -683,15 +775,49 @@ class GalleryRepository(
             pageToken = response.nextPageToken
         }
 
+        // Only accept upserts whose parent is inside a pinned tree (resolving multi-level new folders)
+        val acceptedUpserts = mutableListOf<DriveItemEntity>()
+        val remaining = pendingUpserts.toMutableList()
+        var progressed = true
+        while (progressed && remaining.isNotEmpty()) {
+            progressed = false
+            val iter = remaining.iterator()
+            while (iter.hasNext()) {
+                val entity = iter.next()
+                val inTrackedTree = entity.id in pinnedRootIds ||
+                    (entity.parentId != null && entity.parentId in knownFolderIds)
+                if (inTrackedTree) {
+                    acceptedUpserts.add(entity)
+                    if (entity.isFolder) knownFolderIds.add(entity.id)
+                    iter.remove()
+                    progressed = true
+                }
+            }
+        }
+        // If an item previously in our cache moved OUT of pinned roots, remove it cleanly
+        for (movedOut in remaining) {
+            if (movedOut.id in knownItemIds) {
+                removals.add(movedOut.id)
+            }
+        }
+
         val now = System.currentTimeMillis()
         database.withTransaction {
             if (removals.isNotEmpty()) {
-                removals.chunked(SQLITE_MAX_BIND_PARAMS).forEach { chunk ->
+                val expandedRemovals = LinkedHashSet<String>(removals.size)
+                for (id in removals) {
+                    if (id in knownFolderIds) {
+                        expandedRemovals.addAll(itemDao.getSubtreeItemIds(id))
+                    } else {
+                        expandedRemovals.add(id)
+                    }
+                }
+                expandedRemovals.chunked(SQLITE_MAX_BIND_PARAMS).forEach { chunk ->
                     itemDao.deleteByIds(chunk)
                 }
             }
-            if (upserts.isNotEmpty()) {
-                itemDao.upsertAll(upserts)
+            if (acceptedUpserts.isNotEmpty()) {
+                itemDao.upsertAll(acceptedUpserts)
             }
             val previous = syncStateDao.getSyncState()
             syncStateDao.upsert(
@@ -718,7 +844,11 @@ class GalleryRepository(
             val existingChildIds = itemDao.getChildIdsInParent(folderId)
             val staleIds = existingChildIds.filterNot { it in remoteIds }
             if (staleIds.isNotEmpty()) {
-                staleIds.chunked(SQLITE_MAX_BIND_PARAMS).forEach { chunk ->
+                val allStaleWithDescendants = LinkedHashSet<String>(staleIds.size)
+                for (staleId in staleIds) {
+                    allStaleWithDescendants.addAll(itemDao.getSubtreeItemIds(staleId))
+                }
+                allStaleWithDescendants.chunked(SQLITE_MAX_BIND_PARAMS).forEach { chunk ->
                     itemDao.deleteByIds(chunk)
                 }
             }
@@ -756,5 +886,6 @@ class GalleryRepository(
     private companion object {
         const val MAX_CONCURRENT_FOLDER_SCANS = 4
         const val SQLITE_MAX_BIND_PARAMS = 450
+        const val THUMBNAIL_REFRESH_INTERVAL_MS = 4L * 60L * 60L * 1000L
     }
 }

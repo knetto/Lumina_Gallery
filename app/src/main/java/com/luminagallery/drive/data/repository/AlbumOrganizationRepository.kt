@@ -20,7 +20,9 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.withContext
 import java.util.UUID
@@ -83,6 +85,10 @@ class AlbumOrganizationRepository(
         }
     }
 
+    private val albumSortModeFlow = preferencesManager.preferencesFlow
+        .map { it.albumSortMode }
+        .distinctUntilChanged()
+
     fun observeGridItems(parentCollectionId: String?): Flow<List<AlbumGridItem>> = combine(
         localMediaRepository.observeLocalAlbums(),
         galleryRepository.observePinnedRoots(),
@@ -91,10 +97,10 @@ class AlbumOrganizationRepository(
         combine(
             extrasRepository.hiddenAlbumIdsFlow,
             extrasRepository.lockedAlbumIdsFlow,
-            preferencesManager.preferencesFlow,
+            albumSortModeFlow,
             extrasRepository.customAlbumCoversFlow
-        ) { hidden, locked, prefs, covers ->
-            GridFilterBundle(hidden, locked, prefs.albumSortMode, covers)
+        ) { hidden, locked, sortMode, covers ->
+            GridFilterBundle(hidden, locked, sortMode, covers)
         }
     ) { localAlbums, driveRoots, collections, layouts, bundle ->
         val visibleLocal = applyCustomCovers(
@@ -131,10 +137,10 @@ class AlbumOrganizationRepository(
         combine(
             extrasRepository.hiddenAlbumIdsFlow,
             extrasRepository.lockedAlbumIdsFlow,
-            preferencesManager.preferencesFlow,
+            albumSortModeFlow,
             extrasRepository.customAlbumCoversFlow
-        ) { hidden, locked, prefs, covers ->
-            GridFilterBundle(hidden, locked, prefs.albumSortMode, covers)
+        ) { hidden, locked, sortMode, covers ->
+            GridFilterBundle(hidden, locked, sortMode, covers)
         }
     ) { localAlbums, (driveRoots, driveByParent), collections, layouts, bundle ->
         val visibleLocal = applyCustomCovers(

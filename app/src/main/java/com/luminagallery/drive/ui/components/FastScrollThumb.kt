@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.systemGestureExclusion
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -32,11 +33,11 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
@@ -44,14 +45,16 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 /**
  * Right-edge draggable fast-scroll thumb displaying a floating month/year date pill
- * (e.g. "Nov 2026") while scrubbing through large Drive folders.
- * Uses `derivedStateOf` and auto-hides when idle so LTPO OLED displays drop to 1Hz.
+ * (e.g. "Nov 2026") while scrubbing through large folders.
+ * Defers offset reads to layout phase, excludes Android's edge-back gesture on the handle,
+ * and conflates scroll jumps so scrolling stays smooth at 120Hz.
  */
 @Composable
 fun FastScrollThumb(
@@ -65,16 +68,18 @@ fun FastScrollThumb(
     val coroutineScope = rememberCoroutineScope()
     val haptic = LocalHapticFeedback.current
     val density = LocalDensity.current
+    val latestLabelForIndex by rememberUpdatedState(labelForIndex)
 
     var trackHeightPx by remember { mutableIntStateOf(0) }
     var isDragging by remember { mutableStateOf(false) }
     var dragFraction by remember { mutableFloatStateOf(0f) }
     var isVisible by remember { mutableStateOf(false) }
+    var activeScrollJob by remember { mutableStateOf<Job?>(null) }
 
     val thumbHeightDp = 48.dp
     val thumbHeightPx = with(density) { thumbHeightDp.toPx() }
 
-    val scrollFraction by remember(totalItemCount) {
+    val scrollFractionState = remember(totalItemCount) {
         derivedStateOf {
             val layoutInfo = gridState.layoutInfo
             val visibleCount = layoutInfo.visibleItemsInfo.size
@@ -83,16 +88,11 @@ fun FastScrollThumb(
         }
     }
 
-    val activeFraction = if (isDragging) dragFraction else scrollFraction
-
-    val currentDateLabel by remember(totalItemCount, labelForIndex) {
+    val currentDateLabel by remember(totalItemCount) {
         derivedStateOf {
-            val index = if (isDragging) {
-                (dragFraction * (totalItemCount - 1)).roundToInt().coerceIn(0, totalItemCount - 1)
-            } else {
-                gridState.firstVisibleItemIndex.coerceIn(0, totalItemCount - 1)
-            }
-            labelForIndex(index)
+            if (!isDragging) return@derivedStateOf null
+            val index = (dragFraction * (totalItemCount - 1)).roundToInt().coerceIn(0, totalItemCount - 1)
+            latestLabelForIndex(index)
         }
     }
 
@@ -119,12 +119,14 @@ fun FastScrollThumb(
             modifier = Modifier.align(Alignment.TopEnd)
         ) {
             val usableTrackPx = (trackHeightPx - thumbHeightPx).coerceAtLeast(1f)
-            val thumbOffsetYPx = (activeFraction * usableTrackPx).roundToInt()
 
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
-                    .offset { IntOffset(x = 0, y = thumbOffsetYPx) }
+                    .offset {
+                        val frac = if (isDragging) dragFraction else scrollFractionState.value
+                        IntOffset(x = 0, y = (frac * usableTrackPx).roundToInt())
+                    }
                     .padding(end = 4.dp)
             ) {
                 // Floating Date Pill while scrubbing
@@ -135,8 +137,8 @@ fun FastScrollThumb(
                 ) {
                     GlassSurface(
                         shape = RoundedCornerShape(16.dp),
-                        containerColor = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.92f),
-                        borderColor = Color.White.copy(alpha = 0.16f)
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.94f),
+                        borderColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
                     ) {
                         Text(
                             text = currentDateLabel.orEmpty(),
@@ -149,21 +151,22 @@ fun FastScrollThumb(
 
                 Spacer(Modifier.width(8.dp))
 
-                // Draggable Thumb Handle
+                // Draggable Thumb Handle with edge-back exclusion
                 Box(
                     modifier = Modifier
-                        .width(26.dp)
+                        .width(28.dp)
                         .height(thumbHeightDp)
+                        .systemGestureExclusion()
                         .clip(RoundedCornerShape(topStart = 16.dp, bottomStart = 16.dp, topEnd = 6.dp, bottomEnd = 6.dp))
                         .background(
                             if (isDragging) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.92f)
+                            else MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.94f)
                         )
                         .pointerInput(totalItemCount, usableTrackPx) {
                             detectVerticalDragGestures(
                                 onDragStart = {
                                     isDragging = true
-                                    dragFraction = scrollFraction
+                                    dragFraction = scrollFractionState.value
                                     haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                 },
                                 onDragEnd = { isDragging = false },
@@ -176,7 +179,8 @@ fun FastScrollThumb(
                                     val targetIndex = (newFraction * (totalItemCount - 1))
                                         .roundToInt()
                                         .coerceIn(0, (totalItemCount - 1).coerceAtLeast(0))
-                                    coroutineScope.launch {
+                                    activeScrollJob?.cancel()
+                                    activeScrollJob = coroutineScope.launch {
                                         gridState.scrollToItem(targetIndex)
                                     }
                                 }

@@ -75,10 +75,12 @@ class LocalFileOperationsManager(
     suspend fun copyLocalItemsToAlbum(
         items: List<MediaItem>,
         albumFolderName: String,
-        useDcimParent: Boolean = false
+        useDcimParent: Boolean = false,
+        targetRelativePath: String? = null
     ): Result<Int> = withContext(Dispatchers.IO) {
         runCatching {
             val cleanAlbum = sanitizeFolderName(albumFolderName)
+            val normalizedExplicitPath = normalizeExplicitRelativePath(targetRelativePath)
             var copied = 0
             val resolver = context.contentResolver
 
@@ -86,48 +88,82 @@ class LocalFileOperationsManager(
                 if (!item.isLocal || item.localContentUri.isNullOrBlank()) continue
                 val srcUri = Uri.parse(item.localContentUri)
                 val isVideo = item.isVideo
-                val targetCollection = if (isVideo) {
-                    MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                val targetCollection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    if (isVideo) {
+                        MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                    } else {
+                        MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                    }
                 } else {
-                    MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-                }
-                val baseDir = when {
-                    useDcimParent -> Environment.DIRECTORY_DCIM
-                    isVideo -> Environment.DIRECTORY_MOVIES
-                    else -> Environment.DIRECTORY_PICTURES
-                }
-                val values = ContentValues().apply {
-                    put(MediaStore.MediaColumns.DISPLAY_NAME, item.name)
-                    put(
-                        MediaStore.MediaColumns.MIME_TYPE,
-                        item.mimeType.ifBlank { if (isVideo) "video/mp4" else "image/jpeg" }
-                    )
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        put(MediaStore.MediaColumns.RELATIVE_PATH, "$baseDir/$cleanAlbum")
-                        put(MediaStore.MediaColumns.IS_PENDING, 1)
+                    if (isVideo) {
+                        MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                    } else {
+                        MediaStore.Images.Media.EXTERNAL_CONTENT_URI
                     }
                 }
-                val dstUri = resolver.insert(targetCollection, values)
-                    ?: throw IOException("Could not create copy for ${item.name}")
-                try {
-                    resolver.openInputStream(srcUri)?.use { input ->
-                        resolver.openOutputStream(dstUri)?.use { output ->
-                            input.copyTo(output, 32 * 1024)
-                        } ?: throw IOException("Cannot write ${item.name}")
-                    } ?: throw IOException("Cannot read ${item.name}")
+                val resolvedRelPath = normalizedExplicitPath ?: run {
+                    val baseDir = when {
+                        useDcimParent -> Environment.DIRECTORY_DCIM
+                        isVideo && items.all { it.isVideo } -> Environment.DIRECTORY_MOVIES
+                        else -> Environment.DIRECTORY_PICTURES
+                    }
+                    "$baseDir/$cleanAlbum"
+                }
 
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val values = ContentValues().apply {
+                        put(MediaStore.MediaColumns.DISPLAY_NAME, item.name)
+                        put(
+                            MediaStore.MediaColumns.MIME_TYPE,
+                            item.mimeType.ifBlank { if (isVideo) "video/mp4" else "image/jpeg" }
+                        )
+                        put(MediaStore.MediaColumns.RELATIVE_PATH, "$resolvedRelPath/")
+                        put(MediaStore.MediaColumns.IS_PENDING, 1)
+                    }
+                    val dstUri = resolver.insert(targetCollection, values)
+                        ?: throw IOException("Could not create copy for ${item.name}")
+                    try {
+                        resolver.openInputStream(srcUri)?.use { input ->
+                            resolver.openOutputStream(dstUri)?.use { output ->
+                                input.copyTo(output, 32 * 1024)
+                            } ?: throw IOException("Cannot write ${item.name}")
+                        } ?: throw IOException("Cannot read ${item.name}")
+
                         resolver.update(
                             dstUri,
                             ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
                             null,
                             null
                         )
+                        copied++
+                    } catch (e: Exception) {
+                        resolver.delete(dstUri, null, null)
+                        throw e
                     }
+                } else {
+                    // Android 8-9 (API 26-28): write directly to target directory and scan into MediaStore
+                    @Suppress("DEPRECATION")
+                    val destDir = File(Environment.getExternalStorageDirectory(), resolvedRelPath).apply {
+                        if (!exists()) mkdirs()
+                    }
+                    var destFile = File(destDir, item.name)
+                    if (destFile.exists()) {
+                        val base = destFile.nameWithoutExtension
+                        val ext = destFile.extension.takeIf { it.isNotBlank() }?.let { ".$it" }.orEmpty()
+                        destFile = File(destDir, "${base}_${System.currentTimeMillis()}$ext")
+                    }
+                    resolver.openInputStream(srcUri)?.use { input ->
+                        destFile.outputStream().use { output ->
+                            input.copyTo(output, 32 * 1024)
+                        }
+                    } ?: throw IOException("Cannot read ${item.name}")
+                    android.media.MediaScannerConnection.scanFile(
+                        context,
+                        arrayOf(destFile.absolutePath),
+                        arrayOf(item.mimeType.ifBlank { if (isVideo) "video/mp4" else "image/jpeg" }),
+                        null
+                    )
                     copied++
-                } catch (e: Exception) {
-                    resolver.delete(dstUri, null, null)
-                    throw e
                 }
             }
             copied
@@ -137,26 +173,44 @@ class LocalFileOperationsManager(
     suspend fun moveLocalItemsToAlbum(
         items: List<MediaItem>,
         albumFolderName: String,
-        useDcimParent: Boolean = false
+        useDcimParent: Boolean = false,
+        targetRelativePath: String? = null
     ): Result<Int> = withContext(Dispatchers.IO) {
         runCatching {
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-                return@runCatching copyLocalItemsToAlbum(items, albumFolderName, useDcimParent).getOrThrow()
-            }
             val cleanAlbum = sanitizeFolderName(albumFolderName)
+            val normalizedExplicitPath = normalizeExplicitRelativePath(targetRelativePath)
             val resolver = context.contentResolver
-            var moved = 0
 
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                // Android 8-9: copy to destination, then remove originals so Move truly moves
+                var moved = 0
+                for (item in items) {
+                    if (!item.isLocal || item.localContentUri.isNullOrBlank()) continue
+                    copyLocalItemsToAlbum(listOf(item), cleanAlbum, useDcimParent, normalizedExplicitPath).getOrThrow()
+                    val srcUri = Uri.parse(item.localContentUri)
+                    val deleted = runCatching { resolver.delete(srcUri, null, null) }.getOrDefault(0)
+                    if (deleted <= 0 && srcUri.scheme == "file") {
+                        srcUri.path?.let { File(it).delete() }
+                    }
+                    moved++
+                }
+                return@runCatching moved
+            }
+
+            var moved = 0
             for (item in items) {
                 if (!item.isLocal || item.localContentUri.isNullOrBlank()) continue
                 val uri = Uri.parse(item.localContentUri)
-                val baseDir = when {
-                    useDcimParent -> Environment.DIRECTORY_DCIM
-                    item.isVideo -> Environment.DIRECTORY_MOVIES
-                    else -> Environment.DIRECTORY_PICTURES
+                val resolvedRelPath = normalizedExplicitPath ?: run {
+                    val baseDir = when {
+                        useDcimParent -> Environment.DIRECTORY_DCIM
+                        item.isVideo && items.all { it.isVideo } -> Environment.DIRECTORY_MOVIES
+                        else -> Environment.DIRECTORY_PICTURES
+                    }
+                    "$baseDir/$cleanAlbum"
                 }
                 val values = ContentValues().apply {
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, "$baseDir/$cleanAlbum/")
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, "$resolvedRelPath/")
                 }
                 val updated = resolver.update(uri, values, null, null)
                 if (updated > 0) moved++
@@ -170,8 +224,8 @@ class LocalFileOperationsManager(
 
     /**
      * Renames a local album folder by moving all of its MediaStore items into the new sibling
-     * folder under the same top-level directory (DCIM / Pictures / Movies).
-     * Requires Android 11+ batch write permission obtained via [buildWritePermissionSender].
+     * folder under the exact same parent directory (preserving nested paths & keeping mixed
+     * photo+video albums together). Returns Pair(cleanName, newRelativePath).
      */
     suspend fun renameLocalAlbum(
         items: List<MediaItem>,
@@ -182,8 +236,20 @@ class LocalFileOperationsManager(
             val localItems = items.filter { it.isLocal && !it.localContentUri.isNullOrBlank() }
             require(localItems.isNotEmpty()) { "Album has no local files to rename" }
             val currentPath = localItems.first().storagePath?.trim()?.trim('/').orEmpty()
-            val useDcim = currentPath.startsWith("DCIM", ignoreCase = true)
-            moveLocalItemsToAlbum(localItems, cleanName, useDcimParent = useDcim).getOrThrow()
+            val parentDir = currentPath.substringBeforeLast('/', missingDelimiterValue = "")
+            val newRelativePath = if (parentDir.isNotBlank()) {
+                "$parentDir/$cleanName"
+            } else {
+                val useDcim = currentPath.startsWith("DCIM", ignoreCase = true)
+                val baseDir = if (useDcim) Environment.DIRECTORY_DCIM else Environment.DIRECTORY_PICTURES
+                "$baseDir/$cleanName"
+            }
+            moveLocalItemsToAlbum(
+                items = localItems,
+                albumFolderName = cleanName,
+                useDcimParent = newRelativePath.startsWith("DCIM", ignoreCase = true),
+                targetRelativePath = newRelativePath
+            ).getOrThrow()
             cleanName
         }
     }
@@ -231,6 +297,24 @@ class LocalFileOperationsManager(
                 Unit
             }
         }
+
+    fun launchNativeWallpaperCrop(activityContext: Context, uri: Uri, mimeType: String): Boolean {
+        val wm = WallpaperManager.getInstance(context)
+        val cropIntent = runCatching { wm.getCropAndSetWallpaperIntent(uri) }.getOrNull()
+        val intent = cropIntent ?: Intent(Intent.ACTION_ATTACH_DATA).apply {
+            setDataAndType(uri, mimeType.ifBlank { "image/*" })
+            putExtra("mimeType", mimeType.ifBlank { "image/*" })
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        if (activityContext !is android.app.Activity) {
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        return runCatching {
+            activityContext.startActivity(Intent.createChooser(intent, "Set wallpaper with"))
+            true
+        }.getOrDefault(false)
+    }
 
     fun launchExternalEditor(activityContext: Context, uri: Uri, mimeType: String) {
         val editIntent = Intent(Intent.ACTION_EDIT).apply {
@@ -341,7 +425,13 @@ class LocalFileOperationsManager(
      */
     fun getQuickLocalOrOfflineUri(item: MediaItem): Uri? {
         if (item.isLocal && !item.localContentUri.isNullOrBlank()) {
-            return Uri.parse(item.localContentUri)
+            val parsed = Uri.parse(item.localContentUri)
+            if (parsed.scheme == "file") {
+                // Never expose raw file:// URIs (Android 7+ throws FileUriExposedException);
+                // return null so callers stage via FileProvider safely.
+                return null
+            }
+            return parsed
         }
         val offlinePath = offlineMediaManager.getOfflineFilePath(item.id)
         if (!offlinePath.isNullOrBlank()) {
@@ -479,6 +569,23 @@ class LocalFileOperationsManager(
         BitmapFactory.decodeFile(file.absolutePath)
     }
 
-    private fun sanitizeFolderName(raw: String): String =
-        raw.trim().replace(Regex("[\\\\/:*?\"<>|]"), "_").ifBlank { "LuminaGallery" }
+    private fun normalizeExplicitRelativePath(raw: String?): String? {
+        val cleaned = raw?.trim()?.replace('\\', '/')?.trim('/') ?: return null
+        if (cleaned.isBlank()) return null
+        val segments = cleaned.split('/').mapNotNull { seg ->
+            val trimmed = seg.trim().trimStart('.')
+            if (trimmed.isBlank() || trimmed == "." || trimmed == "..") null else trimmed
+        }
+        return segments.takeIf { it.isNotEmpty() }?.joinToString("/")
+    }
+
+    companion object {
+        internal fun sanitizeFolderName(raw: String): String {
+            val cleaned = raw.trim()
+                .replace(Regex("[\\\\/:*?\"<>|]"), "_")
+                .trimStart('.')
+                .trim()
+            return if (cleaned.isBlank() || cleaned == "." || cleaned == "..") "LuminaGallery" else cleaned
+        }
+    }
 }

@@ -21,7 +21,7 @@ class DriveAuthInterceptor(
             throw IOException("Request canceled before authentication.")
         }
 
-        if (!isGoogleHost(originalRequest.url.host)) {
+        if (!originalRequest.url.isHttps || !isGoogleHost(originalRequest.url.host)) {
             return chain.proceed(originalRequest)
         }
 
@@ -38,7 +38,10 @@ class DriveAuthInterceptor(
 
         if (initialResponse.code == 401 && !chain.call().isCanceled()) {
             initialResponse.close()
-            val refreshedToken = tokenManager.getAccessToken(forceRefresh = true)
+            val refreshedToken = tokenManager.getAccessToken(
+                forceRefresh = true,
+                failedToken = token
+            )
             val retriedRequest = originalRequest.newBuilder()
                 .header(HEADER_AUTHORIZATION, "$BEARER_PREFIX$refreshedToken")
                 .build()

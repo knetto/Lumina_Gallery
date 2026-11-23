@@ -7,10 +7,7 @@ import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.Crossfade
-import androidx.compose.animation.ExperimentalSharedTransitionApi
-import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
@@ -153,19 +150,23 @@ import kotlinx.coroutines.launch
 
 private val SidebarEasing = OneUiMotion.FluidEasing
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalSharedTransitionApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FolderScreen(
     viewModel: FolderViewModel,
     lastViewedItemId: String?,
     onConsumedLastViewedItemId: () -> Unit,
-    sharedTransitionScope: SharedTransitionScope,
-    animatedVisibilityScope: AnimatedVisibilityScope,
     onNavigateBack: () -> Unit,
     onNavigateHome: () -> Unit,
     onOpenSubfolder: (folderId: String, folderName: String) -> Unit,
     onOpenBreadcrumb: (folderId: String, folderName: String) -> Unit,
-    onOpenViewer: (folderId: String, itemId: String, isFlattened: Boolean) -> Unit,
+    onOpenViewer: (
+        folderId: String,
+        itemId: String,
+        isFlattened: Boolean,
+        filter: AlbumMediaFilter,
+        sort: AlbumMediaSort
+    ) -> Unit,
     onOpenSearch: () -> Unit,
     onOpenCompare: (List<String>) -> Unit = {}
 ) {
@@ -175,7 +176,7 @@ fun FolderScreen(
     val imageLoader = LocalGalleryImageLoader.current
     val haptic = LocalHapticFeedback.current
     val scope = rememberCoroutineScope()
-    val gridState = rememberLazyGridState()
+    val gridStatesByFolder = remember { mutableMapOf<String, LazyGridState>() }
     val snackbarHostState = remember { SnackbarHostState() }
 
     val offlineIds by appContainer.offlineMediaManager.offlineItemIdsFlow
@@ -223,7 +224,7 @@ fun FolderScreen(
     SecureWindowEffect(enabled = uiState.isProtectedPrivateAlbum)
 
     fun executeAlbumRename(targetName: String) {
-        val itemsToRename = uiState.mediaItems
+        val itemsToRename = uiState.unfilteredMediaItems.ifEmpty { uiState.mediaItems }
         scope.launch {
             appContainer.localFileOperationsManager.renameLocalAlbum(itemsToRename, targetName)
                 .onSuccess { cleanName ->
@@ -263,15 +264,16 @@ fun FolderScreen(
         trashLauncher.launch(IntentSenderRequest.Builder(sender).build())
     }
 
-    LaunchedEffect(lastViewedItemId, uiState.gridEntries) {
+    LaunchedEffect(lastViewedItemId, uiState.gridEntries, uiState.folderId) {
         val targetId = lastViewedItemId ?: return@LaunchedEffect
+        val activeGridState = gridStatesByFolder[uiState.folderId] ?: return@LaunchedEffect
         val targetIndex = uiState.gridEntries.indexOfFirst { entry ->
             entry is FolderGridEntry.MediaCell && entry.item.id == targetId
         }
         if (targetIndex >= 0) {
-            val visibleIndices = gridState.layoutInfo.visibleItemsInfo.map { it.index }
+            val visibleIndices = activeGridState.layoutInfo.visibleItemsInfo.map { it.index }
             if (targetIndex !in visibleIndices) {
-                gridState.scrollToItem(targetIndex)
+                activeGridState.scrollToItem(targetIndex)
             }
             onConsumedLastViewedItemId()
         }
@@ -288,26 +290,6 @@ fun FolderScreen(
         snackbarHostState.showSnackbar(msg)
         viewModel.clearSnackbar()
     }
-
-    // Reset grid scroll cleanly ONLY when switching album via left sidebar (never on initial mount!)
-    var lastMountedFolderId by remember { mutableStateOf(uiState.folderId) }
-    LaunchedEffect(uiState.folderId) {
-        if (uiState.folderId != lastMountedFolderId) {
-            lastMountedFolderId = uiState.folderId
-            gridState.scrollToItem(0)
-        }
-    }
-
-    var autoScrollDelta by remember { mutableFloatStateOf(0f) }
-    LaunchedEffect(autoScrollDelta) {
-        while (autoScrollDelta != 0f) {
-            gridState.scrollBy(autoScrollDelta)
-            delay(16L)
-        }
-    }
-
-    val latestEntries by rememberUpdatedState(uiState.gridEntries)
-    val latestSelectedIds by rememberUpdatedState(uiState.selectedIds)
 
     val mediaBreakdownSubtitle = remember(uiState.mediaItems, uiState.subfolders.size, uiState.viewMode) {
         FormatUtils.formatMediaBreakdown(
@@ -378,7 +360,7 @@ fun FolderScreen(
                                 .size(38.dp)
                                 .oneUiClickable(pressedScale = 0.88f, hoveredScale = 1.06f, onClick = onNavigateBack)
                                 .clip(CircleShape)
-                                .background(Color.White.copy(alpha = 0.08f)),
+                                .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
@@ -414,7 +396,7 @@ fun FolderScreen(
                                     expanded = showOverflowMenu,
                                     onDismissRequest = { showOverflowMenu = false },
                                     shape = RoundedCornerShape(22.dp),
-                                    containerColor = Color(0xFF28282B)
+                                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
                                 ) {
                                     DropdownMenuItem(
                                         text = { Text("Select") },
@@ -714,7 +696,7 @@ fun FolderScreen(
                                     Text(
                                         text = "Reset",
                                         style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Medium),
-                                        color = Color.White.copy(alpha = 0.62f),
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         modifier = Modifier
                                             .clip(RoundedCornerShape(50))
                                             .clickable {
@@ -763,7 +745,12 @@ fun FolderScreen(
                                     )
                             },
                             label = "albumSwitchTransition"
-                        ) { _ ->
+                        ) { targetFolderId ->
+                            // Each AnimatedContent slot gets its own LazyGridState so simultaneous
+                            // enter/exit frames never attach two LazyVerticalGrids to one state!
+                            val branchGridState = remember(targetFolderId) {
+                                gridStatesByFolder.getOrPut(targetFolderId) { LazyGridState() }
+                            }
                             when {
                                 !uiState.hasCompletedInitialLoad && uiState.gridEntries.isEmpty() -> {
                                     MediaGridShimmer(columns = effectiveColumns)
@@ -789,7 +776,7 @@ fun FolderScreen(
                                         }
                                         LazyVerticalGrid(
                                             columns = GridCells.Fixed(effectiveColumns),
-                                            state = gridState,
+                                            state = branchGridState,
                                             contentPadding = PaddingValues(
                                                 start = if (effectiveShowSidebar) 2.dp else 8.dp,
                                                 end = 8.dp,
@@ -801,13 +788,14 @@ fun FolderScreen(
                                             modifier = Modifier
                                                 .fillMaxSize()
                                                 .photoGridDragSelect(
-                                                    gridState = gridState,
+                                                    gridState = branchGridState,
                                                     orderedItemIds = orderedFolderMediaIds,
                                                     keyToItemId = { key ->
                                                         (key as? String)?.takeIf { it.startsWith("cell_") }?.removePrefix("cell_")
                                                     },
                                                     selectedIds = uiState.selectedIds,
-                                                    onSetItemSelected = viewModel::setItemSelected
+                                                    onSetItemSelected = viewModel::setItemSelected,
+                                                    onSetRangeSelected = viewModel::setItemsSelectedRange
                                                 )
                                         ) {
                                             items(
@@ -931,8 +919,6 @@ fun FolderScreen(
                                                             isFavorite = entry.item.id in uiState.favoriteItemIds,
                                                             isOfflinePinned = entry.item.id in offlineIds,
                                                             showCloudBadge = uiState.showCloudBadges,
-                                                            sharedTransitionScope = sharedTransitionScope,
-                                                            animatedVisibilityScope = animatedVisibilityScope,
                                                             onClick = {
                                                                 if (uiState.isSelectionMode) {
                                                                     viewModel.toggleSelection(entry.item.id)
@@ -940,7 +926,9 @@ fun FolderScreen(
                                                                     onOpenViewer(
                                                                         uiState.folderId,
                                                                         entry.item.id,
-                                                                        uiState.viewMode == FolderViewMode.FLATTENED
+                                                                        uiState.viewMode == FolderViewMode.FLATTENED,
+                                                                        uiState.mediaFilter,
+                                                                        uiState.mediaSort
                                                                     )
                                                                 }
                                                             },
@@ -953,7 +941,7 @@ fun FolderScreen(
                                         }
 
                                         FastScrollThumb(
-                                            gridState = gridState,
+                                            gridState = branchGridState,
                                             totalItemCount = uiState.gridEntries.size,
                                             labelForIndex = { idx ->
                                                 uiState.gridEntries.getOrNull(idx)?.scrollDateLabel
@@ -1106,9 +1094,10 @@ fun FolderScreen(
 
     if (showRenameAlbumDialog && uiState.isLocalAlbum) {
         var newAlbumName by remember(uiState.folderName) { mutableStateOf(uiState.folderName) }
+        val allAlbumItems = uiState.unfilteredMediaItems.ifEmpty { uiState.mediaItems }
         AlertDialog(
             onDismissRequest = { showRenameAlbumDialog = false },
-            containerColor = Color(0xFF232326),
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
             shape = RoundedCornerShape(26.dp),
             title = { Text("Rename local album") },
             text = {
@@ -1128,7 +1117,7 @@ fun FolderScreen(
                         val trimmed = newAlbumName.trim()
                         showRenameAlbumDialog = false
                         val sender = appContainer.localFileOperationsManager
-                            .buildWritePermissionSender(uiState.mediaItems)
+                            .buildWritePermissionSender(allAlbumItems)
                         if (sender != null) {
                             pendingAlbumRenameName = trimmed
                             renameAlbumPermissionLauncher.launch(
@@ -1391,7 +1380,7 @@ private fun SidebarNodeView(
                     fontSize = 11.sp,
                     lineHeight = 13.sp,
                     fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Normal,
-                    color = if (isActive) Color.White else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.88f),
+                    color = if (isActive) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.82f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(horizontal = 2.dp)
@@ -1422,13 +1411,13 @@ private fun SidebarNodeView(
         Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(20.dp))
-            .background(Color(0xFF0A0A0C))
+            .background(MaterialTheme.colorScheme.surfaceContainerLow)
             .border(
                 width = if (containsActive) 1.dp else 0.8.dp,
                 color = if (containsActive) {
-                    Color.White.copy(alpha = 0.22f)
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
                 } else {
-                    Color.White.copy(alpha = 0.13f)
+                    MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)
                 },
                 shape = RoundedCornerShape(20.dp)
             )
@@ -1589,11 +1578,11 @@ private fun ActiveOptionChip(
 ) {
     Surface(
         shape = RoundedCornerShape(50),
-        color = Color(0xFF1F1F24),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
         modifier = Modifier
             .border(
                 width = 0.8.dp,
-                color = Color.White.copy(alpha = 0.14f),
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
                 shape = RoundedCornerShape(50)
             )
             .clip(RoundedCornerShape(50))
@@ -1607,27 +1596,27 @@ private fun ActiveOptionChip(
             Icon(
                 imageVector = icon,
                 contentDescription = null,
-                tint = Color.White.copy(alpha = 0.86f),
+                tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.86f),
                 modifier = Modifier.size(14.dp)
             )
             Text(
                 text = label,
                 style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
-                color = Color.White.copy(alpha = 0.94f),
+                color = MaterialTheme.colorScheme.onSurface,
                 maxLines = 1
             )
             Box(
                 modifier = Modifier
                     .size(17.dp)
                     .clip(CircleShape)
-                    .background(Color.White.copy(alpha = 0.12f))
+                    .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f))
                     .clickable(onClick = onClear),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
                     imageVector = Icons.Rounded.Close,
                     contentDescription = "Reset",
-                    tint = Color.White.copy(alpha = 0.9f),
+                    tint = MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier.size(11.dp)
                 )
             }
@@ -1646,7 +1635,7 @@ private fun <T> SamsungRadioChoiceDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = Color(0xFF232326),
+        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
         shape = RoundedCornerShape(26.dp),
         title = { Text(title) },
         text = {
@@ -1787,22 +1776,4 @@ private fun EmptyFolderState(
             }
         }
     }
-}
-
-private fun findMediaIdAtOffset(
-    gridState: LazyGridState,
-    entries: List<FolderGridEntry>,
-    pointerOffset: Offset
-): String? {
-    val adjustedY = pointerOffset.y - gridState.layoutInfo.beforeContentPadding
-    val hitItem = gridState.layoutInfo.visibleItemsInfo.firstOrNull { info ->
-        val left = info.offset.x.toFloat()
-        val top = info.offset.y.toFloat()
-        val right = left + info.size.width.toFloat()
-        val bottom = top + info.size.height.toFloat()
-        pointerOffset.x in left..right && adjustedY in top..bottom
-    } ?: return null
-
-    val entry = entries.getOrNull(hitItem.index) as? FolderGridEntry.MediaCell
-    return entry?.item?.id
 }

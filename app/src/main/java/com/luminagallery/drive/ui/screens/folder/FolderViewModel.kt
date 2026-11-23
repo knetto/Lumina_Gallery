@@ -29,11 +29,15 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 @Immutable
 sealed interface FolderGridEntry {
@@ -87,6 +91,7 @@ data class FolderUiState(
     val breadcrumbs: List<BreadcrumbItem> = emptyList(),
     val subfolders: List<DriveFolder> = emptyList(),
     val mediaItems: List<MediaItem> = emptyList(),
+    val unfilteredMediaItems: List<MediaItem> = emptyList(),
     val unfilteredItemCount: Int = 0,
     val gridEntries: List<FolderGridEntry> = emptyList(),
     val gridColumns: Int = 4,
@@ -154,10 +159,11 @@ class FolderViewModel(
         showSidebarFlow,
         combine(
             extrasRepository.favoriteItemIdsFlow,
-            extrasRepository.lockedAlbumIdsFlow
-        ) { favIds, lockedIds -> favIds to lockedIds }
-    ) { filter, groupBy, sort, sidebar, (favIds, lockedIds) ->
-        DisplayOptions(filter, groupBy, sort, sidebar, favIds, lockedIds)
+            extrasRepository.lockedAlbumIdsFlow,
+            extrasRepository.excludedAlbumIdsFlow
+        ) { favIds, lockedIds, excludedIds -> Triple(favIds, lockedIds, excludedIds) }
+    ) { filter, groupBy, sort, sidebar, (favIds, lockedIds, excludedIds) ->
+        DisplayOptions(filter, groupBy, sort, sidebar, favIds, lockedIds, excludedIds)
     }
 
     private val rawContentFlow = activeFolderFlow.flatMapLatest { (activeId, activeName) ->
@@ -182,6 +188,7 @@ class FolderViewModel(
                     mode = FolderViewMode.HIERARCHY,
                     subfolders = emptyList(),
                     mediaItems = processed,
+                    unfilteredItems = items,
                     unfilteredCount = items.size,
                     gridEntries = entries,
                     filter = opts.filter,
@@ -220,6 +227,7 @@ class FolderViewModel(
                             mode = FolderViewMode.HIERARCHY,
                             subfolders = markedSubfolders,
                             mediaItems = processed,
+                            unfilteredItems = directMedia,
                             unfilteredCount = directMedia.size,
                             gridEntries = entries,
                             filter = opts.filter,
@@ -234,7 +242,14 @@ class FolderViewModel(
                         repository.observeFlattenedMedia(activeId),
                         displayOptionsFlow
                     ) { flattenedMedia, opts ->
-                        val processed = applyFilterAndSort(flattenedMedia, opts.filter, opts.sort, opts.favoriteIds)
+                        // Never leak nested locked/hidden subfolders when flattening an unlocked parent
+                        val nestedBlocked = repository.expandBlockedFolderIds(opts.excludedIds - activeId)
+                        val visibleFlattened = if (nestedBlocked.isEmpty()) {
+                            flattenedMedia
+                        } else {
+                            flattenedMedia.filterNot { it.parentId in nestedBlocked }
+                        }
+                        val processed = applyFilterAndSort(visibleFlattened, opts.filter, opts.sort, opts.favoriteIds)
                         val entries = buildGroupedEntries(
                             mode = FolderViewMode.FLATTENED,
                             subfolders = emptyList(),
@@ -249,7 +264,8 @@ class FolderViewModel(
                             mode = FolderViewMode.FLATTENED,
                             subfolders = emptyList(),
                             mediaItems = processed,
-                            unfilteredCount = flattenedMedia.size,
+                            unfilteredItems = visibleFlattened,
+                            unfilteredCount = visibleFlattened.size,
                             gridEntries = entries,
                             filter = opts.filter,
                             groupBy = opts.groupBy,
@@ -263,9 +279,20 @@ class FolderViewModel(
         }
     }
 
+    private val folderPrefsSliceFlow = preferencesManager.preferencesFlow
+        .map { prefs ->
+            FolderPrefsSlice(
+                gridColumns = prefs.gridColumns,
+                showCloudBadges = prefs.showCloudBadges,
+                wifiOnlyHighRes = prefs.wifiOnlyHighRes,
+                lockHiddenAlbums = prefs.lockHiddenAlbums
+            )
+        }
+        .distinctUntilChanged()
+
     private val syncAndDisplayFlow = combine(
         breadcrumbsFlow,
-        preferencesManager.preferencesFlow,
+        folderPrefsSliceFlow,
         isRefreshingFlow,
         hasLoadedOnceFlow,
         combine(
@@ -325,6 +352,7 @@ class FolderViewModel(
             breadcrumbs = meta.breadcrumbs,
             subfolders = content.subfolders,
             mediaItems = content.mediaItems,
+            unfilteredMediaItems = content.unfilteredItems,
             unfilteredItemCount = content.unfilteredCount,
             gridEntries = content.gridEntries,
             gridColumns = meta.gridColumns,
@@ -393,6 +421,7 @@ class FolderViewModel(
             breadcrumbs = listOf(BreadcrumbItem(initialFolderId, initialFolderName)),
             subfolders = cachedSubfolders,
             mediaItems = cachedMedia,
+            unfilteredMediaItems = cachedMedia,
             unfilteredItemCount = cachedMedia.size,
             gridEntries = initialEntries,
             gridColumns = initialPrefs.gridColumns,
@@ -436,6 +465,7 @@ class FolderViewModel(
         activeFolderFlow.value = folderId to folderName
         selectedIdsFlow.value = emptySet()
         forceSelectionFlow.value = false
+        mediaFilterFlow.value = AlbumMediaFilter.ALL
         viewModeFlow.value = FolderViewMode.HIERARCHY
         breadcrumbsFlow.value = listOf(BreadcrumbItem(folderId, folderName))
         hasLoadedOnceFlow.value = local
@@ -467,10 +497,24 @@ class FolderViewModel(
     }
 
     fun onLocalAlbumRenamed(newName: String) {
-        val currentId = activeFolderFlow.value.first
-        activeFolderFlow.value = currentId to newName
-        breadcrumbsFlow.value = listOf(BreadcrumbItem(currentId, newName))
+        val oldId = activeFolderFlow.value.first
+        activeFolderFlow.value = oldId to newName
+        breadcrumbsFlow.value = listOf(BreadcrumbItem(oldId, newName))
         snackbarFlow.value = "Renamed album to \"$newName\""
+        // Resolve the new MediaStore BUCKET_ID created for the renamed folder & migrate metadata
+        viewModelScope.launch {
+            localMediaRepository.notifyPermissionChanged()
+            val newFolder = withTimeoutOrNull(3_000L) {
+                localMediaRepository.observeLocalAlbums().first { albums ->
+                    albums.any { it.name.equals(newName, ignoreCase = true) && it.id != oldId }
+                }.firstOrNull { it.name.equals(newName, ignoreCase = true) && it.id != oldId }
+            }
+            if (newFolder != null && activeFolderFlow.value.first == oldId) {
+                extrasRepository.migrateLocalAlbumMetadata(oldId, newFolder.id)
+                activeFolderFlow.value = newFolder.id to newFolder.name
+                breadcrumbsFlow.value = listOf(BreadcrumbItem(newFolder.id, newFolder.name))
+            }
+        }
     }
 
     fun toggleSidebar() {
@@ -541,6 +585,13 @@ class FolderViewModel(
         }
     }
 
+    fun setItemsSelectedRange(ids: Set<String>, selected: Boolean) {
+        if (ids.isEmpty()) return
+        selectedIdsFlow.update { current ->
+            if (selected) current + ids else current - ids
+        }
+    }
+
     fun selectAllVisible() {
         val allIds = uiState.value.mediaItems.mapTo(LinkedHashSet()) { it.id }
         selectedIdsFlow.value = allIds
@@ -600,14 +651,15 @@ class FolderViewModel(
         val allHiddenFiles = selected.all {
             com.luminagallery.drive.data.local.HiddenLockedFolderManager.isHiddenFileUri(it.localContentUri)
         }
-        if (allHiddenFiles || localMediaRepository.canManageMediaDirectly()) {
+        val permanentDelete = allHiddenFiles || !localMediaRepository.supportsMediaStoreTrash()
+        if (allHiddenFiles || localMediaRepository.canDeleteDirectlyWithoutDialog()) {
             viewModelScope.launch {
                 localMediaRepository.trashLocalItemsDirectly(selected, toTrash = true)
                     .onSuccess { count ->
                         selectedIdsFlow.value = emptySet()
                         forceSelectionFlow.value = false
                         localMediaRepository.notifyPermissionChanged()
-                        snackbarFlow.value = if (allHiddenFiles) {
+                        snackbarFlow.value = if (permanentDelete) {
                             if (count == 1) "Deleted permanently" else "Deleted $count items permanently"
                         } else {
                             if (count == 1) "Moved to trash" else "Moved $count items to trash"
@@ -621,7 +673,7 @@ class FolderViewModel(
                             if (sender != null) {
                                 pendingTrashFlow.value = sender
                             } else {
-                                snackbarFlow.value = "Trash requires Android 11 or newer"
+                                snackbarFlow.value = err.localizedMessage ?: "Could not delete selected items"
                             }
                         }
                     }
@@ -632,7 +684,7 @@ class FolderViewModel(
         if (sender != null) {
             pendingTrashFlow.value = sender
         } else {
-            snackbarFlow.value = "Trash requires Android 11 or newer"
+            snackbarFlow.value = "Unable to delete selected items"
         }
     }
 
@@ -832,7 +884,15 @@ class FolderViewModel(
         val sort: AlbumMediaSort,
         val showSidebar: Boolean,
         val favoriteIds: Set<String>,
-        val lockedIds: Set<String> = emptySet()
+        val lockedIds: Set<String> = emptySet(),
+        val excludedIds: Set<String> = emptySet()
+    )
+
+    private data class FolderPrefsSlice(
+        val gridColumns: Int,
+        val showCloudBadges: Boolean,
+        val wifiOnlyHighRes: Boolean,
+        val lockHiddenAlbums: Boolean
     )
 
     private data class FolderContent(
@@ -842,6 +902,7 @@ class FolderViewModel(
         val mode: FolderViewMode,
         val subfolders: List<DriveFolder>,
         val mediaItems: List<MediaItem>,
+        val unfilteredItems: List<MediaItem>,
         val unfilteredCount: Int,
         val gridEntries: List<FolderGridEntry>,
         val filter: AlbumMediaFilter,
