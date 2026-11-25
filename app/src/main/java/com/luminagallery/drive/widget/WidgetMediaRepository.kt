@@ -240,11 +240,13 @@ internal object WidgetMediaRepository {
                     }
                 )
                 selectedGroups.map { group ->
-                    val chosen = if (settings.shuffleOrder && group.photos.size > slotsPerFrame) {
-                        group.photos.shuffled().take(slotsPerFrame)
-                    } else {
-                        group.photos.take(slotsPerFrame)
-                    }
+                    val chosen = pickDiversePhotosForGroup(
+                        context = context,
+                        groupPhotos = group.photos,
+                        kind = kind,
+                        settings = settings,
+                        slotsPerFrame = slotsPerFrame
+                    )
                     WidgetResolvedSelection(
                         photos = chosen,
                         caption = WidgetCaptionData(
@@ -290,11 +292,13 @@ internal object WidgetMediaRepository {
                             }
                         )
                         return@withContext picked.map { group ->
-                            val chosen = if (settings.shuffleOrder) {
-                                group.photos.shuffled().take(slotsPerFrame)
-                            } else {
-                                group.photos.take(slotsPerFrame)
-                            }
+                            val chosen = pickDiversePhotosForGroup(
+                                context = context,
+                                groupPhotos = group.photos,
+                                kind = kind,
+                                settings = settings,
+                                slotsPerFrame = slotsPerFrame
+                            )
                             WidgetResolvedSelection(
                                 photos = chosen,
                                 caption = WidgetCaptionData(
@@ -308,9 +312,12 @@ internal object WidgetMediaRepository {
                     }
                 }
                 buildFramesFromFlatList(
+                    context = context,
                     pool = albumPhotos,
                     widgetId = widgetId,
                     prefs = prefs,
+                    kind = kind,
+                    settings = settings,
                     slotsPerFrame = slotsPerFrame,
                     frameCount = frameCount,
                     shuffle = settings.shuffleOrder,
@@ -374,9 +381,12 @@ internal object WidgetMediaRepository {
 
         val shouldShuffle = settings.shuffleOrder || settings.source == WidgetPhotoSource.ALL_PHONE_RANDOM
         return buildFramesFromFlatList(
+            context = context,
             pool = pool,
             widgetId = widgetId,
             prefs = prefs,
+            kind = kind,
+            settings = settings,
             slotsPerFrame = slotsPerFrame,
             frameCount = frameCount,
             shuffle = shouldShuffle,
@@ -396,10 +406,40 @@ internal object WidgetMediaRepository {
         )
     }
 
+    private fun pickDiversePhotosForGroup(
+        context: Context,
+        groupPhotos: List<WidgetPhoto>,
+        kind: PhotoWidgetKind,
+        settings: PhotoWidgetSettings,
+        slotsPerFrame: Int
+    ): List<WidgetPhoto> {
+        if (groupPhotos.size <= 1) return groupPhotos
+        val randomize = settings.shuffleOrder || kind == PhotoWidgetKind.COLLAGE
+        if (!settings.avoidSimilarPhotos || !kind.isMultiPhoto) {
+            return if (randomize && groupPhotos.size > slotsPerFrame) {
+                groupPhotos.shuffled().take(slotsPerFrame)
+            } else {
+                groupPhotos.take(slotsPerFrame)
+            }
+        }
+        val allowStepDown = settings.collageLayout == WidgetCollageLayout.AUTO && kind != PhotoWidgetKind.STRIP
+        return WidgetPhotoDiversity.selectVisuallyDistinctPhotos(
+            context = context,
+            candidates = groupPhotos,
+            desiredMax = slotsPerFrame,
+            minSlots = minOf(2, groupPhotos.size),
+            allowStepDownOnDuplicates = allowStepDown,
+            randomize = randomize
+        )
+    }
+
     private fun buildFramesFromFlatList(
+        context: Context,
         pool: List<WidgetPhoto>,
         widgetId: Int,
         prefs: android.content.SharedPreferences,
+        kind: PhotoWidgetKind,
+        settings: PhotoWidgetSettings,
         slotsPerFrame: Int,
         frameCount: Int,
         shuffle: Boolean,
@@ -440,12 +480,25 @@ internal object WidgetMediaRepository {
         }
 
         val effectiveFrames = if (finalOrdered.size <= step) 1 else frameCount.coerceAtLeast(1)
+        val useDiversity = settings.avoidSimilarPhotos && kind.isMultiPhoto && step > 1 && finalOrdered.size > step
         return (0 until effectiveFrames).map { frameOffset ->
             val frameStart = (startIdx + frameOffset * step) % finalOrdered.size
-            val chosen = ArrayList<WidgetPhoto>(step)
-            val limit = minOf(step, finalOrdered.size)
-            for (slot in 0 until limit) {
-                chosen.add(finalOrdered[(frameStart + slot) % finalOrdered.size])
+            val windowSize = if (useDiversity) minOf(step * 3, finalOrdered.size, 16) else minOf(step, finalOrdered.size)
+            val window = ArrayList<WidgetPhoto>(windowSize)
+            for (slot in 0 until windowSize) {
+                window.add(finalOrdered[(frameStart + slot) % finalOrdered.size])
+            }
+            val chosen = if (useDiversity) {
+                WidgetPhotoDiversity.selectVisuallyDistinctPhotos(
+                    context = context,
+                    candidates = window,
+                    desiredMax = step,
+                    minSlots = minOf(2, window.size),
+                    allowStepDownOnDuplicates = settings.collageLayout == WidgetCollageLayout.AUTO && kind != PhotoWidgetKind.STRIP,
+                    randomize = shuffle
+                )
+            } else {
+                window
             }
             WidgetResolvedSelection(
                 photos = chosen,
@@ -643,6 +696,9 @@ internal object WidgetMediaRepository {
             add(MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
             add(MediaStore.Images.Media.DATE_TAKEN)
             add(MediaStore.Images.Media.DATE_MODIFIED)
+            add(MediaStore.Images.Media.WIDTH)
+            add(MediaStore.Images.Media.HEIGHT)
+            add(MediaStore.Images.Media.ORIENTATION)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 add(MediaStore.MediaColumns.RELATIVE_PATH)
             }
@@ -664,6 +720,9 @@ internal object WidgetMediaRepository {
                 val bucketCol = c.getColumnIndex(MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
                 val takenCol = c.getColumnIndex(MediaStore.Images.Media.DATE_TAKEN)
                 val modCol = c.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_MODIFIED)
+                val widthCol = c.getColumnIndex(MediaStore.Images.Media.WIDTH)
+                val heightCol = c.getColumnIndex(MediaStore.Images.Media.HEIGHT)
+                val orientCol = c.getColumnIndex(MediaStore.Images.Media.ORIENTATION)
                 val relPathCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     c.getColumnIndex(MediaStore.MediaColumns.RELATIVE_PATH)
                 } else -1
@@ -681,6 +740,9 @@ internal object WidgetMediaRepository {
                     val relPath = if (relPathCol >= 0) c.getString(relPathCol).orEmpty() else ""
                     val taken = if (takenCol >= 0) c.getLong(takenCol) else 0L
                     val ms = if (taken > 0L) taken else c.getLong(modCol) * 1000L
+                    val wPx = if (widthCol >= 0) c.getInt(widthCol) else 0
+                    val hPx = if (heightCol >= 0) c.getInt(heightCol) else 0
+                    val orient = if (orientCol >= 0) c.getInt(orientCol) else 0
                     val isScreenshot = album.contains("screenshot", ignoreCase = true) ||
                         relPath.contains("screenshot", ignoreCase = true)
                     val isSysFav = favCol >= 0 && c.getInt(favCol) == 1
@@ -692,7 +754,10 @@ internal object WidgetMediaRepository {
                             albumName = album,
                             takenAtMs = ms,
                             bucketId = luminaBucketId,
-                            isScreenshot = isScreenshot
+                            isScreenshot = isScreenshot,
+                            width = wPx,
+                            height = hPx,
+                            orientation = orient
                         ),
                         isSysFav
                     )

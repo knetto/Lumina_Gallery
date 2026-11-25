@@ -15,8 +15,25 @@ internal data class WidgetPhoto(
     val albumName: String,
     val takenAtMs: Long,
     val bucketId: String = "",
-    val isScreenshot: Boolean = false
-)
+    val isScreenshot: Boolean = false,
+    val width: Int = 0,
+    val height: Int = 0,
+    val orientation: Int = 0
+) {
+    val displayWidth: Int
+        get() = if (orientation == 90 || orientation == 270) height else width
+
+    val displayHeight: Int
+        get() = if (orientation == 90 || orientation == 270) width else height
+
+    val aspectRatio: Float
+        get() = if (displayWidth > 0 && displayHeight > 0) {
+            (displayWidth.toFloat() / displayHeight.toFloat()).coerceIn(0.35f, 3.0f)
+        } else 1f
+
+    val isLandscape: Boolean get() = aspectRatio >= 1.18f
+    val isPortrait: Boolean get() = aspectRatio <= 0.85f
+}
 
 @Serializable
 internal enum class WidgetMemorySource { DAYS, TRIPS, BOTH }
@@ -69,7 +86,7 @@ internal fun buildWidgetMemories(
                 WidgetMemory(
                     title = WidgetDateFormat.format(day),
                     subtitle = null,
-                    photos = sameDay.take(12),
+                    photos = sameDay.take(36),
                     latestDay = day,
                     groupKind = WidgetGroupKind.PHOTO_DAY,
                     groupKey = "day_$day"
@@ -101,7 +118,7 @@ internal fun buildWidgetMemories(
                     trips += WidgetMemory(
                         title = if (country.isBlank()) city else "$city, $country",
                         subtitle = dateLabel,
-                        photos = cityPhotos.subList(visitStart, minOf(end, visitStart + 12)).map { it.first },
+                        photos = cityPhotos.subList(visitStart, minOf(end, visitStart + 36)).map { it.first },
                         latestDay = firstDay,
                         groupKind = WidgetGroupKind.LOCATION_TRIP,
                         groupKey = "trip_${city}_${firstDay}"
@@ -145,7 +162,7 @@ internal fun buildOnThisDayMemories(
             WidgetMemory(
                 title = title,
                 subtitle = WidgetDateFormat.format(latest),
-                photos = entries.sortedByDescending { it.first.takenAtMs }.take(12).map { it.first },
+                photos = entries.sortedByDescending { it.first.takenAtMs }.take(36).map { it.first },
                 latestDay = latest,
                 groupKind = WidgetGroupKind.ON_THIS_DAY,
                 groupKey = "otd_$year"

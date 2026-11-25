@@ -203,6 +203,7 @@ class PhotoWidgetSettingsActivity : ComponentActivity() {
                             updated.selectedAlbumIds != initialSettings.selectedAlbumIds ||
                             updated.selectedPhotoIds != initialSettings.selectedPhotoIds ||
                             updated.excludeScreenshots != initialSettings.excludeScreenshots ||
+                            updated.avoidSimilarPhotos != initialSettings.avoidSimilarPhotos ||
                             updated.memorySource != initialSettings.memorySource ||
                             updated.groupByAlbum != initialSettings.groupByAlbum
                         lifecycleScope.launch {
@@ -309,6 +310,7 @@ private fun WidgetSettingsRoot(
             settings.selectedAlbumIds == initialSettings.selectedAlbumIds &&
             settings.selectedPhotoIds == initialSettings.selectedPhotoIds &&
             settings.excludeScreenshots == initialSettings.excludeScreenshots &&
+            settings.avoidSimilarPhotos == initialSettings.avoidSimilarPhotos &&
             settings.memorySource == initialSettings.memorySource &&
             settings.groupByAlbum == initialSettings.groupByAlbum
     }
@@ -658,9 +660,10 @@ private fun WidgetSettingsRoot(
 
                     val showShuffleToggle = settings.source != WidgetPhotoSource.ALL_PHONE_RANDOM
                     val showGroupToggle = kind.isMultiPhoto && settings.source == WidgetPhotoSource.SELECTED_ALBUMS
+                    val showDiversityToggle = kind.isMultiPhoto
                     val showScreenshotToggle = settings.source != WidgetPhotoSource.SELECTED_PHOTOS
 
-                    if (showShuffleToggle || showGroupToggle || showScreenshotToggle) {
+                    if (showShuffleToggle || showGroupToggle || showDiversityToggle || showScreenshotToggle) {
                         HorizontalDivider(
                             modifier = Modifier.padding(vertical = 10.dp),
                             color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)
@@ -675,8 +678,17 @@ private fun WidgetSettingsRoot(
                             onCheckedChange = { settings = settings.copy(shuffleOrder = it) }
                         )
                     }
-                    if (showGroupToggle) {
+                    if (showDiversityToggle) {
                         if (showShuffleToggle) SubtleRowDivider()
+                        WidgetToggleRow(
+                            title = "Avoid similar photos",
+                            subtitle = "Skip burst retakes & look-alike shots so collages show different moments",
+                            checked = settings.avoidSimilarPhotos,
+                            onCheckedChange = { settings = settings.copy(avoidSimilarPhotos = it) }
+                        )
+                    }
+                    if (showGroupToggle) {
+                        if (showShuffleToggle || showDiversityToggle) SubtleRowDivider()
                         WidgetToggleRow(
                             title = "Group collage by album",
                             subtitle = "Keep each collage focused on one chosen album",
@@ -685,7 +697,7 @@ private fun WidgetSettingsRoot(
                         )
                     }
                     if (showScreenshotToggle) {
-                        if (showShuffleToggle || showGroupToggle) SubtleRowDivider()
+                        if (showShuffleToggle || showDiversityToggle || showGroupToggle) SubtleRowDivider()
                         WidgetToggleRow(
                             title = "Exclude screenshots",
                             subtitle = "Skip the Screenshots folder when picking photos",
@@ -795,6 +807,7 @@ private data class PreviewSourceKey(
     val selectedAlbumIds: List<String>,
     val selectedPhotoIds: List<String>,
     val excludeScreenshots: Boolean,
+    val avoidSimilarPhotos: Boolean,
     val memorySource: WidgetMemorySource,
     val groupByAlbum: Boolean,
     val usePlacedWidgetPhotos: Boolean,
@@ -830,6 +843,7 @@ private fun PinnedWidgetPreviewHeader(
         settings.selectedAlbumIds,
         settings.selectedPhotoIds,
         settings.excludeScreenshots,
+        settings.avoidSimilarPhotos,
         settings.memorySource,
         settings.groupByAlbum,
         usePlacedWidgetPhotos,
@@ -842,6 +856,7 @@ private fun PinnedWidgetPreviewHeader(
             selectedAlbumIds = settings.selectedAlbumIds,
             selectedPhotoIds = settings.selectedPhotoIds,
             excludeScreenshots = settings.excludeScreenshots,
+            avoidSimilarPhotos = settings.avoidSimilarPhotos,
             memorySource = settings.memorySource,
             groupByAlbum = settings.groupByAlbum,
             usePlacedWidgetPhotos = usePlacedWidgetPhotos,
@@ -891,15 +906,17 @@ private fun PinnedWidgetPreviewHeader(
             val renderH = (rawH * clampFactor).roundToInt().coerceAtLeast(96)
             val effDensity = (baseScale * clampFactor).coerceAtLeast(0.85f)
 
-            val pattern = HyperOsGlassRenderer.resolveTilePattern(
+            val (pattern, orderedBitmaps) = HyperOsGlassRenderer.resolveSmartPatternAndOrder(
                 kind = kind,
                 collageLayout = settings.collageLayout,
                 widthDp = realW,
                 heightDp = realH,
-                photoCount = loaded.bitmaps.size
+                photos = loaded.bitmaps,
+                aspectRatioOf = { bmp -> (bmp.width.toFloat() / bmp.height.coerceAtLeast(1)).coerceIn(0.35f, 3.0f) },
+                varietySeed = (widgetId + previewShuffleTick) and 0x7FFFFFFF
             )
             HyperOsGlassRenderer.renderWidgetBitmap(
-                photos = loaded.bitmaps,
+                photos = orderedBitmaps,
                 pattern = pattern,
                 widthPx = renderW,
                 heightPx = renderH,
@@ -1119,7 +1136,11 @@ private suspend fun loadPreviewSample(
     usePlacedWidgetPhotos: Boolean,
     advanceRandom: Boolean
 ): PreviewPhotoSample {
-    val maxSlots = if (kind.isMultiPhoto) 4 else 1
+    val maxSlots = when (kind) {
+        PhotoWidgetKind.COLLAGE, PhotoWidgetKind.MEMORIES -> 6
+        PhotoWidgetKind.STRIP -> 4
+        else -> 1
+    }
 
     // 1. If editing an already-placed widget with its unchanged source, load the EXACT photos currently shown on it!
     if (usePlacedWidgetPhotos && widgetId >= 0) {
@@ -1375,48 +1396,68 @@ private fun CollageLayoutGrid(
     selected: WidgetCollageLayout,
     onSelect: (WidgetCollageLayout) -> Unit
 ) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        WidgetCollageLayout.entries.forEach { layout ->
-            val isSelected = layout == selected
-            Surface(
-                shape = RoundedCornerShape(16.dp),
-                color = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
-                else MaterialTheme.colorScheme.surfaceContainer,
-                border = BorderStroke(
-                    width = if (isSelected) 1.5.dp else 0.75.dp,
-                    color = if (isSelected) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)
-                ),
-                modifier = Modifier
-                    .weight(1f)
-                    .clip(RoundedCornerShape(16.dp))
-                    .clickable { onSelect(layout) }
+    val rows = listOf(
+        listOf(
+            WidgetCollageLayout.AUTO,
+            WidgetCollageLayout.HERO_SIDE,
+            WidgetCollageLayout.GRID_2X2,
+            WidgetCollageLayout.BENTO_4
+        ),
+        listOf(
+            WidgetCollageLayout.BENTO_TOP,
+            WidgetCollageLayout.MOSAIC_5,
+            WidgetCollageLayout.GRID_6
+        )
+    )
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        rows.forEach { row ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Column(
-                    modifier = Modifier.padding(vertical = 10.dp, horizontal = 4.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    CollageMiniDiagram(
-                        layout = layout,
-                        tint = if (isSelected) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Text(
-                        text = when (layout) {
-                            WidgetCollageLayout.AUTO -> "Auto"
-                            WidgetCollageLayout.HERO_SIDE -> "Hero"
-                            WidgetCollageLayout.GRID_2X2 -> "2×2"
-                            WidgetCollageLayout.BENTO_4 -> "Bento"
-                        },
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                row.forEach { layout ->
+                    val isSelected = layout == selected
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
+                        else MaterialTheme.colorScheme.surfaceContainer,
+                        border = BorderStroke(
+                            width = if (isSelected) 1.5.dp else 0.75.dp,
+                            color = if (isSelected) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)
                         ),
-                        maxLines = 1
-                    )
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(16.dp))
+                            .clickable { onSelect(layout) }
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(vertical = 9.dp, horizontal = 4.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
+                            CollageMiniDiagram(
+                                layout = layout,
+                                tint = if (isSelected) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = when (layout) {
+                                    WidgetCollageLayout.AUTO -> "Smart"
+                                    WidgetCollageLayout.HERO_SIDE -> "Hero + 2"
+                                    WidgetCollageLayout.GRID_2X2 -> "2×2"
+                                    WidgetCollageLayout.BENTO_4 -> "Bento 4"
+                                    WidgetCollageLayout.BENTO_TOP -> "Top Hero"
+                                    WidgetCollageLayout.MOSAIC_5 -> "Mosaic 5"
+                                    WidgetCollageLayout.GRID_6 -> "6-Grid"
+                                },
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                                ),
+                                maxLines = 1
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -1425,10 +1466,11 @@ private fun CollageLayoutGrid(
 
 @Composable
 private fun CollageMiniDiagram(layout: WidgetCollageLayout, tint: Color) {
-    Canvas(modifier = Modifier.size(width = 34.dp, height = 24.dp)) {
+    Canvas(modifier = Modifier.size(width = 36.dp, height = 24.dp)) {
         val cr = CornerRadius(5.dp.toPx())
         val fill = tint.copy(alpha = 0.16f)
         val stroke = Stroke(width = 1.2.dp.toPx())
+        val lw = 1.dp.toPx()
         drawRoundRect(color = fill, cornerRadius = cr)
         drawRoundRect(color = tint.copy(alpha = 0.75f), cornerRadius = cr, style = stroke)
         when (layout) {
@@ -1436,21 +1478,45 @@ private fun CollageMiniDiagram(layout: WidgetCollageLayout, tint: Color) {
                 val x = size.width * 0.52f
                 val y = size.height * 0.52f
                 val x2 = x + (size.width - x) * 0.5f
-                drawLine(tint, Offset(x, 0f), Offset(x, size.height), strokeWidth = 1.dp.toPx())
-                drawLine(tint, Offset(x, y), Offset(size.width, y), strokeWidth = 1.dp.toPx())
-                drawLine(tint, Offset(x2, y), Offset(x2, size.height), strokeWidth = 1.dp.toPx())
+                drawLine(tint, Offset(x, 0f), Offset(x, size.height), strokeWidth = lw)
+                drawLine(tint, Offset(x, y), Offset(size.width, y), strokeWidth = lw)
+                drawLine(tint, Offset(x2, y), Offset(x2, size.height), strokeWidth = lw)
             }
             WidgetCollageLayout.HERO_SIDE -> {
                 val x = size.width * 0.58f
                 val y = size.height * 0.5f
-                drawLine(tint, Offset(x, 0f), Offset(x, size.height), strokeWidth = 1.dp.toPx())
-                drawLine(tint, Offset(x, y), Offset(size.width, y), strokeWidth = 1.dp.toPx())
+                drawLine(tint, Offset(x, 0f), Offset(x, size.height), strokeWidth = lw)
+                drawLine(tint, Offset(x, y), Offset(size.width, y), strokeWidth = lw)
             }
             WidgetCollageLayout.GRID_2X2 -> {
                 val x = size.width * 0.5f
                 val y = size.height * 0.5f
-                drawLine(tint, Offset(x, 0f), Offset(x, size.height), strokeWidth = 1.dp.toPx())
-                drawLine(tint, Offset(0f, y), Offset(size.width, y), strokeWidth = 1.dp.toPx())
+                drawLine(tint, Offset(x, 0f), Offset(x, size.height), strokeWidth = lw)
+                drawLine(tint, Offset(0f, y), Offset(size.width, y), strokeWidth = lw)
+            }
+            WidgetCollageLayout.BENTO_TOP -> {
+                val y = size.height * 0.54f
+                val x1 = size.width / 3f
+                val x2 = size.width * 2f / 3f
+                drawLine(tint, Offset(0f, y), Offset(size.width, y), strokeWidth = lw)
+                drawLine(tint, Offset(x1, y), Offset(x1, size.height), strokeWidth = lw)
+                drawLine(tint, Offset(x2, y), Offset(x2, size.height), strokeWidth = lw)
+            }
+            WidgetCollageLayout.MOSAIC_5 -> {
+                val x = size.width * 0.44f
+                val x2 = x + (size.width - x) * 0.5f
+                val y = size.height * 0.5f
+                drawLine(tint, Offset(x, 0f), Offset(x, size.height), strokeWidth = lw)
+                drawLine(tint, Offset(x, y), Offset(size.width, y), strokeWidth = lw)
+                drawLine(tint, Offset(x2, 0f), Offset(x2, size.height), strokeWidth = lw)
+            }
+            WidgetCollageLayout.GRID_6 -> {
+                val x1 = size.width / 3f
+                val x2 = size.width * 2f / 3f
+                val y = size.height * 0.5f
+                drawLine(tint, Offset(x1, 0f), Offset(x1, size.height), strokeWidth = lw)
+                drawLine(tint, Offset(x2, 0f), Offset(x2, size.height), strokeWidth = lw)
+                drawLine(tint, Offset(0f, y), Offset(size.width, y), strokeWidth = lw)
             }
         }
     }

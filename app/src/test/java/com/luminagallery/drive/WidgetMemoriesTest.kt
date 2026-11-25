@@ -6,9 +6,11 @@ import com.luminagallery.drive.widget.LuminaPhotoWidgetProvider
 import com.luminagallery.drive.widget.PhotoWidgetKind
 import com.luminagallery.drive.widget.PhotoWidgetSettings
 import com.luminagallery.drive.widget.ResolvedTilePattern
+import com.luminagallery.drive.widget.VisualFingerprint
 import com.luminagallery.drive.widget.WidgetCollageLayout
 import com.luminagallery.drive.widget.WidgetMemorySource
 import com.luminagallery.drive.widget.WidgetPhoto
+import com.luminagallery.drive.widget.WidgetPhotoDiversity
 import com.luminagallery.drive.widget.WidgetPhotoSource
 import com.luminagallery.drive.widget.WidgetShuffleInterval
 import com.luminagallery.drive.widget.buildAlbumCollageGroups
@@ -21,6 +23,7 @@ import org.junit.Test
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
+import kotlin.random.Random
 
 class WidgetMemoriesTest {
     @Test
@@ -104,9 +107,16 @@ class WidgetMemoriesTest {
                 PhotoWidgetKind.COLLAGE, WidgetCollageLayout.AUTO, 320f, 160f, 4
             )
         )
-        // Tall 2x4 collage -> vertical Hero Top + 2 bottom tiles
+        // Tall 2x4 collage with 3 photos -> vertical Hero Top + 2 bottom tiles
         assertEquals(
             ResolvedTilePattern.HERO_TOP_2_BOTTOM,
+            HyperOsGlassRenderer.resolveTilePattern(
+                PhotoWidgetKind.COLLAGE, WidgetCollageLayout.AUTO, 150f, 310f, 3
+            )
+        )
+        // Tall 2x4 collage with 4 photos -> Top Hero + 3 bottom tiles
+        assertEquals(
+            ResolvedTilePattern.BENTO_4_TOP_HERO,
             HyperOsGlassRenderer.resolveTilePattern(
                 PhotoWidgetKind.COLLAGE, WidgetCollageLayout.AUTO, 150f, 310f, 4
             )
@@ -158,16 +168,128 @@ class WidgetMemoriesTest {
         assertTrue(LuminaPhotoWidgetProvider.isWidgetAdvanceDue(WidgetShuffleInterval.HOUR_1, now - 3_600_000L, now))
     }
 
+    @Test
+    fun smartCollageLayoutAdaptsToDayImageCountAndPhotoOrientations() {
+        // 2 wide landscape photos on a square widget -> vertical stack (wide tiles matching landscape)
+        assertEquals(
+            ResolvedTilePattern.STRIP_VERTICAL_2,
+            HyperOsGlassRenderer.resolveTilePattern(
+                PhotoWidgetKind.COLLAGE, WidgetCollageLayout.AUTO, 180f, 180f, 2,
+                photoAspectRatios = listOf(1.78f, 1.50f)
+            )
+        )
+        // 2 tall portrait photos on a square widget -> side-by-side split (tall tiles matching portrait)
+        assertEquals(
+            ResolvedTilePattern.STRIP_HORIZONTAL_2,
+            HyperOsGlassRenderer.resolveTilePattern(
+                PhotoWidgetKind.COLLAGE, WidgetCollageLayout.AUTO, 180f, 180f, 2,
+                photoAspectRatios = listOf(0.56f, 0.75f)
+            )
+        )
+        // 3 tall portraits on a wide 4x2 widget -> 3 vertical panes instead of slicing portraits flat
+        assertEquals(
+            ResolvedTilePattern.STRIP_HORIZONTAL_3,
+            HyperOsGlassRenderer.resolveTilePattern(
+                PhotoWidgetKind.COLLAGE, WidgetCollageLayout.AUTO, 320f, 165f, 3,
+                photoAspectRatios = listOf(0.65f, 0.70f, 0.68f)
+            )
+        )
+        // 1 wide panoramic/landscape + 3 portraits on 4x3 widget -> Top Hero + 3 bottom portrait panes
+        assertEquals(
+            ResolvedTilePattern.BENTO_4_TOP_HERO,
+            HyperOsGlassRenderer.resolveTilePattern(
+                PhotoWidgetKind.COLLAGE, WidgetCollageLayout.AUTO, 320f, 240f, 4,
+                photoAspectRatios = listOf(2.1f, 0.70f, 0.72f, 0.68f)
+            )
+        )
+        // Rich day with 6 distinct photos on large 4x3 widget -> 6-photo 3x2 grid
+        assertEquals(
+            ResolvedTilePattern.GRID_3X2,
+            HyperOsGlassRenderer.resolveTilePattern(
+                PhotoWidgetKind.COLLAGE, WidgetCollageLayout.AUTO, 330f, 240f, 6,
+                photoAspectRatios = listOf(1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f)
+            )
+        )
+    }
+
+    @Test
+    fun slotAssignmentPlacesPortraitInPortraitSlotAndLandscapeInLandscapeSlot() {
+        val landscape1 = photo("wide1", "2026-11-20T10:00:00Z", width = 4000, height = 2250)
+        val landscape2 = photo("wide2", "2026-11-20T10:30:00Z", width = 4000, height = 2667)
+        val portrait = photo("tall", "2026-11-20T11:00:00Z", width = 2250, height = 4000)
+
+        // Pass landscape first; HERO_LEFT_2_RIGHT has portrait hero left (slot 0) and 2 landscape slots right (1, 2)
+        val (pattern, ordered) = HyperOsGlassRenderer.resolveSmartPatternAndOrder(
+            kind = PhotoWidgetKind.COLLAGE,
+            collageLayout = WidgetCollageLayout.HERO_SIDE,
+            widthDp = 320f,
+            heightDp = 220f,
+            photos = listOf(landscape1, landscape2, portrait),
+            aspectRatioOf = { it.aspectRatio }
+        )
+        assertEquals(ResolvedTilePattern.HERO_LEFT_2_RIGHT, pattern)
+        assertEquals("tall", ordered[0].luminaItemId)
+        assertTrue(setOf(ordered[1].luminaItemId, ordered[2].luminaItemId) == setOf("wide1", "wide2"))
+    }
+
+    @Test
+    fun temporalAndVisualDiversitySkipsBurstRetakesAndNearDuplicates() {
+        // 4 rapid burst shots at 10:00:00..10:00:09 + 2 distinct scenes hours later
+        val burst1 = photo("b1", "2026-11-20T10:00:00Z")
+        val burst2 = photo("b2", "2026-11-20T10:00:03Z")
+        val burst3 = photo("b3", "2026-11-20T10:00:06Z")
+        val burst4 = photo("b4", "2026-11-20T10:00:09Z")
+        val lunch = photo("lunch", "2026-11-20T13:15:00Z")
+        val sunset = photo("sunset", "2026-11-20T18:30:00Z")
+
+        val temporal = WidgetPhotoDiversity.selectTemporallyDiverseCandidates(
+            photos = listOf(burst1, burst2, burst3, burst4, lunch, sunset),
+            maxCount = 3,
+            randomize = false
+        )
+        // Must pick 1 burst + lunch + sunset (NOT 3 copies from the burst!)
+        assertEquals(listOf("b1", "lunch", "sunset"), temporal.map { it.luminaItemId })
+
+        // Even if two shots are hours apart, visual fingerprinting rejects near-identical frames
+        val identicalFpA = VisualFingerprint(0x00FF00FF00FF00FFL, IntArray(48) { 40 })
+        val identicalFpB = VisualFingerprint(0x00FF00FF00FF00FEL, IntArray(48) { 42 })
+        val distinctFpC = VisualFingerprint(0xFF00FF00FF00FF00UL.toLong(), IntArray(48) { 210 })
+        val distinctFpD = VisualFingerprint(0x0F0F0F0FF0F0F0F0L, IntArray(48) { if (it % 3 == 0) 240 else 20 })
+
+        val chosen = WidgetPhotoDiversity.selectFromFingerprints(
+            candidates = listOf(burst1, lunch, burst2, sunset),
+            fingerprints = mapOf(
+                "b1" to identicalFpA,
+                "b2" to identicalFpB,
+                "lunch" to distinctFpC,
+                "sunset" to distinctFpD
+            ),
+            desiredMax = 4,
+            minSlots = 2,
+            allowStepDownOnDuplicates = true,
+            randomize = false,
+            random = Random(1)
+        )
+        // Steps down from 4 to 3 genuinely distinct photos instead of including near-duplicate b2!
+        assertEquals(3, chosen.size)
+        assertTrue(chosen.map { it.luminaItemId }.containsAll(listOf("b1", "lunch", "sunset")))
+        assertFalse(chosen.any { it.luminaItemId == "b2" })
+    }
+
     private fun photo(
         id: String,
         date: String,
         album: String = "Camera",
-        bucket: String = "local_bucket_cam"
+        bucket: String = "local_bucket_cam",
+        width: Int = 3000,
+        height: Int = 4000
     ) = WidgetPhoto(
         luminaItemId = id,
         uri = "content://test/$id",
         albumName = album,
         takenAtMs = Instant.parse(date).toEpochMilli(),
-        bucketId = bucket
+        bucketId = bucket,
+        width = width,
+        height = height
     )
 }

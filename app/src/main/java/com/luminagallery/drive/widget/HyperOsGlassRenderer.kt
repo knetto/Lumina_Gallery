@@ -26,19 +26,35 @@ import kotlin.math.roundToInt
 
 /**
  * Geometric tile layout chosen for a multi-photo widget based on user layout preference,
- * actual resized widget aspect ratio, and available photo count.
+ * actual resized widget aspect ratio, distinct photo count of the day/group, and photo orientations.
  */
 internal enum class ResolvedTilePattern(val maxSlots: Int) {
     SINGLE(1),
+    STRIP_HORIZONTAL_2(2),
+    STRIP_VERTICAL_2(2),
     HERO_LEFT_2_RIGHT(3),
+    HERO_RIGHT_2_LEFT(3),
     HERO_TOP_2_BOTTOM(3),
+    STRIP_HORIZONTAL_3(3),
+    STRIP_VERTICAL_3(3),
     GRID_2X2(4),
     BENTO_4_WIDE(4),
-    STRIP_HORIZONTAL_2(2),
-    STRIP_HORIZONTAL_3(3),
+    BENTO_4_TOP_HERO(4),
     STRIP_HORIZONTAL_4(4),
-    STRIP_VERTICAL_2(2),
-    STRIP_VERTICAL_3(3)
+    MOSAIC_5_HERO_LEFT(5),
+    MOSAIC_5_HERO_TOP(5),
+    GRID_3X2(6),
+    GRID_2X3(6)
+}
+
+internal data class TileBox(
+    val left: Float,
+    val top: Float,
+    val right: Float,
+    val bottom: Float
+) {
+    val width: Float get() = right - left
+    val height: Float get() = bottom - top
 }
 
 internal data class WidgetCaptionData(
@@ -58,14 +74,17 @@ internal object HyperOsGlassRenderer {
     private val MonthFormatter = DateTimeFormatter.ofPattern("MMM", Locale.getDefault())
 
     /**
-     * Deterministically selects the best responsive tile pattern for a widget's exact dimensions.
+     * Deterministically selects the best responsive tile pattern for a widget's exact dimensions,
+     * available distinct photo count, and individual photo aspect ratios (width/height).
      */
     fun resolveTilePattern(
         kind: PhotoWidgetKind,
         collageLayout: WidgetCollageLayout,
         widthDp: Float,
         heightDp: Float,
-        photoCount: Int
+        photoCount: Int,
+        photoAspectRatios: List<Float> = emptyList(),
+        varietySeed: Int = 0
     ): ResolvedTilePattern {
         if (!kind.isMultiPhoto || photoCount <= 1) return ResolvedTilePattern.SINGLE
 
@@ -86,51 +105,238 @@ internal object HyperOsGlassRenderer {
             }
         }
 
-        // Collage & Memories adaptive patterns
-        return when (collageLayout) {
-            WidgetCollageLayout.HERO_SIDE -> when {
-                photoCount == 2 -> if (aspect < 0.85f) ResolvedTilePattern.STRIP_VERTICAL_2 else ResolvedTilePattern.STRIP_HORIZONTAL_2
+        // Explicit user-chosen layout overrides (gracefully adapting when a day has fewer photos)
+        when (collageLayout) {
+            WidgetCollageLayout.HERO_SIDE -> return when {
+                photoCount == 2 -> bestTwoPhotoPattern(safeW, safeH, photoAspectRatios)
                 aspect < 0.82f -> ResolvedTilePattern.HERO_TOP_2_BOTTOM
                 else -> ResolvedTilePattern.HERO_LEFT_2_RIGHT
             }
-            WidgetCollageLayout.GRID_2X2 -> when {
+            WidgetCollageLayout.GRID_2X2 -> return when {
                 photoCount >= 4 -> ResolvedTilePattern.GRID_2X2
-                photoCount == 3 -> if (aspect < 0.85f) ResolvedTilePattern.HERO_TOP_2_BOTTOM else ResolvedTilePattern.HERO_LEFT_2_RIGHT
-                else -> if (aspect < 0.85f) ResolvedTilePattern.STRIP_VERTICAL_2 else ResolvedTilePattern.STRIP_HORIZONTAL_2
+                photoCount == 3 -> bestThreePhotoPattern(safeW, safeH, photoAspectRatios, varietySeed)
+                else -> bestTwoPhotoPattern(safeW, safeH, photoAspectRatios)
             }
-            WidgetCollageLayout.BENTO_4 -> when {
-                photoCount >= 4 && aspect >= 1.08f -> ResolvedTilePattern.BENTO_4_WIDE
+            WidgetCollageLayout.BENTO_4 -> return when {
+                photoCount >= 4 && aspect >= 1.05f -> ResolvedTilePattern.BENTO_4_WIDE
                 photoCount >= 4 -> ResolvedTilePattern.GRID_2X2
-                photoCount == 3 -> if (aspect < 0.85f) ResolvedTilePattern.HERO_TOP_2_BOTTOM else ResolvedTilePattern.HERO_LEFT_2_RIGHT
-                else -> if (aspect < 0.85f) ResolvedTilePattern.STRIP_VERTICAL_2 else ResolvedTilePattern.STRIP_HORIZONTAL_2
+                photoCount == 3 -> bestThreePhotoPattern(safeW, safeH, photoAspectRatios, varietySeed)
+                else -> bestTwoPhotoPattern(safeW, safeH, photoAspectRatios)
             }
-            WidgetCollageLayout.AUTO -> when {
-                // Very wide short banner (e.g. 4x1 or 5x1)
-                aspect >= 2.15f -> when {
-                    photoCount >= 4 && safeW >= 290f -> ResolvedTilePattern.STRIP_HORIZONTAL_4
-                    photoCount >= 3 -> ResolvedTilePattern.STRIP_HORIZONTAL_3
-                    else -> ResolvedTilePattern.STRIP_HORIZONTAL_2
-                }
-                // Narrow tall portrait (e.g. 1x3, 1x4, 2x4)
-                aspect < 0.78f -> when {
-                    safeW < 105f && photoCount >= 3 -> ResolvedTilePattern.STRIP_VERTICAL_3
-                    photoCount >= 3 -> ResolvedTilePattern.HERO_TOP_2_BOTTOM
-                    else -> ResolvedTilePattern.STRIP_VERTICAL_2
-                }
-                // Wide landscape collage (e.g. 4x2, 4x3, 5x3)
-                aspect >= 1.22f -> when {
-                    photoCount >= 4 && safeW >= 255f && safeH >= 145f -> ResolvedTilePattern.BENTO_4_WIDE
-                    photoCount >= 3 -> ResolvedTilePattern.HERO_LEFT_2_RIGHT
-                    else -> ResolvedTilePattern.STRIP_HORIZONTAL_2
-                }
-                // Square-ish (2x2, 3x3, 4x4)
-                else -> when {
-                    photoCount >= 4 -> ResolvedTilePattern.GRID_2X2
-                    photoCount == 3 -> ResolvedTilePattern.HERO_TOP_2_BOTTOM
-                    else -> ResolvedTilePattern.STRIP_HORIZONTAL_2
-                }
+            WidgetCollageLayout.BENTO_TOP -> return when {
+                photoCount >= 4 -> ResolvedTilePattern.BENTO_4_TOP_HERO
+                photoCount == 3 -> ResolvedTilePattern.HERO_TOP_2_BOTTOM
+                else -> bestTwoPhotoPattern(safeW, safeH, photoAspectRatios)
+            }
+            WidgetCollageLayout.MOSAIC_5 -> return when {
+                photoCount >= 5 && aspect >= 1.15f -> ResolvedTilePattern.MOSAIC_5_HERO_LEFT
+                photoCount >= 5 -> ResolvedTilePattern.MOSAIC_5_HERO_TOP
+                photoCount == 4 -> bestFourPhotoPattern(safeW, safeH, photoAspectRatios)
+                photoCount == 3 -> bestThreePhotoPattern(safeW, safeH, photoAspectRatios, varietySeed)
+                else -> bestTwoPhotoPattern(safeW, safeH, photoAspectRatios)
+            }
+            WidgetCollageLayout.GRID_6 -> return when {
+                photoCount >= 6 && aspect < 0.85f -> ResolvedTilePattern.GRID_2X3
+                photoCount >= 6 -> ResolvedTilePattern.GRID_3X2
+                photoCount == 5 -> if (aspect >= 1.15f) ResolvedTilePattern.MOSAIC_5_HERO_LEFT else ResolvedTilePattern.MOSAIC_5_HERO_TOP
+                photoCount == 4 -> bestFourPhotoPattern(safeW, safeH, photoAspectRatios)
+                photoCount == 3 -> bestThreePhotoPattern(safeW, safeH, photoAspectRatios, varietySeed)
+                else -> bestTwoPhotoPattern(safeW, safeH, photoAspectRatios)
+            }
+            WidgetCollageLayout.AUTO -> Unit
+        }
+
+        // SMART AUTO: combine widget physical dimensions, day's distinct photo count, AND photo orientations!
+        val area = safeW * safeH
+        val maxComfortSlots = when {
+            aspect >= 2.25f -> if (safeW >= 290f) 4 else 3 // Wide short banner (4x1 / 5x1)
+            safeW < 115f -> 3 // Narrow 1-column strip
+            area >= 48_000f && min(safeW, safeH) >= 148f -> 6 // Large 4x2+, 4x3, 4x4, 2x4
+            area >= 35_000f && max(safeW, safeH) >= 225f -> 5 // Medium-wide 4x2 / 3x3 / 2x3
+            else -> 4 // Compact 2x2
+        }
+        val targetCount = min(photoCount, maxComfortSlots)
+
+        return when (targetCount) {
+            2 -> bestTwoPhotoPattern(safeW, safeH, photoAspectRatios)
+            3 -> bestThreePhotoPattern(safeW, safeH, photoAspectRatios, varietySeed)
+            4 -> bestFourPhotoPattern(safeW, safeH, photoAspectRatios)
+            5 -> bestFivePhotoPattern(safeW, safeH, photoAspectRatios)
+            else -> bestSixPhotoPattern(safeW, safeH, photoAspectRatios)
+        }
+    }
+
+    /**
+     * Resolves the optimal tile pattern AND reorders [photos] so portrait photos sit in portrait
+     * tiles and landscape photos sit in landscape tiles with minimal crop distortion.
+     */
+    fun <T> resolveSmartPatternAndOrder(
+        kind: PhotoWidgetKind,
+        collageLayout: WidgetCollageLayout,
+        widthDp: Float,
+        heightDp: Float,
+        photos: List<T>,
+        aspectRatioOf: (T) -> Float,
+        varietySeed: Int = 0
+    ): Pair<ResolvedTilePattern, List<T>> {
+        val aspects = photos.map(aspectRatioOf)
+        val pattern = resolveTilePattern(
+            kind = kind,
+            collageLayout = collageLayout,
+            widthDp = widthDp,
+            heightDp = heightDp,
+            photoCount = photos.size,
+            photoAspectRatios = aspects,
+            varietySeed = varietySeed
+        )
+        if (pattern == ResolvedTilePattern.SINGLE || photos.size <= 1) {
+            return pattern to photos.take(pattern.maxSlots)
+        }
+        val boxes = computeTileBoxes(pattern, widthDp.coerceAtLeast(48f), heightDp.coerceAtLeast(48f), 0f)
+        val slotAspects = boxes.map { it.width / it.height.coerceAtLeast(1f) }
+        val (ordered, _) = WidgetPhotoDiversity.assignToBestSlots(
+            items = photos.take(pattern.maxSlots),
+            itemAspectRatio = aspectRatioOf,
+            slotAspectRatios = slotAspects
+        )
+        return pattern to ordered
+    }
+
+    private fun bestTwoPhotoPattern(
+        widthDp: Float,
+        heightDp: Float,
+        photoAspects: List<Float>
+    ): ResolvedTilePattern {
+        val aspect = widthDp / heightDp
+        val candidates = when {
+            aspect >= 1.9f -> listOf(ResolvedTilePattern.STRIP_HORIZONTAL_2)
+            aspect <= 0.6f -> listOf(ResolvedTilePattern.STRIP_VERTICAL_2)
+            else -> listOf(ResolvedTilePattern.STRIP_HORIZONTAL_2, ResolvedTilePattern.STRIP_VERTICAL_2)
+        }
+        if (photoAspects.size < 2) {
+            return if (aspect < 0.85f) ResolvedTilePattern.STRIP_VERTICAL_2 else ResolvedTilePattern.STRIP_HORIZONTAL_2
+        }
+        return scorePatternsByPhotoFit(candidates, widthDp, heightDp, photoAspects)
+    }
+
+    private fun bestThreePhotoPattern(
+        widthDp: Float,
+        heightDp: Float,
+        photoAspects: List<Float>,
+        varietySeed: Int
+    ): ResolvedTilePattern {
+        val aspect = widthDp / heightDp
+        val primaryHero = if (varietySeed % 3 == 1) {
+            ResolvedTilePattern.HERO_RIGHT_2_LEFT
+        } else {
+            ResolvedTilePattern.HERO_LEFT_2_RIGHT
+        }
+        val candidates = when {
+            aspect >= 2.0f -> listOf(ResolvedTilePattern.STRIP_HORIZONTAL_3, primaryHero)
+            aspect < 0.78f -> if (widthDp < 115f) {
+                listOf(ResolvedTilePattern.STRIP_VERTICAL_3, ResolvedTilePattern.HERO_TOP_2_BOTTOM)
+            } else {
+                listOf(ResolvedTilePattern.HERO_TOP_2_BOTTOM, ResolvedTilePattern.STRIP_VERTICAL_3)
+            }
+            aspect >= 1.15f -> listOf(primaryHero, ResolvedTilePattern.STRIP_HORIZONTAL_3, ResolvedTilePattern.HERO_TOP_2_BOTTOM)
+            else -> listOf(ResolvedTilePattern.HERO_TOP_2_BOTTOM, primaryHero, ResolvedTilePattern.STRIP_HORIZONTAL_3)
+        }
+        if (photoAspects.size < 3) return candidates.first()
+        return scorePatternsByPhotoFit(candidates, widthDp, heightDp, photoAspects)
+    }
+
+    private fun bestFourPhotoPattern(
+        widthDp: Float,
+        heightDp: Float,
+        photoAspects: List<Float>
+    ): ResolvedTilePattern {
+        val aspect = widthDp / heightDp
+        val candidates = when {
+            aspect >= 2.15f -> listOf(ResolvedTilePattern.STRIP_HORIZONTAL_4, ResolvedTilePattern.BENTO_4_WIDE)
+            aspect < 0.82f -> listOf(ResolvedTilePattern.BENTO_4_TOP_HERO, ResolvedTilePattern.GRID_2X2)
+            aspect >= 1.22f -> buildList {
+                if (widthDp >= 250f && heightDp >= 135f) add(ResolvedTilePattern.BENTO_4_WIDE)
+                add(ResolvedTilePattern.BENTO_4_TOP_HERO)
+                add(ResolvedTilePattern.GRID_2X2)
+                if (widthDp >= 270f) add(ResolvedTilePattern.STRIP_HORIZONTAL_4)
+            }
+            else -> listOf(ResolvedTilePattern.GRID_2X2, ResolvedTilePattern.BENTO_4_TOP_HERO, ResolvedTilePattern.BENTO_4_WIDE)
+        }
+        if (photoAspects.size < 4) return candidates.first()
+        return scorePatternsByPhotoFit(candidates, widthDp, heightDp, photoAspects)
+    }
+
+    private fun bestFivePhotoPattern(
+        widthDp: Float,
+        heightDp: Float,
+        photoAspects: List<Float>
+    ): ResolvedTilePattern {
+        val aspect = widthDp / heightDp
+        val candidates = if (aspect >= 1.15f) {
+            listOf(ResolvedTilePattern.MOSAIC_5_HERO_LEFT, ResolvedTilePattern.MOSAIC_5_HERO_TOP)
+        } else {
+            listOf(ResolvedTilePattern.MOSAIC_5_HERO_TOP, ResolvedTilePattern.MOSAIC_5_HERO_LEFT)
+        }
+        if (photoAspects.size < 5) return candidates.first()
+        return scorePatternsByPhotoFit(candidates, widthDp, heightDp, photoAspects)
+    }
+
+    private fun bestSixPhotoPattern(
+        widthDp: Float,
+        heightDp: Float,
+        photoAspects: List<Float>
+    ): ResolvedTilePattern {
+        val aspect = widthDp / heightDp
+        val candidates = when {
+            aspect >= 1.15f -> listOf(
+                ResolvedTilePattern.GRID_3X2,
+                ResolvedTilePattern.MOSAIC_5_HERO_LEFT,
+                ResolvedTilePattern.MOSAIC_5_HERO_TOP
+            )
+            aspect < 0.85f -> listOf(
+                ResolvedTilePattern.GRID_2X3,
+                ResolvedTilePattern.MOSAIC_5_HERO_TOP
+            )
+            else -> listOf(
+                ResolvedTilePattern.GRID_3X2,
+                ResolvedTilePattern.GRID_2X3,
+                ResolvedTilePattern.MOSAIC_5_HERO_TOP
+            )
+        }
+        if (photoAspects.size < 6) return candidates.first()
+        return scorePatternsByPhotoFit(candidates, widthDp, heightDp, photoAspects)
+    }
+
+    private fun scorePatternsByPhotoFit(
+        candidates: List<ResolvedTilePattern>,
+        widthDp: Float,
+        heightDp: Float,
+        photoAspects: List<Float>
+    ): ResolvedTilePattern {
+        if (candidates.size == 1) return candidates.first()
+        var bestPattern = candidates.first()
+        var bestScore = Float.POSITIVE_INFINITY
+
+        for (pattern in candidates) {
+            val tiles = computeTileBoxes(pattern, widthDp, heightDp, 0f)
+            val minTileEdge = tiles.minOf { min(it.width, it.height) }
+            // Avoid patterns that squeeze tiles below a clean readable threshold
+            val crampPenalty = if (minTileEdge < 42f) (42f - minTileEdge) * 0.04f else 0f
+            val slotAspects = tiles.map { it.width / it.height.coerceAtLeast(1f) }
+            val (_, avgErr) = WidgetPhotoDiversity.assignToBestSlots(
+                items = photoAspects.take(pattern.maxSlots),
+                itemAspectRatio = { it },
+                slotAspectRatios = slotAspects
+            )
+            // Slight bonus when showcasing all 6 distinct photos cleanly on a large widget
+            val richnessBonus = if (pattern.maxSlots == 6) -0.04f else 0f
+            val total = avgErr + crampPenalty + richnessBonus
+            if (total < bestScore) {
+                bestScore = total
+                bestPattern = pattern
             }
         }
+        return bestPattern
     }
 
     /**
@@ -353,30 +559,43 @@ internal object HyperOsGlassRenderer {
     }
 
     /**
-     * Computes exact normalized tile rectangles (within [insetRect]) for each multi-photo pattern.
+     * Pure-Kotlin tile box geometry (JVM-testable without android.graphics.RectF stubs).
      */
-    fun computeTileRects(
+    fun computeTileBoxes(
         pattern: ResolvedTilePattern,
-        insetRect: RectF,
-        gapPx: Float
-    ): List<RectF> {
-        val l = insetRect.left
-        val t = insetRect.top
-        val r = insetRect.right
-        val b = insetRect.bottom
-        val w = insetRect.width()
-        val h = insetRect.height()
+        width: Float,
+        height: Float,
+        gapPx: Float,
+        leftOffset: Float = 0f,
+        topOffset: Float = 0f
+    ): List<TileBox> {
+        val l = leftOffset
+        val t = topOffset
+        val r = l + width
+        val b = t + height
+        val w = width
+        val h = height
 
         return when (pattern) {
-            ResolvedTilePattern.SINGLE -> listOf(RectF(insetRect))
+            ResolvedTilePattern.SINGLE -> listOf(TileBox(l, t, r, b))
             ResolvedTilePattern.HERO_LEFT_2_RIGHT -> {
                 val heroW = (w - gapPx) * 0.58f
                 val rightL = l + heroW + gapPx
                 val halfH = (h - gapPx) * 0.5f
                 listOf(
-                    RectF(l, t, l + heroW, b),
-                    RectF(rightL, t, r, t + halfH),
-                    RectF(rightL, t + halfH + gapPx, r, b)
+                    TileBox(l, t, l + heroW, b),
+                    TileBox(rightL, t, r, t + halfH),
+                    TileBox(rightL, t + halfH + gapPx, r, b)
+                )
+            }
+            ResolvedTilePattern.HERO_RIGHT_2_LEFT -> {
+                val leftW = (w - gapPx) * 0.42f
+                val heroL = l + leftW + gapPx
+                val halfH = (h - gapPx) * 0.5f
+                listOf(
+                    TileBox(heroL, t, r, b),
+                    TileBox(l, t, l + leftW, t + halfH),
+                    TileBox(l, t + halfH + gapPx, l + leftW, b)
                 )
             }
             ResolvedTilePattern.HERO_TOP_2_BOTTOM -> {
@@ -384,19 +603,19 @@ internal object HyperOsGlassRenderer {
                 val botT = t + heroH + gapPx
                 val halfW = (w - gapPx) * 0.5f
                 listOf(
-                    RectF(l, t, r, t + heroH),
-                    RectF(l, botT, l + halfW, b),
-                    RectF(l + halfW + gapPx, botT, r, b)
+                    TileBox(l, t, r, t + heroH),
+                    TileBox(l, botT, l + halfW, b),
+                    TileBox(l + halfW + gapPx, botT, r, b)
                 )
             }
             ResolvedTilePattern.GRID_2X2 -> {
                 val halfW = (w - gapPx) * 0.5f
                 val halfH = (h - gapPx) * 0.5f
                 listOf(
-                    RectF(l, t, l + halfW, t + halfH),
-                    RectF(l + halfW + gapPx, t, r, t + halfH),
-                    RectF(l, t + halfH + gapPx, l + halfW, b),
-                    RectF(l + halfW + gapPx, t + halfH + gapPx, r, b)
+                    TileBox(l, t, l + halfW, t + halfH),
+                    TileBox(l + halfW + gapPx, t, r, t + halfH),
+                    TileBox(l, t + halfH + gapPx, l + halfW, b),
+                    TileBox(l + halfW + gapPx, t + halfH + gapPx, r, b)
                 )
             }
             ResolvedTilePattern.BENTO_4_WIDE -> {
@@ -407,33 +626,115 @@ internal object HyperOsGlassRenderer {
                 val botT = t + topH + gapPx
                 val miniW = (rightW - gapPx) * 0.5f
                 listOf(
-                    RectF(l, t, l + heroW, b),
-                    RectF(rightL, t, r, t + topH),
-                    RectF(rightL, botT, rightL + miniW, b),
-                    RectF(rightL + miniW + gapPx, botT, r, b)
+                    TileBox(l, t, l + heroW, b),
+                    TileBox(rightL, t, r, t + topH),
+                    TileBox(rightL, botT, rightL + miniW, b),
+                    TileBox(rightL + miniW + gapPx, botT, r, b)
                 )
             }
-            ResolvedTilePattern.STRIP_HORIZONTAL_2 -> splitHorizontal(insetRect, 2, gapPx)
-            ResolvedTilePattern.STRIP_HORIZONTAL_3 -> splitHorizontal(insetRect, 3, gapPx)
-            ResolvedTilePattern.STRIP_HORIZONTAL_4 -> splitHorizontal(insetRect, 4, gapPx)
-            ResolvedTilePattern.STRIP_VERTICAL_2 -> splitVertical(insetRect, 2, gapPx)
-            ResolvedTilePattern.STRIP_VERTICAL_3 -> splitVertical(insetRect, 3, gapPx)
+            ResolvedTilePattern.BENTO_4_TOP_HERO -> {
+                val heroH = (h - gapPx) * 0.50f
+                val botT = t + heroH + gapPx
+                val cellW = (w - gapPx * 2f) / 3f
+                listOf(
+                    TileBox(l, t, r, t + heroH),
+                    TileBox(l, botT, l + cellW, b),
+                    TileBox(l + cellW + gapPx, botT, l + cellW * 2f + gapPx, b),
+                    TileBox(l + cellW * 2f + gapPx * 2f, botT, r, b)
+                )
+            }
+            ResolvedTilePattern.MOSAIC_5_HERO_LEFT -> {
+                val heroW = (w - gapPx) * 0.45f
+                val rightL = l + heroW + gapPx
+                val rightW = r - rightL
+                val halfRW = (rightW - gapPx) * 0.5f
+                val halfH = (h - gapPx) * 0.5f
+                listOf(
+                    TileBox(l, t, l + heroW, b),
+                    TileBox(rightL, t, rightL + halfRW, t + halfH),
+                    TileBox(rightL + halfRW + gapPx, t, r, t + halfH),
+                    TileBox(rightL, t + halfH + gapPx, rightL + halfRW, b),
+                    TileBox(rightL + halfRW + gapPx, t + halfH + gapPx, r, b)
+                )
+            }
+            ResolvedTilePattern.MOSAIC_5_HERO_TOP -> {
+                val topH = (h - gapPx) * 0.54f
+                val botT = t + topH + gapPx
+                val halfW = (w - gapPx) * 0.5f
+                val thirdW = (w - gapPx * 2f) / 3f
+                listOf(
+                    TileBox(l, t, l + halfW, t + topH),
+                    TileBox(l + halfW + gapPx, t, r, t + topH),
+                    TileBox(l, botT, l + thirdW, b),
+                    TileBox(l + thirdW + gapPx, botT, l + thirdW * 2f + gapPx, b),
+                    TileBox(l + thirdW * 2f + gapPx * 2f, botT, r, b)
+                )
+            }
+            ResolvedTilePattern.GRID_3X2 -> {
+                val colW = (w - gapPx * 2f) / 3f
+                val rowH = (h - gapPx) * 0.5f
+                val botT = t + rowH + gapPx
+                listOf(
+                    TileBox(l, t, l + colW, t + rowH),
+                    TileBox(l + colW + gapPx, t, l + colW * 2f + gapPx, t + rowH),
+                    TileBox(l + colW * 2f + gapPx * 2f, t, r, t + rowH),
+                    TileBox(l, botT, l + colW, b),
+                    TileBox(l + colW + gapPx, botT, l + colW * 2f + gapPx, b),
+                    TileBox(l + colW * 2f + gapPx * 2f, botT, r, b)
+                )
+            }
+            ResolvedTilePattern.GRID_2X3 -> {
+                val colW = (w - gapPx) * 0.5f
+                val rowH = (h - gapPx * 2f) / 3f
+                val rightL = l + colW + gapPx
+                val row2T = t + rowH + gapPx
+                val row3T = t + rowH * 2f + gapPx * 2f
+                listOf(
+                    TileBox(l, t, l + colW, t + rowH),
+                    TileBox(rightL, t, r, t + rowH),
+                    TileBox(l, row2T, l + colW, row2T + rowH),
+                    TileBox(rightL, row2T, r, row2T + rowH),
+                    TileBox(l, row3T, l + colW, b),
+                    TileBox(rightL, row3T, r, b)
+                )
+            }
+            ResolvedTilePattern.STRIP_HORIZONTAL_2 -> splitHorizontalBoxes(l, t, r, b, 2, gapPx)
+            ResolvedTilePattern.STRIP_HORIZONTAL_3 -> splitHorizontalBoxes(l, t, r, b, 3, gapPx)
+            ResolvedTilePattern.STRIP_HORIZONTAL_4 -> splitHorizontalBoxes(l, t, r, b, 4, gapPx)
+            ResolvedTilePattern.STRIP_VERTICAL_2 -> splitVerticalBoxes(l, t, r, b, 2, gapPx)
+            ResolvedTilePattern.STRIP_VERTICAL_3 -> splitVerticalBoxes(l, t, r, b, 3, gapPx)
         }
     }
 
-    private fun splitHorizontal(rect: RectF, count: Int, gapPx: Float): List<RectF> {
-        val cellW = (rect.width() - gapPx * (count - 1)) / count
+    /**
+     * Computes exact normalized tile rectangles (within [insetRect]) for each multi-photo pattern.
+     */
+    fun computeTileRects(
+        pattern: ResolvedTilePattern,
+        insetRect: RectF,
+        gapPx: Float
+    ): List<RectF> = computeTileBoxes(
+        pattern = pattern,
+        width = insetRect.width(),
+        height = insetRect.height(),
+        gapPx = gapPx,
+        leftOffset = insetRect.left,
+        topOffset = insetRect.top
+    ).map { RectF(it.left, it.top, it.right, it.bottom) }
+
+    private fun splitHorizontalBoxes(l: Float, t: Float, r: Float, b: Float, count: Int, gapPx: Float): List<TileBox> {
+        val cellW = ((r - l) - gapPx * (count - 1)) / count
         return (0 until count).map { idx ->
-            val left = rect.left + idx * (cellW + gapPx)
-            RectF(left, rect.top, if (idx == count - 1) rect.right else left + cellW, rect.bottom)
+            val left = l + idx * (cellW + gapPx)
+            TileBox(left, t, if (idx == count - 1) r else left + cellW, b)
         }
     }
 
-    private fun splitVertical(rect: RectF, count: Int, gapPx: Float): List<RectF> {
-        val cellH = (rect.height() - gapPx * (count - 1)) / count
+    private fun splitVerticalBoxes(l: Float, t: Float, r: Float, b: Float, count: Int, gapPx: Float): List<TileBox> {
+        val cellH = ((b - t) - gapPx * (count - 1)) / count
         return (0 until count).map { idx ->
-            val top = rect.top + idx * (cellH + gapPx)
-            RectF(rect.left, top, rect.right, if (idx == count - 1) rect.bottom else top + cellH)
+            val top = t + idx * (cellH + gapPx)
+            TileBox(l, top, r, if (idx == count - 1) b else top + cellH)
         }
     }
 
@@ -644,6 +945,14 @@ internal object HyperOsGlassRenderer {
                     floatArrayOf(splitX, midY, r, midY)
                 )
             }
+            ResolvedTilePattern.HERO_RIGHT_2_LEFT -> {
+                val splitX = l + w * 0.42f
+                val midY = t + h * 0.5f
+                listOf(
+                    floatArrayOf(splitX, t, splitX, b),
+                    floatArrayOf(l, midY, splitX, midY)
+                )
+            }
             ResolvedTilePattern.HERO_TOP_2_BOTTOM -> {
                 val splitY = t + h * 0.58f
                 val midX = l + w * 0.5f
@@ -668,6 +977,58 @@ internal object HyperOsGlassRenderer {
                     floatArrayOf(splitX, t, splitX, b),
                     floatArrayOf(splitX, splitY, r, splitY),
                     floatArrayOf(rightMidX, splitY, rightMidX, b)
+                )
+            }
+            ResolvedTilePattern.BENTO_4_TOP_HERO -> {
+                val splitY = t + h * 0.50f
+                val x1 = l + w / 3f
+                val x2 = l + w * 2f / 3f
+                listOf(
+                    floatArrayOf(l, splitY, r, splitY),
+                    floatArrayOf(x1, splitY, x1, b),
+                    floatArrayOf(x2, splitY, x2, b)
+                )
+            }
+            ResolvedTilePattern.MOSAIC_5_HERO_LEFT -> {
+                val splitX = l + w * 0.45f
+                val rightMidX = splitX + (r - splitX) * 0.5f
+                val midY = t + h * 0.5f
+                listOf(
+                    floatArrayOf(splitX, t, splitX, b),
+                    floatArrayOf(splitX, midY, r, midY),
+                    floatArrayOf(rightMidX, t, rightMidX, b)
+                )
+            }
+            ResolvedTilePattern.MOSAIC_5_HERO_TOP -> {
+                val splitY = t + h * 0.54f
+                val topMidX = l + w * 0.5f
+                val botX1 = l + w / 3f
+                val botX2 = l + w * 2f / 3f
+                listOf(
+                    floatArrayOf(l, splitY, r, splitY),
+                    floatArrayOf(topMidX, t, topMidX, splitY),
+                    floatArrayOf(botX1, splitY, botX1, b),
+                    floatArrayOf(botX2, splitY, botX2, b)
+                )
+            }
+            ResolvedTilePattern.GRID_3X2 -> {
+                val x1 = l + w / 3f
+                val x2 = l + w * 2f / 3f
+                val midY = t + h * 0.5f
+                listOf(
+                    floatArrayOf(x1, t, x1, b),
+                    floatArrayOf(x2, t, x2, b),
+                    floatArrayOf(l, midY, r, midY)
+                )
+            }
+            ResolvedTilePattern.GRID_2X3 -> {
+                val midX = l + w * 0.5f
+                val y1 = t + h / 3f
+                val y2 = t + h * 2f / 3f
+                listOf(
+                    floatArrayOf(midX, t, midX, b),
+                    floatArrayOf(l, y1, r, y1),
+                    floatArrayOf(l, y2, r, y2)
                 )
             }
             ResolvedTilePattern.STRIP_HORIZONTAL_2 -> verticalSplits(rect, 2)

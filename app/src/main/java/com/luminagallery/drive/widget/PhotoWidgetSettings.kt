@@ -127,7 +127,10 @@ internal enum class WidgetCollageLayout {
     AUTO,
     HERO_SIDE,
     GRID_2X2,
-    BENTO_4
+    BENTO_4,
+    BENTO_TOP,
+    MOSAIC_5,
+    GRID_6
 }
 
 @Serializable
@@ -153,6 +156,7 @@ internal data class PhotoWidgetSettings(
     val shuffleOrder: Boolean = true,
     val groupByAlbum: Boolean = true,
     val excludeScreenshots: Boolean = false,
+    val avoidSimilarPhotos: Boolean = true,
     val frameStyle: WidgetFrameStyle = WidgetFrameStyle.HYPER_GLASS,
     val cornerStyle: WidgetCornerStyle = WidgetCornerStyle.HYPER_OS,
     val collageLayout: WidgetCollageLayout = WidgetCollageLayout.AUTO,

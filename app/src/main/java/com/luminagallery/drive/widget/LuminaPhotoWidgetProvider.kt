@@ -149,7 +149,11 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
         val widgetSizes = resolveWidgetSizesDp(options)
         val primarySize = widgetSizes.first()
 
-        val maxSlots = if (kind.isMultiPhoto) 4 else 1
+        val maxSlots = when (kind) {
+            PhotoWidgetKind.COLLAGE, PhotoWidgetKind.MEMORIES -> 6
+            PhotoWidgetKind.STRIP -> 4
+            else -> 1
+        }
         val useFastSlideshow = settings.shuffleInterval.isFastSlideshow
         val requestedFrames = if (useFastSlideshow) SLIDESHOW_FRAME_COUNT else 1
 
@@ -295,12 +299,15 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
     ): RemoteViews {
         val views = RemoteViews(context.packageName, R.layout.widget_lumina_rendered)
         val rawPhotos = selection?.photos.orEmpty()
-        val pattern = HyperOsGlassRenderer.resolveTilePattern(
+        val varietySeed = (selection?.groupKey?.hashCode() ?: widgetId) and 0x7FFFFFFF
+        val prePattern = HyperOsGlassRenderer.resolveTilePattern(
             kind = kind,
             collageLayout = settings.collageLayout,
             widthDp = sizeDp.width,
             heightDp = sizeDp.height,
-            photoCount = rawPhotos.size
+            photoCount = rawPhotos.size,
+            photoAspectRatios = rawPhotos.map { it.aspectRatio },
+            varietySeed = varietySeed
         )
         val (renderW, renderH, renderDensity) = computeRenderCanvasSize(
             context = context,
@@ -309,13 +316,16 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
             scaleDown = scaleDown
         )
         val slotDecodeEdge = max(renderW, renderH).coerceIn(240, 1080)
-        val decoded = decodePhotos(context, rawPhotos, pattern.maxSlots, slotDecodeEdge)
-        val actualPattern = HyperOsGlassRenderer.resolveTilePattern(
+        val decodedRaw = decodePhotos(context, rawPhotos, prePattern.maxSlots, slotDecodeEdge)
+        // Use actual decoded bitmap aspect ratios so orientation-aware layout + slot matching is 100% accurate!
+        val (actualPattern, decoded) = HyperOsGlassRenderer.resolveSmartPatternAndOrder(
             kind = kind,
             collageLayout = settings.collageLayout,
             widthDp = sizeDp.width,
             heightDp = sizeDp.height,
-            photoCount = decoded.size
+            photos = decodedRaw,
+            aspectRatioOf = { (_, bmp) -> (bmp.width.toFloat() / bmp.height.coerceAtLeast(1)).coerceIn(0.35f, 3.0f) },
+            varietySeed = varietySeed
         )
 
         val showShuffleBtn = settings.showShuffleButton &&
@@ -337,7 +347,7 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
             reserveTopLeftButton = showSettingsBtn,
             overrideCornerRadiusDp = resolveSystemHyperCornerDp(context, settings)
         )
-        decoded.forEach { it.second.recycle() }
+        decodedRaw.forEach { it.second.recycle() }
 
         views.setImageViewBitmap(R.id.widget_rendered_image, rendered)
         views.setContentDescription(
@@ -352,23 +362,20 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
             buildTapIntent(context, widgetId, slot = 0, photo = primaryPhoto, settings = settings)
         )
 
-        // Per-tile transparent click targets for multi-photo collages & strips
+        // Per-tile transparent click targets for multi-photo collages & strips (up to 6 tiles)
         views.removeAllViews(R.id.widget_hit_overlay)
         if (decoded.size > 1 && settings.tapAction == WidgetTapAction.OPEN_PHOTO) {
             val hitLayout = hitOverlayLayoutFor(actualPattern)
             if (hitLayout != null) {
                 val overlay = RemoteViews(context.packageName, hitLayout)
-                val maxViewsInLayout = if (
-                    actualPattern == ResolvedTilePattern.STRIP_VERTICAL_2 ||
-                    actualPattern == ResolvedTilePattern.STRIP_VERTICAL_3 ||
-                    actualPattern == ResolvedTilePattern.HERO_LEFT_2_RIGHT ||
-                    actualPattern == ResolvedTilePattern.HERO_TOP_2_BOTTOM
-                ) 3 else 4
+                val maxViewsInLayout = hitViewCountFor(actualPattern)
                 val hitIds = intArrayOf(
                     R.id.widget_hit_0,
                     R.id.widget_hit_1,
                     R.id.widget_hit_2,
-                    R.id.widget_hit_3
+                    R.id.widget_hit_3,
+                    R.id.widget_hit_4,
+                    R.id.widget_hit_5
                 )
                 for (idx in 0 until maxViewsInLayout) {
                     val hitId = hitIds[idx]
@@ -450,22 +457,27 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
 
         var addedFrames = 0
         selections.take(maxFrames).forEachIndexed { frameIndex, sel ->
-            val pattern = HyperOsGlassRenderer.resolveTilePattern(
+            val varietySeed = ((sel.groupKey?.hashCode() ?: widgetId) + frameIndex) and 0x7FFFFFFF
+            val prePattern = HyperOsGlassRenderer.resolveTilePattern(
                 kind = kind,
                 collageLayout = settings.collageLayout,
                 widthDp = sizeDp.width,
                 heightDp = sizeDp.height,
-                photoCount = sel.photos.size
+                photoCount = sel.photos.size,
+                photoAspectRatios = sel.photos.map { it.aspectRatio },
+                varietySeed = varietySeed
             )
-            val decoded = decodePhotos(context, sel.photos, pattern.maxSlots, decodeEdge)
-            if (decoded.isEmpty()) return@forEachIndexed
+            val decodedRaw = decodePhotos(context, sel.photos, prePattern.maxSlots, decodeEdge)
+            if (decodedRaw.isEmpty()) return@forEachIndexed
 
-            val actualPattern = HyperOsGlassRenderer.resolveTilePattern(
+            val (actualPattern, decoded) = HyperOsGlassRenderer.resolveSmartPatternAndOrder(
                 kind = kind,
                 collageLayout = settings.collageLayout,
                 widthDp = sizeDp.width,
                 heightDp = sizeDp.height,
-                photoCount = decoded.size
+                photos = decodedRaw,
+                aspectRatioOf = { (_, bmp) -> (bmp.width.toFloat() / bmp.height.coerceAtLeast(1)).coerceIn(0.35f, 3.0f) },
+                varietySeed = varietySeed
             )
             val rendered = HyperOsGlassRenderer.renderWidgetBitmap(
                 photos = decoded.map { it.second },
@@ -481,7 +493,7 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
                 overrideCornerRadiusDp = resolveSystemHyperCornerDp(context, settings)
             )
             val leadPhoto = decoded.first().first
-            decoded.forEach { it.second.recycle() }
+            decodedRaw.forEach { it.second.recycle() }
 
             val frameView = RemoteViews(context.packageName, R.layout.widget_shuffle_frame)
             frameView.setImageViewBitmap(R.id.widget_image, rendered)
@@ -527,15 +539,40 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
 
     private fun hitOverlayLayoutFor(pattern: ResolvedTilePattern): Int? = when (pattern) {
         ResolvedTilePattern.HERO_LEFT_2_RIGHT -> R.layout.widget_hits_hero_left_2_right
+        ResolvedTilePattern.HERO_RIGHT_2_LEFT -> R.layout.widget_hits_hero_right_2_left
         ResolvedTilePattern.HERO_TOP_2_BOTTOM -> R.layout.widget_hits_hero_top_2_bottom
         ResolvedTilePattern.GRID_2X2 -> R.layout.widget_hits_grid_2x2
         ResolvedTilePattern.BENTO_4_WIDE -> R.layout.widget_hits_bento_4_wide
+        ResolvedTilePattern.BENTO_4_TOP_HERO -> R.layout.widget_hits_bento_4_top_hero
+        ResolvedTilePattern.MOSAIC_5_HERO_LEFT -> R.layout.widget_hits_mosaic_5_hero_left
+        ResolvedTilePattern.MOSAIC_5_HERO_TOP -> R.layout.widget_hits_mosaic_5_hero_top
+        ResolvedTilePattern.GRID_3X2 -> R.layout.widget_hits_grid_3x2
+        ResolvedTilePattern.GRID_2X3 -> R.layout.widget_hits_grid_2x3
         ResolvedTilePattern.STRIP_HORIZONTAL_2,
         ResolvedTilePattern.STRIP_HORIZONTAL_3,
         ResolvedTilePattern.STRIP_HORIZONTAL_4 -> R.layout.widget_hits_strip_h
         ResolvedTilePattern.STRIP_VERTICAL_2,
         ResolvedTilePattern.STRIP_VERTICAL_3 -> R.layout.widget_hits_strip_v
         ResolvedTilePattern.SINGLE -> null
+    }
+
+    private fun hitViewCountFor(pattern: ResolvedTilePattern): Int = when (pattern) {
+        ResolvedTilePattern.HERO_LEFT_2_RIGHT,
+        ResolvedTilePattern.HERO_RIGHT_2_LEFT,
+        ResolvedTilePattern.HERO_TOP_2_BOTTOM,
+        ResolvedTilePattern.STRIP_VERTICAL_2,
+        ResolvedTilePattern.STRIP_VERTICAL_3 -> 3
+        ResolvedTilePattern.GRID_2X2,
+        ResolvedTilePattern.BENTO_4_WIDE,
+        ResolvedTilePattern.BENTO_4_TOP_HERO,
+        ResolvedTilePattern.STRIP_HORIZONTAL_2,
+        ResolvedTilePattern.STRIP_HORIZONTAL_3,
+        ResolvedTilePattern.STRIP_HORIZONTAL_4 -> 4
+        ResolvedTilePattern.MOSAIC_5_HERO_LEFT,
+        ResolvedTilePattern.MOSAIC_5_HERO_TOP -> 5
+        ResolvedTilePattern.GRID_3X2,
+        ResolvedTilePattern.GRID_2X3 -> 6
+        ResolvedTilePattern.SINGLE -> 0
     }
 
     private fun resolveWidgetSizesDp(options: Bundle): List<SizeF> =
