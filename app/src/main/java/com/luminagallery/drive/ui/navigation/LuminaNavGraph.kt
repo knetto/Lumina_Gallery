@@ -65,6 +65,10 @@ import com.luminagallery.drive.ui.screens.folder.FolderScreen
 import com.luminagallery.drive.ui.screens.folder.FolderViewModel
 import com.luminagallery.drive.ui.screens.home.HomeScreen
 import com.luminagallery.drive.ui.screens.home.HomeViewModel
+import com.luminagallery.drive.ui.screens.people.PeopleScreen
+import com.luminagallery.drive.ui.screens.people.PeopleViewModel
+import com.luminagallery.drive.ui.screens.people.PersonDetailScreen
+import com.luminagallery.drive.ui.screens.people.PersonDetailViewModel
 import com.luminagallery.drive.ui.screens.search.SearchScreen
 import com.luminagallery.drive.ui.screens.search.SearchViewModel
 import com.luminagallery.drive.ui.screens.settings.SettingsScreen
@@ -101,6 +105,14 @@ data class SpecialCollectionRoute(
 data object LocationsRoute
 
 @Serializable
+data object PeopleRoute
+
+@Serializable
+data class PersonDetailRoute(
+    val personId: String
+)
+
+@Serializable
 data object CleanOutRoute
 
 @Serializable
@@ -117,7 +129,8 @@ data class ViewerRoute(
     val specialFilterName: String? = null,
     val albumFilterName: String? = null,
     val albumSortName: String? = null,
-    val locationKey: String? = null
+    val locationKey: String? = null,
+    val personId: String? = null
 )
 
 @Serializable
@@ -415,6 +428,9 @@ fun LuminaNavGraph(
                             onOpenLocations = {
                                 navController.navigate(LocationsRoute)
                             },
+                            onOpenPeople = {
+                                navController.navigate(PeopleRoute)
+                            },
                             onOpenCleanOut = {
                                 navController.navigate(CleanOutRoute)
                             },
@@ -461,6 +477,49 @@ fun LuminaNavGraph(
                                         locationKey = locKey
                                     )
                                 )
+                            }
+                        )
+                    }
+                }
+
+                composable<PeopleRoute> {
+                    val peopleViewModel: PeopleViewModel = viewModel(
+                        factory = PeopleViewModel.Factory(container)
+                    )
+                    HyperOsTransitionFrame {
+                        PeopleScreen(
+                            viewModel = peopleViewModel,
+                            onNavigateBack = { safePopBackStack() },
+                            onOpenPerson = { personId ->
+                                navController.navigate(PersonDetailRoute(personId))
+                            }
+                        )
+                    }
+                }
+
+                composable<PersonDetailRoute> { backStackEntry ->
+                    val route = backStackEntry.toRoute<PersonDetailRoute>()
+                    val detailViewModel: PersonDetailViewModel = viewModel(
+                        key = "person_${route.personId}",
+                        factory = PersonDetailViewModel.Factory(route.personId, container)
+                    )
+                    HyperOsTransitionFrame {
+                        PersonDetailScreen(
+                            personId = route.personId,
+                            viewModel = detailViewModel,
+                            onNavigateBack = { safePopBackStack() },
+                            onOpenViewer = { pid, itemId ->
+                                activeViewerItemId = itemId
+                                navController.navigate(
+                                    ViewerRoute(
+                                        folderId = "",
+                                        initialItemId = itemId,
+                                        personId = pid
+                                    )
+                                )
+                            },
+                            onOpenCompare = { ids ->
+                                navController.navigate(CompareRoute(ids.joinToString(",")))
                             }
                         )
                     }
@@ -658,7 +717,13 @@ fun LuminaNavGraph(
                         SearchScreen(
                             viewModel = searchViewModel,
                             onNavigateBack = { safePopBackStack() },
-                            onOpenViewer = { itemId, query, mediaType, fromMs, toMs, onlyWithText ->
+                            onOpenPeople = {
+                                navController.navigate(PeopleRoute)
+                            },
+                            onOpenPersonDetail = { personId ->
+                                navController.navigate(PersonDetailRoute(personId))
+                            },
+                            onOpenViewer = { itemId, query, mediaType, fromMs, toMs, onlyWithText, personId ->
                                 activeViewerItemId = itemId
                                 navController.navigate(
                                     ViewerRoute(
@@ -669,7 +734,8 @@ fun LuminaNavGraph(
                                         mediaTypeName = mediaType?.name,
                                         fromEpochMs = fromMs,
                                         toEpochMs = toMs,
-                                        onlyWithText = onlyWithText
+                                        onlyWithText = onlyWithText,
+                                        personId = personId
                                     )
                                 )
                             },
@@ -720,7 +786,7 @@ fun LuminaNavGraph(
                         originTracker.lastTappedMediaItem?.takeIf { it.id == route.initialItemId }
                     }
                     val viewerViewModel: ViewerViewModel = viewModel(
-                        key = "viewer_${route.folderId}_${route.initialItemId}_${route.isFlattened}_${route.isSearchMode}_${route.onlyWithText}_${route.specialFilterName}_${route.albumFilterName}_${route.albumSortName}_${route.locationKey}",
+                        key = "viewer_${route.folderId}_${route.initialItemId}_${route.isFlattened}_${route.isSearchMode}_${route.onlyWithText}_${route.specialFilterName}_${route.albumFilterName}_${route.albumSortName}_${route.locationKey}_${route.personId}",
                         factory = ViewerViewModel.Factory(
                             launchContext = ViewerLaunchContext(
                                 folderId = route.folderId,
@@ -735,7 +801,8 @@ fun LuminaNavGraph(
                                 specialFilter = specialFilter,
                                 albumFilter = albumFilter,
                                 albumSort = albumSort,
-                                locationKey = route.locationKey
+                                locationKey = route.locationKey,
+                                personId = route.personId
                             ),
                             container = container,
                             initialTappedItem = initialTappedItem

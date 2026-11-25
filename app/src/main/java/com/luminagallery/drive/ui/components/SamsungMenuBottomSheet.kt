@@ -22,6 +22,7 @@ import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.LocationOn
+import androidx.compose.material.icons.outlined.PeopleOutline
 import androidx.compose.material.icons.outlined.PhotoCamera
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Settings
@@ -61,6 +62,7 @@ fun SamsungMenuBottomSheet(
     onFavoritesClick: () -> Unit,
     onRecentClick: () -> Unit,
     onLocationsClick: () -> Unit,
+    onPeopleClick: () -> Unit = {},
     onGoogleDriveClick: () -> Unit,
     onCleanOutClick: () -> Unit,
     onTrashClick: () -> Unit,
@@ -126,61 +128,75 @@ fun SamsungMenuBottomSheet(
 
             Spacer(Modifier.height(2.dp))
 
-            // Row 1 Pills: Google Drive | Clean out
+            // Row 1 Pills: People | Google Drive
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
+                MenuWidePill(
+                    icon = Icons.Outlined.PeopleOutline,
+                    label = "People",
+                    pillColor = pillSurface,
+                    staggerDelayMs = 50L,
+                    onClick = { onDismiss(); onPeopleClick() },
+                    modifier = Modifier.weight(1f)
+                )
                 MenuWidePill(
                     icon = Icons.Outlined.Cloud,
                     label = "Google Drive",
                     pillColor = pillSurface,
-                    staggerDelayMs = 55L,
+                    staggerDelayMs = 70L,
                     onClick = { onDismiss(); onGoogleDriveClick() },
-                    modifier = Modifier.weight(1f)
-                )
-                MenuWidePill(
-                    icon = Icons.Outlined.CleaningServices,
-                    label = "Clean out",
-                    pillColor = pillSurface,
-                    staggerDelayMs = 80L,
-                    onClick = { onDismiss(); onCleanOutClick() },
                     modifier = Modifier.weight(1f)
                 )
             }
 
-            // Row 2 Pills: Trash | Settings
+            // Row 2 Pills: Clean out | Trash
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 MenuWidePill(
-                    icon = Icons.Outlined.Delete,
-                    label = "Trash",
+                    icon = Icons.Outlined.CleaningServices,
+                    label = "Clean out",
                     pillColor = pillSurface,
-                    staggerDelayMs = 95L,
-                    onClick = { onDismiss(); onTrashClick() },
+                    staggerDelayMs = 90L,
+                    onClick = { onDismiss(); onCleanOutClick() },
                     modifier = Modifier.weight(1f)
                 )
                 MenuWidePill(
-                    icon = Icons.Outlined.Settings,
-                    label = "Settings",
+                    icon = Icons.Outlined.Delete,
+                    label = "Trash",
                     pillColor = pillSurface,
-                    staggerDelayMs = 120L,
-                    onClick = { onDismiss(); onSettingsClick() },
+                    staggerDelayMs = 108L,
+                    onClick = { onDismiss(); onTrashClick() },
                     modifier = Modifier.weight(1f)
                 )
             }
 
-            if (onCameraClick != null) {
+            // Row 3 Pills: Settings | Camera (or full-width Settings if no camera intent)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
                 MenuWidePill(
-                    icon = Icons.Outlined.PhotoCamera,
-                    label = "Open Camera",
+                    icon = Icons.Outlined.Settings,
+                    label = "Settings",
                     pillColor = pillSurface,
-                    staggerDelayMs = 135L,
-                    onClick = { onDismiss(); onCameraClick() },
-                    modifier = Modifier.fillMaxWidth()
+                    staggerDelayMs = 125L,
+                    onClick = { onDismiss(); onSettingsClick() },
+                    modifier = Modifier.weight(1f)
                 )
+                if (onCameraClick != null) {
+                    MenuWidePill(
+                        icon = Icons.Outlined.PhotoCamera,
+                        label = "Camera",
+                        pillColor = pillSurface,
+                        staggerDelayMs = 140L,
+                        onClick = { onDismiss(); onCameraClick() },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
             }
         }
     }

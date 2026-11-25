@@ -172,6 +172,24 @@ interface DriveItemDao {
 
     @Query(
         """
+        SELECT id, parentId, name, modifiedTimeEpochMs
+        FROM drive_items
+        WHERE isFolder = 1 AND trashed = 0
+        """
+    )
+    suspend fun getAllFoldersLightSync(): List<LightFolderRow>
+
+    @Query(
+        """
+        SELECT * FROM drive_items
+        WHERE isFolder = 0 AND trashed = 0
+        ORDER BY createdTimeEpochMs DESC
+        """
+    )
+    suspend fun getAllNonTrashedMediaSync(): List<DriveItemEntity>
+
+    @Query(
+        """
         SELECT
             parentId,
             COUNT(*) AS mediaCount,

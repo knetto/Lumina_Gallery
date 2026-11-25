@@ -74,6 +74,11 @@
         android:theme="@style/Theme.LuminaGallery"
         tools:targetApi="35">
 
+        <!-- Auto-download unbundled Google Play Services ML Kit Face & Object models on install -->
+        <meta-data
+            android:name="com.google.mlkit.vision.DEPENDENCIES"
+            android:value="face,ica" />
+
         <activity
             android:name=".MainActivity"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"

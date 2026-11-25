@@ -1,17 +1,22 @@
 package com.luminagallery.drive.ui.screens.search
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
@@ -24,11 +29,12 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.Label
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DocumentScanner
 import androidx.compose.material.icons.rounded.History
-import androidx.compose.material.icons.rounded.Label
 import androidx.compose.material.icons.rounded.LocationOn
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.AssistChip
@@ -42,7 +48,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.InputChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -58,11 +63,17 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.luminagallery.drive.LocalAppContainer
 import com.luminagallery.drive.domain.model.MediaType
@@ -73,21 +84,26 @@ import com.luminagallery.drive.ui.components.FormatUtils
 import com.luminagallery.drive.ui.components.LuminaSnackbarHost
 import com.luminagallery.drive.ui.components.MediaGridItem
 import com.luminagallery.drive.ui.components.MultiSelectActionBar
+import com.luminagallery.drive.ui.components.PersonAvatar
 import com.luminagallery.drive.ui.components.PinchZoomGridContainer
+import com.luminagallery.drive.ui.components.iconForObjectCategory
 import com.luminagallery.drive.ui.components.photoGridDragSelect
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun SearchScreen(
     viewModel: SearchViewModel,
     onNavigateBack: () -> Unit,
+    onOpenPeople: () -> Unit = {},
+    onOpenPersonDetail: (personId: String) -> Unit = {},
     onOpenViewer: (
         itemId: String,
         query: String,
         mediaType: MediaType?,
         fromEpochMs: Long?,
         toEpochMs: Long?,
-        onlyWithText: Boolean
+        onlyWithText: Boolean,
+        personId: String?
     ) -> Unit,
     onOpenCompare: (List<String>) -> Unit = {}
 ) {
@@ -96,6 +112,7 @@ fun SearchScreen(
     val favoriteIds by container.galleryExtrasRepository.favoriteItemIdsFlow
         .collectAsStateWithLifecycle(initialValue = emptySet())
     val context = LocalContext.current
+    val haptic = LocalHapticFeedback.current
     val gridState = rememberLazyGridState()
     val snackbarHostState = remember { SnackbarHostState() }
     var showDateRangeDialog by remember { mutableStateOf(false) }
@@ -148,7 +165,7 @@ fun SearchScreen(
                         TextField(
                             value = uiState.query,
                             onValueChange = viewModel::onQueryChanged,
-                            placeholder = { Text("Search text in photos, city, tag, or name…") },
+                            placeholder = { Text("Search people, objects, places, text…") },
                             singleLine = true,
                             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                             keyboardActions = KeyboardActions(onSearch = { viewModel.commitSearchHistory() }),
@@ -168,11 +185,37 @@ fun SearchScreen(
                     }
                 }
 
-                // Media type & date filter chips
+                // Media type, active Person filter & date filter chips
                 LazyRow(
                     contentPadding = PaddingValues(horizontal = 16.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
+                    val activePerson = uiState.selectedPerson
+                    if (activePerson != null) {
+                        item(key = "active_person_filter") {
+                            InputChip(
+                                selected = true,
+                                onClick = { onOpenPersonDetail(activePerson.personId) },
+                                avatar = {
+                                    PersonAvatar(
+                                        cropPath = activePerson.coverCropPath,
+                                        contentDescription = activePerson.displayTitle,
+                                        size = 24.dp
+                                    )
+                                },
+                                label = { Text(activePerson.displayTitle, fontWeight = FontWeight.SemiBold) },
+                                trailingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Close,
+                                        contentDescription = "Clear person filter",
+                                        modifier = Modifier
+                                            .size(16.dp)
+                                            .clickable { viewModel.selectPersonFilter(null) }
+                                    )
+                                }
+                            )
+                        }
+                    }
                     item(key = "type_all") {
                         FilterChip(
                             selected = uiState.selectedMediaType == null,
@@ -248,7 +291,49 @@ fun SearchScreen(
                         )
                     }
                 }
-                if (uiState.ocrProgress.isIndexing) {
+                val smartProg = uiState.smartProgress
+                if (smartProg.isIndexing || smartProg.isDownloadingModels) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 20.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(13.dp),
+                                strokeWidth = 1.8.dp,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                text = if (smartProg.isDownloadingModels) {
+                                    "Downloading on-device People & Objects AI models…"
+                                } else {
+                                    "Recognizing people & objects (${smartProg.totalIndexedPhotos}/${smartProg.totalEligiblePhotos}) · Local & Drive"
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        if (smartProg.isIndexing) {
+                            Text(
+                                text = "Pause",
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier
+                                    .clickable(onClick = viewModel::pauseSmartScan)
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                } else if (uiState.ocrProgress.isIndexing) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -277,7 +362,13 @@ fun SearchScreen(
                 .padding(innerPadding)
         ) {
             val showSmartDiscovery = uiState.query.isBlank() &&
-                (uiState.recentSearches.isNotEmpty() || uiState.suggestedCities.isNotEmpty() || uiState.suggestedTags.isNotEmpty())
+                uiState.selectedPerson == null &&
+                (uiState.suggestedPeople.isNotEmpty() ||
+                    uiState.suggestedObjects.isNotEmpty() ||
+                    uiState.recentSearches.isNotEmpty() ||
+                    uiState.suggestedCities.isNotEmpty() ||
+                    uiState.suggestedTags.isNotEmpty() ||
+                    uiState.smartProgress.remainingPhotos > 0)
             val discoveryHeaderOffset = if (showSmartDiscovery) 1 else 0
 
             PinchZoomGridContainer(
@@ -319,8 +410,120 @@ fun SearchScreen(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(horizontal = 8.dp, vertical = 6.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
                             ) {
+                                // 1. Samsung One UI Circular People Strip (tap to filter, hold to manage/name)
+                                if (uiState.suggestedPeople.isNotEmpty() || uiState.smartProgress.remainingPhotos > 0) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "People",
+                                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Row(
+                                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            if (uiState.smartProgress.remainingPhotos > 0 && !uiState.smartProgress.isIndexing) {
+                                                Text(
+                                                    text = "Scan more",
+                                                    style = MaterialTheme.typography.labelMedium,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    modifier = Modifier
+                                                        .clickable(onClick = viewModel::scanMoreSmartPhotos)
+                                                        .padding(4.dp)
+                                                )
+                                            }
+                                            Text(
+                                                text = "Manage & combine",
+                                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                                color = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier
+                                                    .clickable(onClick = onOpenPeople)
+                                                    .padding(4.dp)
+                                            )
+                                        }
+                                    }
+                                    if (uiState.suggestedPeople.isNotEmpty()) {
+                                        LazyRow(
+                                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                            contentPadding = PaddingValues(horizontal = 2.dp)
+                                        ) {
+                                            items(uiState.suggestedPeople, key = { "person_${it.personId}" }) { person ->
+                                                Column(
+                                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                                    modifier = Modifier
+                                                        .width(72.dp)
+                                                        .clip(RoundedCornerShape(16.dp))
+                                                        .combinedClickable(
+                                                            onClick = {
+                                                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                                viewModel.selectPersonFilter(person.personId)
+                                                            },
+                                                            onLongClick = {
+                                                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                                onOpenPersonDetail(person.personId)
+                                                            }
+                                                        )
+                                                        .padding(vertical = 4.dp, horizontal = 2.dp)
+                                                ) {
+                                                    PersonAvatar(
+                                                        cropPath = person.coverCropPath,
+                                                        contentDescription = person.displayTitle,
+                                                        size = 64.dp,
+                                                        isFavorite = person.isFavorite
+                                                    )
+                                                    Spacer(Modifier.height(5.dp))
+                                                    Text(
+                                                        text = if (person.isNamed) person.name else "Add name",
+                                                        fontSize = 11.5.sp,
+                                                        fontWeight = if (person.isNamed) FontWeight.Medium else FontWeight.Normal,
+                                                        color = if (person.isNamed) {
+                                                            MaterialTheme.colorScheme.onSurface
+                                                        } else {
+                                                            MaterialTheme.colorScheme.primary
+                                                        },
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis,
+                                                        textAlign = TextAlign.Center
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // 2. On-device Detected Objects & Scenes Categories
+                                if (uiState.suggestedObjects.isNotEmpty()) {
+                                    Text(
+                                        text = "Objects & scenes",
+                                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        items(uiState.suggestedObjects, key = { "obj_${it.label}" }) { chip ->
+                                            AssistChip(
+                                                onClick = {
+                                                    viewModel.onQueryChanged(chip.label)
+                                                    viewModel.commitSearchHistory(chip.label)
+                                                },
+                                                label = { Text("${chip.label} · ${chip.count}") },
+                                                leadingIcon = {
+                                                    Icon(
+                                                        imageVector = iconForObjectCategory(chip.category),
+                                                        contentDescription = null,
+                                                        modifier = Modifier.size(16.dp)
+                                                    )
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
+
                                 if (uiState.recentSearches.isNotEmpty()) {
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
@@ -391,7 +594,7 @@ fun SearchScreen(
                                                 },
                                                 label = { Text("#$tag") },
                                                 leadingIcon = {
-                                                    Icon(Icons.Rounded.Label, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                    Icon(Icons.AutoMirrored.Rounded.Label, contentDescription = null, modifier = Modifier.size(16.dp))
                                                 }
                                             )
                                         }
@@ -452,7 +655,8 @@ fun SearchScreen(
                                             uiState.selectedMediaType,
                                             uiState.resolvedFromEpochMs,
                                             uiState.resolvedToEpochMs,
-                                            uiState.onlyWithText
+                                            uiState.onlyWithText,
+                                            uiState.selectedPerson?.personId
                                         )
                                     }
                                 },

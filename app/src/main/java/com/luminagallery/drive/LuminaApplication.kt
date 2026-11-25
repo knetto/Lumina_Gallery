@@ -31,7 +31,8 @@ class LuminaApplication : Application(), Configuration.Provider, SingletonImageL
                     repository = container.galleryRepository,
                     localMediaRepository = container.localMediaRepository,
                     extrasRepository = container.galleryExtrasRepository,
-                    ocrIndexerManager = container.ocrIndexerManager
+                    ocrIndexerManager = container.ocrIndexerManager,
+                    smartRecognitionManager = container.smartRecognitionManager
                 )
             )
             .build()

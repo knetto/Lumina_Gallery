@@ -15,6 +15,7 @@ import com.luminagallery.drive.data.remote.auth.DriveAuthException
 import com.luminagallery.drive.data.repository.GalleryExtrasRepository
 import com.luminagallery.drive.data.repository.GalleryRepository
 import com.luminagallery.drive.data.repository.OcrIndexerManager
+import com.luminagallery.drive.data.repository.ai.SmartRecognitionManager
 import kotlinx.coroutines.flow.first
 import java.util.concurrent.TimeUnit
 
@@ -53,18 +54,22 @@ class MediaIndexWorker(
     workerParams: WorkerParameters,
     private val localMediaRepository: LocalMediaRepository,
     private val extrasRepository: GalleryExtrasRepository,
-    private val ocrIndexerManager: OcrIndexerManager
+    private val ocrIndexerManager: OcrIndexerManager,
+    private val smartRecognitionManager: SmartRecognitionManager
 ) : CoroutineWorker(appContext, workerParams) {
 
     override suspend fun doWork(): Result {
-        if (!localMediaRepository.hasMediaPermission()) return Result.success()
-        val localItems = runCatching {
-            localMediaRepository.observeAllLocalMedia().first()
-        }.getOrDefault(emptyList())
-        if (localItems.isEmpty()) return Result.success()
-
-        runCatching { extrasRepository.syncLocationsIndex(localItems) }
-        runCatching { ocrIndexerManager.syncOcrIndex(localItems, maxNewItemsPerRun = 150) }
+        if (localMediaRepository.hasMediaPermission()) {
+            val localItems = runCatching {
+                localMediaRepository.observeAllLocalMedia().first()
+            }.getOrDefault(emptyList())
+            if (localItems.isNotEmpty()) {
+                runCatching { extrasRepository.syncLocationsIndex(localItems) }
+                runCatching { ocrIndexerManager.syncOcrIndex(localItems, maxNewItemsPerRun = 150) }
+            }
+        }
+        // Scan both local photos & connected Google Drive thumbnails (strictly skipping locked/hidden folders)
+        runCatching { smartRecognitionManager.syncSmartIndex(maxNewItemsPerRun = 260, includeDrive = true) }
         return Result.success()
     }
 }
@@ -73,7 +78,8 @@ class LuminaWorkerFactory(
     private val repository: GalleryRepository,
     private val localMediaRepository: LocalMediaRepository,
     private val extrasRepository: GalleryExtrasRepository,
-    private val ocrIndexerManager: OcrIndexerManager
+    private val ocrIndexerManager: OcrIndexerManager,
+    private val smartRecognitionManager: SmartRecognitionManager
 ) : WorkerFactory() {
 
     override fun createWorker(
@@ -91,7 +97,8 @@ class LuminaWorkerFactory(
             workerParams = workerParameters,
             localMediaRepository = localMediaRepository,
             extrasRepository = extrasRepository,
-            ocrIndexerManager = ocrIndexerManager
+            ocrIndexerManager = ocrIndexerManager,
+            smartRecognitionManager = smartRecognitionManager
         )
         else -> null
     }

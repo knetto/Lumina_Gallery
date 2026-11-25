@@ -12,6 +12,7 @@ import com.luminagallery.drive.data.local.PreferencesManager
 import com.luminagallery.drive.data.remote.NetworkMonitor
 import com.luminagallery.drive.data.repository.GalleryExtrasRepository
 import com.luminagallery.drive.data.repository.GalleryRepository
+import com.luminagallery.drive.data.repository.ai.SmartRecognitionManager
 import com.luminagallery.drive.domain.model.AlbumMediaFilter
 import com.luminagallery.drive.domain.model.AlbumMediaSort
 import com.luminagallery.drive.domain.model.MediaItem
@@ -43,7 +44,8 @@ data class ViewerLaunchContext(
     val specialFilter: SpecialGalleryFilter? = null,
     val albumFilter: AlbumMediaFilter = AlbumMediaFilter.ALL,
     val albumSort: AlbumMediaSort = AlbumMediaSort.DATE_DESC,
-    val locationKey: String? = null
+    val locationKey: String? = null,
+    val personId: String? = null
 )
 
 @Immutable
@@ -71,6 +73,7 @@ class ViewerViewModel(
     private val repository: GalleryRepository,
     private val localMediaRepository: LocalMediaRepository,
     private val extrasRepository: GalleryExtrasRepository,
+    private val smartRecognitionManager: SmartRecognitionManager,
     private val preferencesManager: PreferencesManager,
     private val exportMediaUseCase: ExportMediaUseCase,
     networkMonitor: NetworkMonitor,
@@ -90,6 +93,18 @@ class ViewerViewModel(
         .map { ids -> repository.expandBlockedFolderIds(ids) }
 
     private val mediaSourceFlow = when {
+        !launchContext.personId.isNullOrBlank() && !launchContext.isSearchMode -> combine(
+            localMediaRepository.observeAllLocalMedia(),
+            repository.searchMedia("", null, null, null),
+            smartRecognitionManager.observeFacesForPerson(launchContext.personId),
+            excludedAlbumIdsFlow
+        ) { local, drive, faces, excluded ->
+            val targetPhotoIds = faces.mapTo(HashSet(faces.size)) { it.itemId }
+            (local + drive)
+                .filter { it.id in targetPhotoIds && it.parentId !in excluded }
+                .sortedByDescending { it.createdTimeEpochMs }
+        }.flowOn(Dispatchers.Default)
+
         !launchContext.locationKey.isNullOrBlank() -> combine(
             extrasRepository.locationProgressFlow,
             excludedAlbumIdsFlow
@@ -135,13 +150,19 @@ class ViewerViewModel(
         }
 
         launchContext.isSearchMode -> {
+            val smartFlow = combine(
+                smartRecognitionManager.allPersonsFlow,
+                smartRecognitionManager.allActiveFacesFlow,
+                smartRecognitionManager.smartIndexMapFlow
+            ) { persons, faces, smartMap -> Triple(persons, faces, smartMap) }
             val enrichmentFlow = combine(
                 extrasRepository.cachedLocationsMapFlow,
                 extrasRepository.mediaAnnotationsFlow,
                 extrasRepository.ocrTextMapFlow,
-                excludedAlbumIdsFlow
-            ) { locs, anns, ocr, excluded ->
-                SearchViewerEnrichment(locs, anns, ocr, excluded)
+                excludedAlbumIdsFlow,
+                smartFlow
+            ) { locs, anns, ocr, excluded, (persons, faces, smartMap) ->
+                SearchViewerEnrichment(locs, anns, ocr, excluded, persons, faces, smartMap)
             }
             combine(
                 localMediaRepository.observeAllLocalMedia(),
@@ -149,9 +170,24 @@ class ViewerViewModel(
                 enrichmentFlow
             ) { localItems, driveItems, enrich ->
                 val tokens = launchContext.searchQuery.trim().lowercase()
-                    .split(Regex("\\s+")).filter { it.isNotBlank() }
+                    .split(Regex("\\s+")).map { it.removePrefix("#").trim() }.filter { it.isNotBlank() }
+                val personById = enrich.persons.associateBy { it.personId }
+                val personNamesByPhoto = HashMap<String, MutableList<String>>()
+                val selectedPersonPhotoIds = if (!launchContext.personId.isNullOrBlank()) HashSet<String>() else null
+                for (face in enrich.faces) {
+                    val pid = face.personId ?: continue
+                    val p = personById[pid] ?: continue
+                    if (p.isHidden) continue
+                    if (selectedPersonPhotoIds != null && pid == launchContext.personId) {
+                        selectedPersonPhotoIds.add(face.itemId)
+                    }
+                    if (p.name.isNotBlank()) {
+                        personNamesByPhoto.getOrPut(face.itemId) { mutableListOf() }.add(p.name)
+                    }
+                }
                 (localItems + driveItems).filter { item ->
                     if (item.parentId in enrich.excludedIds) return@filter false
+                    if (selectedPersonPhotoIds != null && item.id !in selectedPersonPhotoIds) return@filter false
                     if (launchContext.mediaTypeFilter != null && item.mediaType != launchContext.mediaTypeFilter) {
                         return@filter false
                     }
@@ -168,8 +204,14 @@ class ViewerViewModel(
                     if (tokens.isEmpty()) return@filter true
                     val loc = enrich.locationsById[item.id]
                     val ann = enrich.annotationsById[item.id]
+                    val smart = enrich.smartById[item.id]
+                    val pNames = personNamesByPhoto[item.id]
                     tokens.all { token ->
-                        item.name.contains(token, ignoreCase = true) ||
+                        (pNames != null && pNames.any { it.contains(token, ignoreCase = true) }) ||
+                            smart?.labelsCsv?.contains(token, ignoreCase = true) == true ||
+                            smart?.labelSearchTokens?.contains(token, ignoreCase = true) == true ||
+                            ((smart?.faceCount ?: 0) > 0 && (token == "people" || token == "person" || token == "personen" || token == "mensen" || token == "face")) ||
+                            item.name.contains(token, ignoreCase = true) ||
                             item.relativePath?.contains(token, ignoreCase = true) == true ||
                             item.storagePath?.contains(token, ignoreCase = true) == true ||
                             item.monthYearLabel.contains(token, ignoreCase = true) ||
@@ -316,7 +358,7 @@ class ViewerViewModel(
             extrasRepository.latestLockedAlbumIds + extrasRepository.latestHiddenAlbumIds
         )
         val cached = when {
-            !launchContext.locationKey.isNullOrBlank() -> emptyList()
+            !launchContext.personId.isNullOrBlank() || !launchContext.locationKey.isNullOrBlank() -> emptyList()
             launchContext.specialFilter == SpecialGalleryFilter.VIDEOS ->
                 localMediaRepository.getCachedAlbumMedia(LocalMediaRepository.LOCAL_BUCKET_VIDEOS)
                     .filterNot { it.parentId in excluded }
@@ -508,7 +550,10 @@ class ViewerViewModel(
         val locationsById: Map<String, com.luminagallery.drive.data.local.entity.PhotoLocationEntity>,
         val annotationsById: Map<String, com.luminagallery.drive.data.local.entity.MediaAnnotationEntity>,
         val ocrById: Map<String, com.luminagallery.drive.data.local.entity.PhotoOcrEntity>,
-        val excludedIds: Set<String>
+        val excludedIds: Set<String>,
+        val persons: List<com.luminagallery.drive.data.local.entity.PersonClusterEntity>,
+        val faces: List<com.luminagallery.drive.data.local.entity.DetectedFaceEntity>,
+        val smartById: Map<String, com.luminagallery.drive.data.local.entity.PhotoSmartIndexEntity>
     )
 
     private data class ViewerDialogEvents(
@@ -540,6 +585,7 @@ class ViewerViewModel(
             repository = container.galleryRepository,
             localMediaRepository = container.localMediaRepository,
             extrasRepository = container.galleryExtrasRepository,
+            smartRecognitionManager = container.smartRecognitionManager,
             preferencesManager = container.preferencesManager,
             exportMediaUseCase = container.exportMediaUseCase,
             networkMonitor = container.networkMonitor,

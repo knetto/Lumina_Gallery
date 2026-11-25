@@ -170,6 +170,7 @@ fun HomeScreen(
     onOpenSettings: () -> Unit,
     onOpenSpecialFilter: (SpecialGalleryFilter) -> Unit,
     onOpenLocations: () -> Unit,
+    onOpenPeople: () -> Unit = {},
     onOpenCleanOut: () -> Unit,
     onOpenCompare: (List<String>) -> Unit = {}
 ) {
@@ -1009,6 +1010,7 @@ fun HomeScreen(
             onFavoritesClick = { onOpenSpecialFilter(SpecialGalleryFilter.FAVORITES) },
             onRecentClick = { onOpenSpecialFilter(SpecialGalleryFilter.RECENT) },
             onLocationsClick = onOpenLocations,
+            onPeopleClick = onOpenPeople,
             onGoogleDriveClick = viewModel::openDriveManagerSheet,
             onCleanOutClick = onOpenCleanOut,
             onTrashClick = { onOpenSpecialFilter(SpecialGalleryFilter.TRASH) },

@@ -26,6 +26,7 @@ import com.luminagallery.drive.data.repository.MotionPhotoDetector
 import com.luminagallery.drive.data.repository.OcrIndexerManager
 import com.luminagallery.drive.data.repository.OfflineMediaManager
 import com.luminagallery.drive.data.repository.VideoTrimmer
+import com.luminagallery.drive.data.repository.ai.SmartRecognitionManager
 import com.luminagallery.drive.data.repository.sync.DriveSyncScheduler
 import com.luminagallery.drive.domain.usecase.ExportMediaUseCase
 import com.luminagallery.drive.domain.usecase.ManageRootsUseCase
@@ -33,6 +34,8 @@ import com.luminagallery.drive.domain.usecase.SyncGalleryUseCase
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
@@ -134,6 +137,27 @@ class AppContainer(context: Context) {
         driveApi = driveApiService,
         offlineMediaManager = offlineMediaManager
     )
+
+    val smartRecognitionManager: SmartRecognitionManager = SmartRecognitionManager(
+        context = appContext,
+        database = database,
+        localMediaRepository = localMediaRepository,
+        offlineMediaManager = offlineMediaManager,
+        okHttpClient = okHttpClient,
+        networkMonitor = networkMonitor
+    )
+
+    init {
+        // Immediately scrub cached faces & object tags whenever an album is locked or hidden
+        appScope.launch {
+            galleryExtrasRepository.excludedAlbumIdsFlow
+                .distinctUntilChanged()
+                .drop(1)
+                .collect {
+                    runCatching { smartRecognitionManager.purgeBlockedItemsFromCache() }
+                }
+        }
+    }
 
     val collagePdfCreator: CollagePdfCreator = CollagePdfCreator(
         context = appContext,

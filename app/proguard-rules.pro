@@ -93,11 +93,15 @@
 -keep class com.luminagallery.drive.data.local.dao.** { *; }
 -dontwarn androidx.room.paging.**
 
-# ML Kit On-Device Text Recognition & Biometric
+# ML Kit On-Device Vision (OCR, Face Detection, Image Labeling), LiteRT & Biometric
 # ML Kit discovers its registrars by class name in the manifest and invokes their constructors.
 -keep class com.google.mlkit.** implements com.google.firebase.components.ComponentRegistrar {
     public <init>();
 }
+-keep class org.tensorflow.lite.** { *; }
+-keep class com.google.ai.edge.litert.** { *; }
+-dontwarn org.tensorflow.lite.**
+-dontwarn com.google.ai.edge.litert.**
 -dontwarn com.google.mlkit.**
 -dontwarn com.google.android.gms.internal.mlkit_**
 -dontwarn androidx.biometric.**

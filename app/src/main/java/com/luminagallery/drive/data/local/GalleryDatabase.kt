@@ -10,11 +10,13 @@ import com.luminagallery.drive.data.local.dao.AlbumCollectionDao
 import com.luminagallery.drive.data.local.dao.DriveItemDao
 import com.luminagallery.drive.data.local.dao.GalleryExtrasDao
 import com.luminagallery.drive.data.local.dao.PinnedRootDao
+import com.luminagallery.drive.data.local.dao.SmartRecognitionDao
 import com.luminagallery.drive.data.local.dao.SyncStateDao
 import com.luminagallery.drive.data.local.entity.AlbumCollectionEntity
 import com.luminagallery.drive.data.local.entity.AlbumLayoutEntity
 import com.luminagallery.drive.data.local.entity.AlbumViewPrefEntity
 import com.luminagallery.drive.data.local.entity.CustomAlbumCoverEntity
+import com.luminagallery.drive.data.local.entity.DetectedFaceEntity
 import com.luminagallery.drive.data.local.entity.DriveItemEntity
 import com.luminagallery.drive.data.local.entity.FavoriteItemEntity
 import com.luminagallery.drive.data.local.entity.FavoriteStoryEntity
@@ -23,8 +25,10 @@ import com.luminagallery.drive.data.local.entity.IgnoredCleanOutEntity
 import com.luminagallery.drive.data.local.entity.LockedAlbumEntity
 import com.luminagallery.drive.data.local.entity.MediaAnnotationEntity
 import com.luminagallery.drive.data.local.entity.OfflinePinnedEntity
+import com.luminagallery.drive.data.local.entity.PersonClusterEntity
 import com.luminagallery.drive.data.local.entity.PhotoLocationEntity
 import com.luminagallery.drive.data.local.entity.PhotoOcrEntity
+import com.luminagallery.drive.data.local.entity.PhotoSmartIndexEntity
 import com.luminagallery.drive.data.local.entity.PinnedRootEntity
 import com.luminagallery.drive.data.local.entity.SyncStateEntity
 
@@ -45,9 +49,12 @@ import com.luminagallery.drive.data.local.entity.SyncStateEntity
         OfflinePinnedEntity::class,
         PhotoOcrEntity::class,
         AlbumViewPrefEntity::class,
-        LockedAlbumEntity::class
+        LockedAlbumEntity::class,
+        PersonClusterEntity::class,
+        DetectedFaceEntity::class,
+        PhotoSmartIndexEntity::class
     ],
-    version = 11,
+    version = 12,
     exportSchema = true
 )
 abstract class GalleryDatabase : RoomDatabase() {
@@ -56,6 +63,7 @@ abstract class GalleryDatabase : RoomDatabase() {
     abstract fun syncStateDao(): SyncStateDao
     abstract fun albumCollectionDao(): AlbumCollectionDao
     abstract fun galleryExtrasDao(): GalleryExtrasDao
+    abstract fun smartRecognitionDao(): SmartRecognitionDao
 
     companion object {
         private const val DATABASE_NAME = "lumina_drive_gallery.db"
@@ -270,6 +278,67 @@ abstract class GalleryDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `person_clusters` (
+                        `personId` TEXT NOT NULL,
+                        `name` TEXT NOT NULL,
+                        `isHidden` INTEGER NOT NULL,
+                        `isFavorite` INTEGER NOT NULL,
+                        `coverFaceId` TEXT,
+                        `coverPhotoId` TEXT,
+                        `coverCropPath` TEXT,
+                        `centroidBlob` BLOB NOT NULL,
+                        `sampleCount` INTEGER NOT NULL,
+                        `updatedAtEpochMs` INTEGER NOT NULL,
+                        PRIMARY KEY(`personId`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_person_clusters_isHidden` ON `person_clusters` (`isHidden`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_person_clusters_isFavorite` ON `person_clusters` (`isFavorite`)")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `detected_faces` (
+                        `faceId` TEXT NOT NULL,
+                        `itemId` TEXT NOT NULL,
+                        `personId` TEXT,
+                        `embeddingBlob` BLOB NOT NULL,
+                        `bboxLeft` REAL NOT NULL,
+                        `bboxTop` REAL NOT NULL,
+                        `bboxRight` REAL NOT NULL,
+                        `bboxBottom` REAL NOT NULL,
+                        `qualityScore` REAL NOT NULL,
+                        `cropPath` TEXT,
+                        `isExcludedByUser` INTEGER NOT NULL,
+                        `detectedAtEpochMs` INTEGER NOT NULL,
+                        PRIMARY KEY(`faceId`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_detected_faces_itemId` ON `detected_faces` (`itemId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_detected_faces_personId` ON `detected_faces` (`personId`)")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `photo_smart_index` (
+                        `itemId` TEXT NOT NULL,
+                        `dateModifiedMs` INTEGER NOT NULL,
+                        `faceCount` INTEGER NOT NULL,
+                        `labelsCsv` TEXT NOT NULL,
+                        `labelSearchTokens` TEXT NOT NULL,
+                        `isDriveItem` INTEGER NOT NULL,
+                        `indexedAtEpochMs` INTEGER NOT NULL,
+                        PRIMARY KEY(`itemId`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_photo_smart_index_faceCount` ON `photo_smart_index` (`faceCount`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_photo_smart_index_isDriveItem` ON `photo_smart_index` (`isDriveItem`)")
+            }
+        }
+
         fun build(context: Context): GalleryDatabase =
             Room.databaseBuilder(
                 context.applicationContext,
@@ -286,7 +355,8 @@ abstract class GalleryDatabase : RoomDatabase() {
                     MIGRATION_7_8,
                     MIGRATION_8_9,
                     MIGRATION_9_10,
-                    MIGRATION_10_11
+                    MIGRATION_10_11,
+                    MIGRATION_11_12
                 )
                 .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
                 .build()

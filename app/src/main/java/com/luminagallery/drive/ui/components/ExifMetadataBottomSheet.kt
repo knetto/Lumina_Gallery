@@ -34,22 +34,30 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Label
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.CameraAlt
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.Face
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.Movie
 import androidx.compose.material.icons.rounded.Smartphone
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import com.luminagallery.drive.data.repository.ai.SmartObjectVocabulary
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -101,6 +109,17 @@ fun ExifMetadataBottomSheet(
     val annotation by remember(item.id) {
         container.galleryExtrasRepository.observeAnnotation(item.id)
     }.collectAsStateWithLifecycle(initialValue = null)
+
+    val detectedFaces by remember(item.id) {
+        container.smartRecognitionManager.observeFacesForPhoto(item.id)
+    }.collectAsStateWithLifecycle(initialValue = emptyList())
+    val allPersons by container.smartRecognitionManager.allPersonsFlow
+        .collectAsStateWithLifecycle(initialValue = emptyList())
+    val smartIndex by remember(item.id) {
+        container.smartRecognitionManager.observeSmartIndexForPhoto(item.id)
+    }.collectAsStateWithLifecycle(initialValue = null)
+    var quickRenamePersonId by remember { mutableStateOf<String?>(null) }
+    var quickRenameInitial by remember { mutableStateOf("") }
 
     var tags by remember(item.id) { mutableStateOf<List<String>>(emptyList()) }
     var noteDraft by remember(item.id) { mutableStateOf("") }
@@ -482,6 +501,138 @@ fun ExifMetadataBottomSheet(
                 }
             }
 
+            // 3.5. On-device Detected People & Objects Card (Samsung One UI style)
+            val photoPersons = remember(detectedFaces, allPersons) {
+                val byId = allPersons.associateBy { it.personId }
+                detectedFaces.mapNotNull { face ->
+                    val pid = face.personId ?: return@mapNotNull null
+                    val person = byId[pid] ?: return@mapNotNull null
+                    if (person.isHidden) null else (person to (face.cropPath ?: person.coverCropPath))
+                }.distinctBy { it.first.personId }
+            }
+            val detectedLabels = remember(smartIndex) {
+                smartIndex?.labelsCsv.orEmpty()
+                    .split(",")
+                    .map { it.trim() }
+                    .filter { it.isNotEmpty() }
+            }
+            if (photoPersons.isNotEmpty() || detectedLabels.isNotEmpty()) {
+                Surface(
+                    shape = RoundedCornerShape(22.dp),
+                    color = cardColor,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(0.7.dp, hairlineBorder, RoundedCornerShape(22.dp))
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        if (photoPersons.isNotEmpty()) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Face,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Text(
+                                    text = "People in this photo",
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                items(photoPersons, key = { it.first.personId }) { (person, crop) ->
+                                    Column(
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(14.dp))
+                                            .clickable {
+                                                quickRenamePersonId = person.personId
+                                                quickRenameInitial = person.name
+                                            }
+                                            .padding(4.dp)
+                                    ) {
+                                        PersonAvatar(
+                                            cropPath = crop,
+                                            contentDescription = person.name.ifBlank { "Unnamed" },
+                                            size = 54.dp,
+                                            isFavorite = person.isFavorite
+                                        )
+                                        Spacer(Modifier.height(4.dp))
+                                        Text(
+                                            text = person.name.ifBlank { "Add name" },
+                                            style = MaterialTheme.typography.labelSmall.copy(
+                                                fontWeight = if (person.name.isNotBlank()) FontWeight.SemiBold else FontWeight.Medium
+                                            ),
+                                            color = if (person.name.isNotBlank()) {
+                                                MaterialTheme.colorScheme.onSurface
+                                            } else {
+                                                MaterialTheme.colorScheme.primary
+                                            },
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        if (detectedLabels.isNotEmpty()) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.AutoAwesome,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(17.dp)
+                                )
+                                Text(
+                                    text = "Detected objects & scenes",
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(7.dp),
+                                verticalArrangement = Arrangement.spacedBy(7.dp)
+                            ) {
+                                detectedLabels.forEach { label ->
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(50))
+                                            .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+                                            .padding(horizontal = 10.dp, vertical = 5.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = iconForObjectCategory(SmartObjectVocabulary.categoryForLabel(label)),
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(13.dp)
+                                        )
+                                        Text(
+                                            text = label,
+                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Medium),
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // 4. Clean iOS-style Caption & Tags Card
             Surface(
                 shape = RoundedCornerShape(22.dp),
@@ -664,5 +815,47 @@ fun ExifMetadataBottomSheet(
                 }
             }
         }
+    }
+
+    quickRenamePersonId?.let { targetPid ->
+        var draftName by remember(targetPid) { mutableStateOf(quickRenameInitial) }
+        AlertDialog(
+            onDismissRequest = { quickRenamePersonId = null },
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            shape = RoundedCornerShape(24.dp),
+            title = { Text(if (quickRenameInitial.isNotBlank()) "Rename person" else "Name this person") },
+            text = {
+                OutlinedTextField(
+                    value = draftName,
+                    onValueChange = { draftName = it },
+                    label = { Text("Name") },
+                    placeholder = { Text("Enter name…") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val clean = draftName.trim()
+                        quickRenamePersonId = null
+                        scope.launch {
+                            val existing = container.smartRecognitionManager.findExistingPersonByName(clean, targetPid)
+                            if (existing != null && clean.isNotEmpty()) {
+                                container.smartRecognitionManager.mergePersons(existing.personId, listOf(targetPid), existing.name)
+                                onCopiedMessage("Combined with ${existing.name}")
+                            } else {
+                                container.smartRecognitionManager.renamePerson(targetPid, clean)
+                                onCopiedMessage(if (clean.isNotEmpty()) "Named \"$clean\"" else "Name cleared")
+                            }
+                        }
+                    }
+                ) { Text("Save", fontWeight = FontWeight.SemiBold) }
+            },
+            dismissButton = {
+                TextButton(onClick = { quickRenamePersonId = null }) { Text("Cancel") }
+            }
+        )
     }
 }

@@ -101,6 +101,10 @@ android {
         buildConfig = true
     }
 
+    androidResources {
+        noCompress += "tflite"
+    }
+
     packaging {
         resources {
             excludes += setOf(
@@ -202,9 +206,12 @@ dependencies {
     // MapLibre Native 120Hz Vector Map (API-key-free OpenFreeMap tiles)
     implementation(libs.maplibre.android.sdk)
 
-    // Biometric Private Vault Lock & Offline On-Device OCR Text Search
+    // Biometric Private Vault Lock & Offline On-Device Vision (OCR, Faces, Objects, MobileFaceNet)
     implementation(libs.androidx.biometric)
     implementation(libs.mlkit.text.recognition)
+    implementation(libs.play.services.mlkit.face.detection)
+    implementation(libs.play.services.mlkit.image.labeling)
+    implementation(libs.litert)
 
     // JVM Unit Tests
     testImplementation("junit:junit:4.13.2")
