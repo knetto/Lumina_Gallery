@@ -164,11 +164,27 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
         )
 
         val today = LocalDate.now()
+        val primarySelection = selections.firstOrNull()
         prefs.edit().apply {
             if (effectiveAdvance || lastAdvance == 0L) {
                 putLong("last_advance_$widgetId", now)
             }
             putString("last_date_$widgetId", today.toString())
+            if (primarySelection != null && primarySelection.photos.isNotEmpty()) {
+                putString(
+                    "shown_ids_$widgetId",
+                    primarySelection.photos.joinToString(",") { it.luminaItemId }
+                )
+                val cap = primarySelection.caption
+                if (cap != null) {
+                    putString("shown_title_$widgetId", cap.title)
+                    if (cap.subtitle != null) putString("shown_sub_$widgetId", cap.subtitle)
+                    else remove("shown_sub_$widgetId")
+                } else {
+                    remove("shown_title_$widgetId")
+                    remove("shown_sub_$widgetId")
+                }
+            }
         }.apply()
 
         val canUseResponsiveMap = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
@@ -522,39 +538,8 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
         ResolvedTilePattern.SINGLE -> null
     }
 
-    private fun resolveWidgetSizesDp(options: Bundle): List<SizeF> {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            @Suppress("DEPRECATION")
-            val reported = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                options.getParcelableArrayList(AppWidgetManager.OPTION_APPWIDGET_SIZES, SizeF::class.java)
-            } else {
-                options.getParcelableArrayList<SizeF>(AppWidgetManager.OPTION_APPWIDGET_SIZES)
-            }
-            val valid = reported?.filter { it.width >= 32f && it.height >= 32f }.orEmpty()
-            if (valid.isNotEmpty()) {
-                // Sort portrait-first so primary size matches phone home screen
-                return valid.sortedByDescending { it.height }
-            }
-        }
-        val (defW, defH) = defaultSizeDpForKind(kind)
-        // Portrait home screen size uses (MIN_WIDTH, MAX_HEIGHT)
-        val minW = options.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH)
-        val maxH = options.getInt(AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT)
-        val minH = options.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT)
-        val w = (if (minW > 0) minW.toFloat() else defW).coerceAtLeast(48f)
-        val h = (when {
-            maxH > 0 -> maxH.toFloat()
-            minH > 0 -> minH.toFloat()
-            else -> defH
-        }).coerceAtLeast(48f)
-        return listOf(SizeF(w, h))
-    }
-
-    private fun defaultSizeDpForKind(kind: PhotoWidgetKind): Pair<Float, Float> = when (kind) {
-        PhotoWidgetKind.COLLAGE, PhotoWidgetKind.MEMORIES -> 320f to 165f
-        PhotoWidgetKind.STRIP -> 320f to 84f
-        else -> 160f to 160f
-    }
+    private fun resolveWidgetSizesDp(options: Bundle): List<SizeF> =
+        resolveWidgetSizesDpForKind(options, kind)
 
     /**
      * Computes exact pixel canvas dimensions matching [sizeDp]'s aspect ratio while safely
@@ -738,6 +723,36 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
         private const val SLIDESHOW_FRAME_COUNT = 6
         private const val PENDING_FLAGS = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         private val updateMutex = Mutex()
+
+        internal fun resolveWidgetSizesDpForKind(options: Bundle, kind: PhotoWidgetKind): List<SizeF> {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                @Suppress("DEPRECATION")
+                val reported = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    options.getParcelableArrayList(AppWidgetManager.OPTION_APPWIDGET_SIZES, SizeF::class.java)
+                } else {
+                    options.getParcelableArrayList<SizeF>(AppWidgetManager.OPTION_APPWIDGET_SIZES)
+                }
+                val valid = reported?.filter { it.width >= 32f && it.height >= 32f }.orEmpty()
+                if (valid.isNotEmpty()) {
+                    return valid.sortedByDescending { it.height }
+                }
+            }
+            val (defW, defH) = when (kind) {
+                PhotoWidgetKind.COLLAGE, PhotoWidgetKind.MEMORIES -> 320f to 165f
+                PhotoWidgetKind.STRIP -> 320f to 84f
+                else -> 160f to 160f
+            }
+            val minW = options.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH)
+            val maxH = options.getInt(AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT)
+            val minH = options.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT)
+            val w = (if (minW > 0) minW.toFloat() else defW).coerceAtLeast(48f)
+            val h = (when {
+                maxH > 0 -> maxH.toFloat()
+                minH > 0 -> minH.toFloat()
+                else -> defH
+            }).coerceAtLeast(48f)
+            return listOf(SizeF(w, h))
+        }
 
         internal fun isWidgetAdvanceDue(
             interval: WidgetShuffleInterval,

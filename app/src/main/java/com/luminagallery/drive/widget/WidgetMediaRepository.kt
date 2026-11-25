@@ -155,6 +155,24 @@ internal object WidgetMediaRepository {
     }
 
     /**
+     * Loads exact photos currently shown on a widget by their Lumina item IDs,
+     * still enforcing hidden/locked album privacy exclusions.
+     */
+    suspend fun loadPhotosByIds(
+        context: Context,
+        photoIds: List<String>
+    ): List<WidgetPhoto> = withContext(Dispatchers.IO) {
+        if (photoIds.isEmpty()) return@withContext emptyList()
+        val privacy = loadPrivacyContext(
+            context = context,
+            needFavorites = false,
+            needLocations = false,
+            needCollections = false
+        ) ?: return@withContext emptyList()
+        querySpecificPhotos(context, privacy, photoIds)
+    }
+
+    /**
      * Resolves a batch of [frameCount] frames for rendering (1 frame for static/scheduled updates,
      * or up to 6 frames for live fast ViewFlipper slideshows!).
      */

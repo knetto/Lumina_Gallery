@@ -10,20 +10,24 @@ import android.graphics.ImageDecoder
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.util.SizeF
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
@@ -50,22 +54,28 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.Folder
+import androidx.compose.material.icons.rounded.LocationOn
 import androidx.compose.material.icons.rounded.PhotoLibrary
+import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Shuffle
+import androidx.compose.material.icons.rounded.Today
+import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -75,6 +85,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -82,14 +93,22 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -108,6 +127,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.time.LocalDate
+import kotlin.math.min
+import kotlin.math.roundToInt
 
 private enum class ActiveWidgetPicker {
     NONE,
@@ -140,6 +161,10 @@ class PhotoWidgetSettingsActivity : ComponentActivity() {
 
         val kind = provider.kind
         val initialSettings = PhotoWidgetSettings.load(this, widgetId, kind)
+        val actualWidgetSizeDp = LuminaPhotoWidgetProvider.resolveWidgetSizesDpForKind(
+            manager.getAppWidgetOptions(widgetId),
+            kind
+        ).first()
         val appContainer = (application as? LuminaApplication)?.container
 
         setContent {
@@ -154,25 +179,42 @@ class PhotoWidgetSettingsActivity : ComponentActivity() {
                 ThemeMode.SYSTEM -> systemDark
             }
             LaunchedEffect(useDark) {
-                val style = if (useDark) {
+                // Status bar sits over the dark ambient preview header, nav bar follows app theme
+                val navStyle = if (useDark) {
                     SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
                 } else {
                     SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT)
                 }
-                enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
+                enableEdgeToEdge(
+                    statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+                    navigationBarStyle = navStyle
+                )
             }
 
             LuminaTheme(themeMode = prefs.themeMode, dynamicColor = prefs.dynamicColor) {
                 WidgetSettingsRoot(
+                    widgetId = widgetId,
                     kind = kind,
+                    actualWidgetSizeDp = actualWidgetSizeDp,
                     initialSettings = initialSettings,
                     onCancel = { finish() },
                     onSave = { updated, onResult ->
+                        val sourceChanged = updated.source != initialSettings.source ||
+                            updated.selectedAlbumIds != initialSettings.selectedAlbumIds ||
+                            updated.selectedPhotoIds != initialSettings.selectedPhotoIds ||
+                            updated.excludeScreenshots != initialSettings.excludeScreenshots ||
+                            updated.memorySource != initialSettings.memorySource ||
+                            updated.groupByAlbum != initialSettings.groupByAlbum
                         lifecycleScope.launch {
                             try {
-                                updated.save(applicationContext, widgetId, resetState = true)
+                                updated.save(applicationContext, widgetId, resetState = sourceChanged)
                                 WidgetRefreshScheduler.syncSchedule(applicationContext)
-                                provider.renderWidgets(applicationContext, manager, intArrayOf(widgetId), advance = false)
+                                provider.renderWidgets(
+                                    applicationContext,
+                                    manager,
+                                    intArrayOf(widgetId),
+                                    advance = false
+                                )
                                 setResult(
                                     RESULT_OK,
                                     Intent().putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, widgetId)
@@ -192,22 +234,35 @@ class PhotoWidgetSettingsActivity : ComponentActivity() {
 
 @Composable
 private fun WidgetSettingsRoot(
+    widgetId: Int,
     kind: PhotoWidgetKind,
+    actualWidgetSizeDp: SizeF,
     initialSettings: PhotoWidgetSettings,
     onCancel: () -> Unit,
     onSave: (PhotoWidgetSettings, (Boolean) -> Unit) -> Unit
 ) {
     val context = LocalContext.current
+    val haptic = LocalHapticFeedback.current
     var settings by remember { mutableStateOf(initialSettings) }
     var activePicker by remember { mutableStateOf(ActiveWidgetPicker.NONE) }
+    var previewShuffleTick by remember { mutableIntStateOf(0) }
     var saving by remember { mutableStateOf(false) }
     var saveFailed by remember { mutableStateOf(false) }
 
     val albums by produceState<List<WidgetAlbumOption>>(initialValue = emptyList()) {
         value = WidgetMediaRepository.loadPickerAlbums(context)
     }
-
+    val albumById = remember(albums) { albums.associateBy { it.id } }
     val albumNameById = remember(albums) { albums.associate { it.id to it.name } }
+
+    // Inline thumbnails when user has picked specific photos
+    val pickedPhotoPreviews by produceState<List<WidgetPhoto>>(
+        initialValue = emptyList(),
+        key1 = settings.selectedPhotoIds
+    ) {
+        value = if (settings.selectedPhotoIds.isEmpty()) emptyList()
+        else WidgetMediaRepository.loadPhotosByIds(context, settings.selectedPhotoIds.take(12))
+    }
 
     BackHandler(enabled = activePicker != ActiveWidgetPicker.NONE) {
         activePicker = ActiveWidgetPicker.NONE
@@ -249,44 +304,28 @@ private fun WidgetSettingsRoot(
         ActiveWidgetPicker.NONE -> Unit
     }
 
+    val isUsingOriginalSource = remember(settings, initialSettings) {
+        settings.source == initialSettings.source &&
+            settings.selectedAlbumIds == initialSettings.selectedAlbumIds &&
+            settings.selectedPhotoIds == initialSettings.selectedPhotoIds &&
+            settings.excludeScreenshots == initialSettings.excludeScreenshots &&
+            settings.memorySource == initialSettings.memorySource &&
+            settings.groupByAlbum == initialSettings.groupByAlbum
+    }
+
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
-        topBar = {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .statusBarsPadding()
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = onCancel, enabled = !saving) {
-                    Icon(Icons.Rounded.Close, contentDescription = stringResource(android.R.string.cancel))
-                }
-                Column(modifier = Modifier.weight(1f).padding(horizontal = 4.dp)) {
-                    Text(
-                        text = widgetKindTitle(kind),
-                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        text = "HyperOS Glass Widget Settings",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-        },
         bottomBar = {
             Surface(
                 color = MaterialTheme.colorScheme.surfaceContainerLow,
-                tonalElevation = 4.dp
+                tonalElevation = 6.dp,
+                shadowElevation = 10.dp
             ) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .navigationBarsPadding()
-                        .padding(horizontal = 20.dp, vertical = 12.dp)
+                        .padding(horizontal = 18.dp, vertical = 12.dp)
                 ) {
                     if (saveFailed) {
                         Text(
@@ -298,18 +337,29 @@ private fun WidgetSettingsRoot(
                     }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        OutlinedButton(
-                            onClick = onCancel,
-                            enabled = !saving,
-                            shape = RoundedCornerShape(16.dp),
-                            modifier = Modifier.weight(1f).height(48.dp)
+                        Surface(
+                            shape = RoundedCornerShape(18.dp),
+                            color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                            modifier = Modifier
+                                .weight(0.9f)
+                                .height(50.dp)
+                                .clip(RoundedCornerShape(18.dp))
+                                .clickable(enabled = !saving, onClick = onCancel)
                         ) {
-                            Text(stringResource(android.R.string.cancel))
+                            Box(contentAlignment = Alignment.Center) {
+                                Text(
+                                    text = stringResource(android.R.string.cancel),
+                                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
                         }
                         Button(
                             onClick = {
+                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                 saving = true
                                 saveFailed = false
                                 onSave(settings) { ok ->
@@ -318,8 +368,11 @@ private fun WidgetSettingsRoot(
                                 }
                             },
                             enabled = !saving,
-                            shape = RoundedCornerShape(16.dp),
-                            modifier = Modifier.weight(1.5f).height(48.dp)
+                            shape = RoundedCornerShape(18.dp),
+                            elevation = ButtonDefaults.buttonElevation(defaultElevation = 0.dp),
+                            modifier = Modifier
+                                .weight(1.6f)
+                                .height(50.dp)
                         ) {
                             if (saving) {
                                 CircularProgressIndicator(
@@ -328,7 +381,12 @@ private fun WidgetSettingsRoot(
                                     color = MaterialTheme.colorScheme.onPrimary
                                 )
                             } else {
-                                Text(stringResource(R.string.widget_save), fontWeight = FontWeight.SemiBold)
+                                Icon(Icons.Rounded.Check, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    text = stringResource(R.string.widget_save),
+                                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
+                                )
                             }
                         }
                     }
@@ -339,302 +397,408 @@ private fun WidgetSettingsRoot(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(innerPadding)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+                .padding(bottom = innerPadding.calculateBottomPadding())
         ) {
-            // 1. LIVE HYPEROS GLASS PREVIEW
-            LiveWidgetPreviewStage(
+            // PINNED LIVE PREVIEW STAGE — stays visible as you tweak every toggle below!
+            PinnedWidgetPreviewHeader(
+                widgetId = widgetId,
                 kind = kind,
-                settings = settings
+                actualWidgetSizeDp = actualWidgetSizeDp,
+                settings = settings,
+                usePlacedWidgetPhotos = isUsingOriginalSource && previewShuffleTick == 0,
+                previewShuffleTick = previewShuffleTick,
+                onClose = onCancel,
+                onPreviewShuffle = {
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    previewShuffleTick++
+                }
             )
 
-            // 2. PHOTO SOURCE SECTION
-            WidgetSettingsCard(title = "Photo source") {
-                val sourceOptions = sourceOptionsForKind(kind)
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    sourceOptions.forEach { src ->
-                        val selected = settings.source == src
-                        SourceOptionRow(
-                            title = sourceLabel(src),
-                            subtitle = sourceDescription(src, settings, albumNameById),
-                            selected = selected,
-                            onClick = {
-                                settings = settings.copy(source = src)
-                                if (src == WidgetPhotoSource.SELECTED_ALBUMS && settings.selectedAlbumIds.isEmpty()) {
-                                    activePicker = ActiveWidgetPicker.ALBUMS
-                                } else if (src == WidgetPhotoSource.SELECTED_PHOTOS && settings.selectedPhotoIds.isEmpty()) {
-                                    activePicker = ActiveWidgetPicker.PHOTOS
-                                }
-                            }
-                        )
-                    }
-                }
-
-                // Inline picker action button for Selected Photos / Selected Albums
-                if (settings.source == WidgetPhotoSource.SELECTED_PHOTOS) {
-                    Spacer(Modifier.height(10.dp))
-                    Button(
-                        onClick = { activePicker = ActiveWidgetPicker.PHOTOS },
-                        shape = RoundedCornerShape(14.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Icon(Icons.Rounded.PhotoLibrary, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            if (settings.selectedPhotoIds.isEmpty()) "Pick photos from gallery"
-                            else "Edit picked photos (${settings.selectedPhotoIds.size} selected)"
-                        )
-                    }
-                } else if (settings.source == WidgetPhotoSource.SELECTED_ALBUMS) {
-                    Spacer(Modifier.height(10.dp))
-                    Button(
-                        onClick = { activePicker = ActiveWidgetPicker.ALBUMS },
-                        shape = RoundedCornerShape(14.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Icon(Icons.Rounded.Folder, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            if (settings.selectedAlbumIds.isEmpty()) "Choose one or more albums"
-                            else "Edit albums (${settings.selectedAlbumIds.size} selected)"
-                        )
-                    }
-                } else if (settings.source == WidgetPhotoSource.MEMORIES_MIX) {
-                    Spacer(Modifier.height(10.dp))
+            // SCROLLABLE SETTINGS SHEET
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                // 1. XIAOMI HYPEROS GLASS STYLE (right below preview for instant visual tweaking!)
+                ModernSettingsCard(
+                    title = "Glass appearance",
+                    icon = Icons.Rounded.AutoAwesome
+                ) {
                     Text(
-                        text = "Include memory types",
-                        style = MaterialTheme.typography.labelMedium,
+                        text = "Border effect",
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    Spacer(Modifier.height(6.dp))
-                    ChipRow(
-                        options = WidgetMemorySource.entries,
-                        selected = settings.memorySource,
-                        labelOf = {
-                            when (it) {
-                                WidgetMemorySource.BOTH -> "Days & Trips"
-                                WidgetMemorySource.TRIPS -> "Trips & Places"
-                                WidgetMemorySource.DAYS -> "Photo Days"
-                            }
-                        },
-                        onSelect = { settings = settings.copy(memorySource = it) }
-                    )
-                }
-            }
-
-            // 3. SHUFFLE & TIMING SECTION
-            WidgetSettingsCard(title = "Shuffle & timing") {
-                Text(
-                    text = "Auto-change interval",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(Modifier.height(8.dp))
-                ChipRow(
-                    options = WidgetShuffleInterval.entries,
-                    selected = settings.shuffleInterval,
-                    labelOf = ::intervalLabel,
-                    onSelect = { settings = settings.copy(shuffleInterval = it) }
-                )
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    text = when {
-                        settings.shuffleInterval == WidgetShuffleInterval.MANUAL ->
-                            "Stays on the current photo/group until you shuffle manually."
-                        settings.shuffleInterval.isFastSlideshow ->
-                            "Smoothly cross-fades while visible on your home screen, with a fresh batch every 30 min."
-                        else ->
-                            "Automatically updates in the background every ${intervalLabel(settings.shuffleInterval).lowercase()}."
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-
-                HorizontalDivider(
-                    modifier = Modifier.padding(vertical = 12.dp),
-                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)
-                )
-
-                if (settings.source != WidgetPhotoSource.ALL_PHONE_RANDOM) {
-                    WidgetToggleRow(
-                        title = "Shuffle randomly",
-                        subtitle = "Randomize order instead of newest / picked order",
-                        checked = settings.shuffleOrder,
-                        onCheckedChange = { settings = settings.copy(shuffleOrder = it) }
-                    )
-                }
-
-                if (kind.isMultiPhoto && settings.source == WidgetPhotoSource.SELECTED_ALBUMS) {
-                    WidgetToggleRow(
-                        title = "Group collage by album",
-                        subtitle = "Show photos from one chosen album per collage instead of mixing them",
-                        checked = settings.groupByAlbum,
-                        onCheckedChange = { settings = settings.copy(groupByAlbum = it) }
-                    )
-                }
-
-                if (settings.source != WidgetPhotoSource.SELECTED_PHOTOS) {
-                    WidgetToggleRow(
-                        title = "Exclude screenshots",
-                        subtitle = "Skip the Screenshots folder when picking photos",
-                        checked = settings.excludeScreenshots,
-                        onCheckedChange = { settings = settings.copy(excludeScreenshots = it) }
-                    )
-                }
-            }
-
-            // 4. XIAOMI HYPEROS GLASS STYLE SECTION
-            WidgetSettingsCard(title = "Xiaomi HyperOS glass style") {
-                Text(
-                    text = "Glass border effect",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(Modifier.height(8.dp))
-                ChipRow(
-                    options = WidgetFrameStyle.entries,
-                    selected = settings.frameStyle,
-                    labelOf = {
-                        when (it) {
-                            WidgetFrameStyle.HYPER_GLASS -> "HyperOS Glass"
-                            WidgetFrameStyle.FROSTED_FRAME -> "Frosted Frame"
-                            WidgetFrameStyle.CRYSTAL_RIM -> "Crystal Rim"
-                            WidgetFrameStyle.BORDERLESS -> "Borderless"
+                    Spacer(Modifier.height(8.dp))
+                    FrameStyleGrid(
+                        selected = settings.frameStyle,
+                        onSelect = {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            settings = settings.copy(frameStyle = it)
                         }
-                    },
-                    onSelect = { settings = settings.copy(frameStyle = it) }
-                )
+                    )
 
-                Spacer(Modifier.height(14.dp))
-                Text(
-                    text = "Squircle corner curve",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(Modifier.height(8.dp))
-                ChipRow(
-                    options = WidgetCornerStyle.entries,
-                    selected = settings.cornerStyle,
-                    labelOf = {
-                        when (it) {
-                            WidgetCornerStyle.HYPER_OS -> "HyperOS (26dp)"
-                            WidgetCornerStyle.SOFT -> "Soft (20dp)"
-                            WidgetCornerStyle.COMPACT -> "Compact (12dp)"
-                        }
-                    },
-                    onSelect = { settings = settings.copy(cornerStyle = it) }
-                )
-
-                if (kind == PhotoWidgetKind.COLLAGE || kind == PhotoWidgetKind.MEMORIES) {
                     Spacer(Modifier.height(14.dp))
                     Text(
-                        text = "Collage layout",
-                        style = MaterialTheme.typography.labelMedium,
+                        text = "Corner curvature",
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Spacer(Modifier.height(8.dp))
-                    ChipRow(
-                        options = WidgetCollageLayout.entries,
-                        selected = settings.collageLayout,
+                    SegmentedPillRow(
+                        options = WidgetCornerStyle.entries,
+                        selected = settings.cornerStyle,
                         labelOf = {
                             when (it) {
-                                WidgetCollageLayout.AUTO -> "Auto Adaptive"
-                                WidgetCollageLayout.HERO_SIDE -> "Hero + Side"
-                                WidgetCollageLayout.GRID_2X2 -> "2×2 Grid"
-                                WidgetCollageLayout.BENTO_4 -> "4-Tile Bento"
+                                WidgetCornerStyle.HYPER_OS -> "HyperOS"
+                                WidgetCornerStyle.SOFT -> "Soft"
+                                WidgetCornerStyle.COMPACT -> "Compact"
                             }
                         },
-                        onSelect = { settings = settings.copy(collageLayout = it) }
+                        onSelect = {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            settings = settings.copy(cornerStyle = it)
+                        }
                     )
-                }
-            }
 
-            // 5. OVERLAYS & INTERACTION TOGGLES
-            WidgetSettingsCard(title = "Overlays & quick controls") {
-                WidgetToggleRow(
-                    title = "Show caption label",
-                    subtitle = "Display location, day, memory or album title on the widget",
-                    checked = settings.showCaption,
-                    onCheckedChange = { settings = settings.copy(showCaption = it) }
-                )
-
-                if (settings.showCaption) {
-                    Spacer(Modifier.height(6.dp))
-                    ChipRow(
-                        options = WidgetCaptionStyle.entries,
-                        selected = settings.captionStyle,
-                        labelOf = {
-                            when (it) {
-                                WidgetCaptionStyle.GLASS_PILL -> "Frosted Glass Pill"
-                                WidgetCaptionStyle.EDITORIAL_FADE -> "Editorial Fade"
+                    if (kind == PhotoWidgetKind.COLLAGE || kind == PhotoWidgetKind.MEMORIES) {
+                        Spacer(Modifier.height(14.dp))
+                        Text(
+                            text = "Collage layout",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        CollageLayoutGrid(
+                            selected = settings.collageLayout,
+                            onSelect = {
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                settings = settings.copy(collageLayout = it)
                             }
-                        },
-                        onSelect = { settings = settings.copy(captionStyle = it) }
+                        )
+                    }
+                }
+
+                // 2. PHOTO SOURCE SECTION
+                ModernSettingsCard(
+                    title = "Photo source",
+                    icon = Icons.Rounded.PhotoLibrary
+                ) {
+                    val sourceOptions = sourceOptionsForKind(kind)
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        sourceOptions.forEach { src ->
+                            val selected = settings.source == src
+                            SourceOptionRow(
+                                icon = sourceIcon(src),
+                                title = sourceLabel(src),
+                                subtitle = sourceDescription(src, settings, albumNameById),
+                                selected = selected,
+                                onClick = {
+                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    settings = settings.copy(source = src)
+                                    if (src == WidgetPhotoSource.SELECTED_ALBUMS && settings.selectedAlbumIds.isEmpty()) {
+                                        activePicker = ActiveWidgetPicker.ALBUMS
+                                    } else if (src == WidgetPhotoSource.SELECTED_PHOTOS && settings.selectedPhotoIds.isEmpty()) {
+                                        activePicker = ActiveWidgetPicker.PHOTOS
+                                    }
+                                }
+                            )
+                        }
+                    }
+
+                    // Inline visual strip for Selected Photos
+                    AnimatedVisibility(visible = settings.source == WidgetPhotoSource.SELECTED_PHOTOS) {
+                        Column(modifier = Modifier.padding(top = 12.dp)) {
+                            if (pickedPhotoPreviews.isNotEmpty()) {
+                                LazyRow(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier.padding(bottom = 10.dp)
+                                ) {
+                                    items(pickedPhotoPreviews, key = { it.luminaItemId }) { item ->
+                                        AsyncImage(
+                                            model = ImageRequest.Builder(context)
+                                                .data(item.uri)
+                                                .size(160)
+                                                .crossfade(true)
+                                                .build(),
+                                            contentDescription = item.albumName,
+                                            contentScale = ContentScale.Crop,
+                                            modifier = Modifier
+                                                .size(56.dp)
+                                                .clip(RoundedCornerShape(14.dp))
+                                                .border(
+                                                    1.dp,
+                                                    MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                                                    RoundedCornerShape(14.dp)
+                                                )
+                                        )
+                                    }
+                                }
+                            }
+                            TonalActionButton(
+                                icon = Icons.Rounded.Edit,
+                                label = if (settings.selectedPhotoIds.isEmpty()) "Pick photos from gallery"
+                                else "Change picked photos (${settings.selectedPhotoIds.size})",
+                                onClick = { activePicker = ActiveWidgetPicker.PHOTOS }
+                            )
+                        }
+                    }
+
+                    // Inline album strip for Selected Albums
+                    AnimatedVisibility(visible = settings.source == WidgetPhotoSource.SELECTED_ALBUMS) {
+                        Column(modifier = Modifier.padding(top = 12.dp)) {
+                            if (settings.selectedAlbumIds.isNotEmpty()) {
+                                LazyRow(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier.padding(bottom = 10.dp)
+                                ) {
+                                    items(settings.selectedAlbumIds, key = { it }) { albumId ->
+                                        val opt = albumById[albumId]
+                                        Surface(
+                                            shape = RoundedCornerShape(14.dp),
+                                            color = MaterialTheme.colorScheme.surfaceContainerHigh
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.padding(start = 6.dp, end = 10.dp, top = 6.dp, bottom = 6.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                            ) {
+                                                if (opt?.coverUri != null) {
+                                                    AsyncImage(
+                                                        model = ImageRequest.Builder(context)
+                                                            .data(opt.coverUri)
+                                                            .size(100)
+                                                            .build(),
+                                                        contentDescription = opt.name,
+                                                        contentScale = ContentScale.Crop,
+                                                        modifier = Modifier.size(28.dp).clip(RoundedCornerShape(8.dp))
+                                                    )
+                                                }
+                                                Text(
+                                                    text = opt?.name ?: "Album",
+                                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                                    maxLines = 1
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            TonalActionButton(
+                                icon = Icons.Rounded.Folder,
+                                label = if (settings.selectedAlbumIds.isEmpty()) "Choose one or more albums"
+                                else "Edit albums (${settings.selectedAlbumIds.size} selected)",
+                                onClick = { activePicker = ActiveWidgetPicker.ALBUMS }
+                            )
+                        }
+                    }
+
+                    AnimatedVisibility(visible = settings.source == WidgetPhotoSource.MEMORIES_MIX) {
+                        Column(modifier = Modifier.padding(top = 12.dp)) {
+                            Text(
+                                text = "Include memory types",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            SegmentedPillRow(
+                                options = WidgetMemorySource.entries,
+                                selected = settings.memorySource,
+                                labelOf = {
+                                    when (it) {
+                                        WidgetMemorySource.BOTH -> "Both"
+                                        WidgetMemorySource.TRIPS -> "Trips"
+                                        WidgetMemorySource.DAYS -> "Days"
+                                    }
+                                },
+                                onSelect = {
+                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    settings = settings.copy(memorySource = it)
+                                }
+                            )
+                        }
+                    }
+                }
+
+                // 3. SHUFFLE & TIMING SECTION
+                ModernSettingsCard(
+                    title = "Shuffle & timing",
+                    icon = Icons.Rounded.Schedule
+                ) {
+                    Text(
+                        text = "Auto-change interval",
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Spacer(Modifier.height(8.dp))
+                    IntervalGridSelector(
+                        selected = settings.shuffleInterval,
+                        onSelect = {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            settings = settings.copy(shuffleInterval = it)
+                        }
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = when {
+                            settings.shuffleInterval == WidgetShuffleInterval.MANUAL ->
+                                "Manual only — stays on the current photo until you shuffle it."
+                            settings.shuffleInterval.isFastSlideshow ->
+                                "Live slideshow cross-fades while visible, refreshing with a new batch every 30 min."
+                            else ->
+                                "Automatically updates in the background every ${intervalLabel(settings.shuffleInterval).lowercase()}."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    val showShuffleToggle = settings.source != WidgetPhotoSource.ALL_PHONE_RANDOM
+                    val showGroupToggle = kind.isMultiPhoto && settings.source == WidgetPhotoSource.SELECTED_ALBUMS
+                    val showScreenshotToggle = settings.source != WidgetPhotoSource.SELECTED_PHOTOS
+
+                    if (showShuffleToggle || showGroupToggle || showScreenshotToggle) {
+                        HorizontalDivider(
+                            modifier = Modifier.padding(vertical = 10.dp),
+                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)
+                        )
+                    }
+
+                    if (showShuffleToggle) {
+                        WidgetToggleRow(
+                            title = "Shuffle randomly",
+                            subtitle = "Randomize order instead of newest / picked order",
+                            checked = settings.shuffleOrder,
+                            onCheckedChange = { settings = settings.copy(shuffleOrder = it) }
+                        )
+                    }
+                    if (showGroupToggle) {
+                        if (showShuffleToggle) SubtleRowDivider()
+                        WidgetToggleRow(
+                            title = "Group collage by album",
+                            subtitle = "Keep each collage focused on one chosen album",
+                            checked = settings.groupByAlbum,
+                            onCheckedChange = { settings = settings.copy(groupByAlbum = it) }
+                        )
+                    }
+                    if (showScreenshotToggle) {
+                        if (showShuffleToggle || showGroupToggle) SubtleRowDivider()
+                        WidgetToggleRow(
+                            title = "Exclude screenshots",
+                            subtitle = "Skip the Screenshots folder when picking photos",
+                            checked = settings.excludeScreenshots,
+                            onCheckedChange = { settings = settings.copy(excludeScreenshots = it) }
+                        )
+                    }
                 }
 
-                WidgetToggleRow(
-                    title = "Show live date badge",
-                    subtitle = "Floating HyperOS frosted glass weekday & day card",
-                    checked = settings.showDateBadge,
-                    onCheckedChange = { settings = settings.copy(showDateBadge = it) }
-                )
+                // 4. OVERLAYS & INTERACTION TOGGLES
+                ModernSettingsCard(
+                    title = "Overlays & controls",
+                    icon = Icons.Rounded.Tune
+                ) {
+                    WidgetToggleRow(
+                        title = "Show caption label",
+                        subtitle = "Display location, day, memory or album title",
+                        checked = settings.showCaption,
+                        onCheckedChange = { settings = settings.copy(showCaption = it) }
+                    )
 
-                WidgetToggleRow(
-                    title = "Show quick shuffle button",
-                    subtitle = "Subtle translucent shuffle button in the bottom-right corner",
-                    checked = settings.showShuffleButton,
-                    onCheckedChange = { settings = settings.copy(showShuffleButton = it) }
-                )
-
-                WidgetToggleRow(
-                    title = "Show quick settings button",
-                    subtitle = "Translucent gear button in the top-left corner (you can also edit via long-press or Settings)",
-                    checked = settings.showSettingsButton,
-                    onCheckedChange = { settings = settings.copy(showSettingsButton = it) }
-                )
-
-                HorizontalDivider(
-                    modifier = Modifier.padding(vertical = 10.dp),
-                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)
-                )
-
-                Text(
-                    text = "When tapping a photo",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(Modifier.height(8.dp))
-                ChipRow(
-                    options = WidgetTapAction.entries,
-                    selected = settings.tapAction,
-                    labelOf = {
-                        when (it) {
-                            WidgetTapAction.OPEN_PHOTO -> "Open in Lumina"
-                            WidgetTapAction.SHUFFLE_NEXT -> "Shuffle next"
-                            WidgetTapAction.OPEN_SETTINGS -> "Open settings"
+                    AnimatedVisibility(visible = settings.showCaption) {
+                        Column(modifier = Modifier.padding(top = 6.dp, bottom = 6.dp)) {
+                            SegmentedPillRow(
+                                options = WidgetCaptionStyle.entries,
+                                selected = settings.captionStyle,
+                                labelOf = {
+                                    when (it) {
+                                        WidgetCaptionStyle.GLASS_PILL -> "Frosted Pill"
+                                        WidgetCaptionStyle.EDITORIAL_FADE -> "Editorial Fade"
+                                    }
+                                },
+                                onSelect = {
+                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    settings = settings.copy(captionStyle = it)
+                                }
+                            )
                         }
-                    },
-                    onSelect = { settings = settings.copy(tapAction = it) }
-                )
-            }
+                    }
 
-            Spacer(Modifier.height(12.dp))
+                    SubtleRowDivider()
+                    WidgetToggleRow(
+                        title = "Show live date badge",
+                        subtitle = "Floating frosted glass weekday & day card",
+                        checked = settings.showDateBadge,
+                        onCheckedChange = { settings = settings.copy(showDateBadge = it) }
+                    )
+
+                    SubtleRowDivider()
+                    WidgetToggleRow(
+                        title = "Quick shuffle button",
+                        subtitle = "Subtle translucent shuffle icon in the bottom-right",
+                        checked = settings.showShuffleButton,
+                        onCheckedChange = { settings = settings.copy(showShuffleButton = it) }
+                    )
+
+                    SubtleRowDivider()
+                    WidgetToggleRow(
+                        title = "Quick settings button",
+                        subtitle = "Subtle gear icon in the top-left corner",
+                        checked = settings.showSettingsButton,
+                        onCheckedChange = { settings = settings.copy(showSettingsButton = it) }
+                    )
+
+                    HorizontalDivider(
+                        modifier = Modifier.padding(vertical = 10.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)
+                    )
+
+                    Text(
+                        text = "When tapping a photo",
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    SegmentedPillRow(
+                        options = WidgetTapAction.entries,
+                        selected = settings.tapAction,
+                        labelOf = {
+                            when (it) {
+                                WidgetTapAction.OPEN_PHOTO -> "Open photo"
+                                WidgetTapAction.SHUFFLE_NEXT -> "Shuffle"
+                                WidgetTapAction.OPEN_SETTINGS -> "Settings"
+                            }
+                        },
+                        onSelect = {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            settings = settings.copy(tapAction = it)
+                        }
+                    )
+                }
+
+                Spacer(Modifier.height(10.dp))
+            }
         }
     }
 }
 
+// =====================================================================
+// PINNED EXACT-SIZE & EXACT-PHOTO HYPEROS LIVE PREVIEW HEADER
+// =====================================================================
+
 private data class PreviewSourceKey(
+    val widgetId: Int,
     val kind: PhotoWidgetKind,
     val source: WidgetPhotoSource,
     val selectedAlbumIds: List<String>,
     val selectedPhotoIds: List<String>,
     val excludeScreenshots: Boolean,
     val memorySource: WidgetMemorySource,
-    val groupByAlbum: Boolean
+    val groupByAlbum: Boolean,
+    val usePlacedWidgetPhotos: Boolean,
+    val shuffleTick: Int
 )
 
 private data class PreviewPhotoSample(
@@ -643,42 +807,45 @@ private data class PreviewPhotoSample(
 )
 
 @Composable
-private fun LiveWidgetPreviewStage(
+private fun PinnedWidgetPreviewHeader(
+    widgetId: Int,
     kind: PhotoWidgetKind,
-    settings: PhotoWidgetSettings
+    actualWidgetSizeDp: SizeF,
+    settings: PhotoWidgetSettings,
+    usePlacedWidgetPhotos: Boolean,
+    previewShuffleTick: Int,
+    onClose: () -> Unit,
+    onPreviewShuffle: () -> Unit
 ) {
     val context = LocalContext.current
     val density = LocalDensity.current.density
 
-    val previewWidthDp = when (kind) {
-        PhotoWidgetKind.COLLAGE, PhotoWidgetKind.MEMORIES -> 296f
-        PhotoWidgetKind.STRIP -> 296f
-        else -> 178f
-    }
-    val previewHeightDp = when (kind) {
-        PhotoWidgetKind.COLLAGE, PhotoWidgetKind.MEMORIES -> 158f
-        PhotoWidgetKind.STRIP -> 84f
-        else -> 178f
-    }
+    val realW = actualWidgetSizeDp.width.coerceAtLeast(64f)
+    val realH = actualWidgetSizeDp.height.coerceAtLeast(64f)
 
-    // Load sample photos ONLY when the content source / selection changes (never jumps photos on visual toggles!)
     val sourceKey = remember(
+        widgetId,
         kind,
         settings.source,
         settings.selectedAlbumIds,
         settings.selectedPhotoIds,
         settings.excludeScreenshots,
         settings.memorySource,
-        settings.groupByAlbum
+        settings.groupByAlbum,
+        usePlacedWidgetPhotos,
+        previewShuffleTick
     ) {
         PreviewSourceKey(
+            widgetId = widgetId,
             kind = kind,
             source = settings.source,
             selectedAlbumIds = settings.selectedAlbumIds,
             selectedPhotoIds = settings.selectedPhotoIds,
             excludeScreenshots = settings.excludeScreenshots,
             memorySource = settings.memorySource,
-            groupByAlbum = settings.groupByAlbum
+            groupByAlbum = settings.groupByAlbum,
+            usePlacedWidgetPhotos = usePlacedWidgetPhotos,
+            shuffleTick = previewShuffleTick
         )
     }
 
@@ -687,11 +854,18 @@ private fun LiveWidgetPreviewStage(
         key1 = sourceKey
     ) {
         value = withContext(Dispatchers.IO) {
-            loadPreviewSample(context, kind, settings)
+            loadPreviewSample(
+                context = context,
+                widgetId = widgetId,
+                kind = kind,
+                settings = settings,
+                usePlacedWidgetPhotos = usePlacedWidgetPhotos,
+                advanceRandom = previewShuffleTick > 0
+            )
         }
     }
 
-    // Instant live glass re-render on the cached sample bitmaps when any visual toggle changes
+    // Render using the EXACT placed widget dimensions & aspect ratio so tile geometry + corner proportions match 1:1
     val previewBitmap by produceState<Bitmap?>(
         initialValue = null,
         key1 = sample,
@@ -699,24 +873,36 @@ private fun LiveWidgetPreviewStage(
         key3 = Triple(
             settings.cornerStyle,
             settings.collageLayout,
-            Triple(settings.showCaption, settings.captionStyle, Triple(settings.showDateBadge, settings.showShuffleButton, settings.showSettingsButton))
+            Triple(
+                settings.showCaption,
+                settings.captionStyle,
+                Triple(settings.showDateBadge, settings.showShuffleButton, settings.showSettingsButton)
+            )
         )
     ) {
         val loaded = sample ?: return@produceState
         value = withContext(Dispatchers.Default) {
-            val effDensity = density.coerceIn(1.5f, 3f)
+            val maxRenderEdge = 720f
+            val baseScale = density.coerceIn(1.5f, 3f)
+            val rawW = realW * baseScale
+            val rawH = realH * baseScale
+            val clampFactor = min(1f, maxRenderEdge / maxOf(rawW, rawH))
+            val renderW = (rawW * clampFactor).roundToInt().coerceAtLeast(96)
+            val renderH = (rawH * clampFactor).roundToInt().coerceAtLeast(96)
+            val effDensity = (baseScale * clampFactor).coerceAtLeast(0.85f)
+
             val pattern = HyperOsGlassRenderer.resolveTilePattern(
                 kind = kind,
                 collageLayout = settings.collageLayout,
-                widthDp = previewWidthDp,
-                heightDp = previewHeightDp,
+                widthDp = realW,
+                heightDp = realH,
                 photoCount = loaded.bitmaps.size
             )
             HyperOsGlassRenderer.renderWidgetBitmap(
                 photos = loaded.bitmaps,
                 pattern = pattern,
-                widthPx = (previewWidthDp * effDensity).toInt(),
-                heightPx = (previewHeightDp * effDensity).toInt(),
+                widthPx = renderW,
+                heightPx = renderH,
                 density = effDensity,
                 settings = settings,
                 caption = loaded.caption,
@@ -730,78 +916,195 @@ private fun LiveWidgetPreviewStage(
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(26.dp))
+            .clip(RoundedCornerShape(bottomStart = 30.dp, bottomEnd = 30.dp))
             .background(
                 Brush.linearGradient(
                     listOf(
-                        Color(0xFF141D2F),
-                        Color(0xFF1E2D45),
-                        Color(0xFF101726)
+                        Color(0xFF19272C),
+                        Color(0xFF1F2F2E),
+                        Color(0xFF12181E)
                     )
                 )
             )
-            .padding(vertical = 22.dp, horizontal = 16.dp),
-        contentAlignment = Alignment.Center
     ) {
-        Box(
-            modifier = Modifier
-                .width(previewWidthDp.dp)
-                .height(previewHeightDp.dp)
-        ) {
-            val bmp = previewBitmap
-            if (bmp != null) {
-                Image(
-                    bitmap = bmp.asImageBitmap(),
-                    contentDescription = "Live widget preview",
-                    contentScale = ContentScale.FillBounds,
-                    modifier = Modifier.fillMaxSize()
-                )
-            } else {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(24.dp))
-                }
-            }
+        // Soft HyperOS ambient blurred wallpaper bokeh behind the live preview
+        Canvas(modifier = Modifier.matchParentSize()) {
+            drawCircle(
+                brush = Brush.radialGradient(
+                    colors = listOf(Color(0x38589E9A), Color.Transparent),
+                    center = Offset(size.width * 0.18f, size.height * 0.25f),
+                    radius = size.width * 0.52f
+                ),
+                center = Offset(size.width * 0.18f, size.height * 0.25f),
+                radius = size.width * 0.52f
+            )
+            drawCircle(
+                brush = Brush.radialGradient(
+                    colors = listOf(Color(0x3347709C), Color.Transparent),
+                    center = Offset(size.width * 0.85f, size.height * 0.72f),
+                    radius = size.width * 0.48f
+                ),
+                center = Offset(size.width * 0.85f, size.height * 0.72f),
+                radius = size.width * 0.48f
+            )
+        }
 
-            // Mirror optional quick buttons cleanly in live preview
-            if (settings.showSettingsButton) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .statusBarsPadding()
+                .padding(bottom = 18.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // Compact frosted top bar
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Box(
                     modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .padding(10.dp)
-                        .size(28.dp)
+                        .size(36.dp)
                         .clip(CircleShape)
-                        .background(Color(0x66121A26))
-                        .border(0.8.dp, Color(0x4AFFFFFF), CircleShape),
+                        .background(Color(0x36FFFFFF))
+                        .border(0.75.dp, Color(0x40FFFFFF), CircleShape)
+                        .clickable(onClick = onClose),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        Icons.Rounded.Settings,
-                        contentDescription = null,
+                        Icons.Rounded.Close,
+                        contentDescription = stringResource(android.R.string.cancel),
                         tint = Color.White,
-                        modifier = Modifier.size(15.dp)
+                        modifier = Modifier.size(18.dp)
                     )
                 }
-            }
-            if (settings.showShuffleButton) {
+
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(horizontal = 12.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = widgetKindTitle(kind),
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                        color = Color.White,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "${realW.roundToInt()} × ${realH.roundToInt()} dp · Live preview",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xBFD8E6F2),
+                        maxLines = 1
+                    )
+                }
+
                 Box(
                     modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(10.dp)
-                        .size(28.dp)
+                        .size(36.dp)
                         .clip(CircleShape)
-                        .background(Color(0x66121A26))
-                        .border(0.8.dp, Color(0x4AFFFFFF), CircleShape),
+                        .background(Color(0x36FFFFFF))
+                        .border(0.75.dp, Color(0x40FFFFFF), CircleShape)
+                        .clickable(onClick = onPreviewShuffle),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         Icons.Rounded.Shuffle,
-                        contentDescription = null,
+                        contentDescription = "Preview another photo",
                         tint = Color.White,
-                        modifier = Modifier.size(15.dp)
+                        modifier = Modifier.size(17.dp)
                     )
+                }
+            }
+
+            // Exact-proportion preview widget box
+            BoxWithConstraints(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 6.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                val maxBoxW = (maxWidth.value).coerceAtMost(332f)
+                val maxBoxH = 206f
+                // Fit real widget dimensions inside the preview stage without distorting aspect ratio
+                val displayScale = min(1f, min(maxBoxW / realW, maxBoxH / realH))
+                val displayW = (realW * displayScale).coerceAtLeast(72f)
+                val displayH = (realH * displayScale).coerceAtLeast(72f)
+                val buttonSize = (28f * displayScale).coerceIn(20f, 28f)
+                val buttonMargin = (10f * displayScale).coerceIn(6f, 10f)
+
+                Box(
+                    modifier = Modifier
+                        .width(displayW.dp)
+                        .height(displayH.dp)
+                        .shadow(
+                            elevation = 16.dp,
+                            shape = RoundedCornerShape((settings.cornerStyle.radiusDp * displayScale).dp),
+                            ambientColor = Color(0x66000000),
+                            spotColor = Color(0x88000000)
+                        )
+                ) {
+                    val bmp = previewBitmap
+                    if (bmp != null) {
+                        Image(
+                            bitmap = bmp.asImageBitmap(),
+                            contentDescription = "Live widget preview",
+                            contentScale = ContentScale.FillBounds,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator(
+                                strokeWidth = 2.dp,
+                                color = Color.White,
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+                    }
+
+                    if (settings.showSettingsButton) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopStart)
+                                .padding(buttonMargin.dp)
+                                .size(buttonSize.dp)
+                                .clip(CircleShape)
+                                .background(Color(0x66121A26))
+                                .border(0.8.dp, Color(0x4AFFFFFF), CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                Icons.Rounded.Settings,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size((buttonSize * 0.54f).dp)
+                            )
+                        }
+                    }
+                    if (settings.showShuffleButton) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .padding(buttonMargin.dp)
+                                .size(buttonSize.dp)
+                                .clip(CircleShape)
+                                .background(Color(0x66121A26))
+                                .border(0.8.dp, Color(0x4AFFFFFF), CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                Icons.Rounded.Shuffle,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size((buttonSize * 0.54f).dp)
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -810,10 +1113,40 @@ private fun LiveWidgetPreviewStage(
 
 private suspend fun loadPreviewSample(
     context: Context,
+    widgetId: Int,
     kind: PhotoWidgetKind,
-    settings: PhotoWidgetSettings
+    settings: PhotoWidgetSettings,
+    usePlacedWidgetPhotos: Boolean,
+    advanceRandom: Boolean
 ): PreviewPhotoSample {
     val maxSlots = if (kind.isMultiPhoto) 4 else 1
+
+    // 1. If editing an already-placed widget with its unchanged source, load the EXACT photos currently shown on it!
+    if (usePlacedWidgetPhotos && widgetId >= 0) {
+        val prefs = context.getSharedPreferences(PHOTO_WIDGET_PREFS, Context.MODE_PRIVATE)
+        val savedIdsRaw = prefs.getString("shown_ids_$widgetId", null)
+        val savedIds = savedIdsRaw?.split(",")?.filter { it.isNotBlank() }.orEmpty()
+        if (savedIds.isNotEmpty()) {
+            val exactPhotos = WidgetMediaRepository.loadPhotosByIds(context, savedIds.take(maxSlots))
+            val exactBitmaps = exactPhotos.mapNotNull { decodePreviewUri(context, Uri.parse(it.uri), 480) }
+            if (exactBitmaps.isNotEmpty()) {
+                val savedTitle = prefs.getString("shown_title_$widgetId", null)
+                val savedSub = prefs.getString("shown_sub_$widgetId", null)
+                val caption = if (!savedTitle.isNullOrBlank()) {
+                    WidgetCaptionData(savedTitle, savedSub)
+                } else {
+                    val first = exactPhotos.first()
+                    WidgetCaptionData(
+                        title = first.albumName.ifBlank { "Photos" },
+                        subtitle = widgetDateLabel(first.takenAtMs).takeIf { it.isNotBlank() }
+                    )
+                }
+                return PreviewPhotoSample(exactBitmaps, caption)
+            }
+        }
+    }
+
+    // 2. Otherwise resolve live sample photos matching the newly selected source / shuffle preview
     val resolved = runCatching {
         WidgetMediaRepository.resolveWidgetFrames(
             context = context,
@@ -822,12 +1155,12 @@ private suspend fun loadPreviewSample(
             settings = settings,
             slotsPerFrame = maxSlots,
             frameCount = 1,
-            advance = false
+            advance = advanceRandom
         ).firstOrNull()
     }.getOrNull()
 
     val decoded = resolved?.photos.orEmpty().mapNotNull { photo ->
-        decodePreviewUri(context, Uri.parse(photo.uri), 420)
+        decodePreviewUri(context, Uri.parse(photo.uri), 480)
     }.ifEmpty {
         val artIds = listOf(
             R.drawable.widget_art_sunset_peaks,
@@ -874,6 +1207,511 @@ private fun renderDrawableToBitmap(context: Context, drawableRes: Int, width: In
     drawable.setBounds(0, 0, width, height)
     drawable.draw(canvas)
     return bmp
+}
+
+// =====================================================================
+// VISUAL SETTINGS CONTROLS (STYLE CARDS, LAYOUT DIAGRAMS, SEGMENTED PILLS)
+// =====================================================================
+
+@Composable
+private fun ModernSettingsCard(
+    title: String,
+    icon: ImageVector,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(26.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        border = BorderStroke(0.75.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.padding(bottom = 14.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(30.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+            content()
+        }
+    }
+}
+
+@Composable
+private fun FrameStyleGrid(
+    selected: WidgetFrameStyle,
+    onSelect: (WidgetFrameStyle) -> Unit
+) {
+    val rows = WidgetFrameStyle.entries.chunked(2)
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        rows.forEach { row ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                row.forEach { style ->
+                    val isSelected = style == selected
+                    val bg by animateColorAsState(
+                        if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
+                        else MaterialTheme.colorScheme.surfaceContainer,
+                        label = "frame_style_bg"
+                    )
+                    Surface(
+                        shape = RoundedCornerShape(18.dp),
+                        color = bg,
+                        border = BorderStroke(
+                            width = if (isSelected) 1.5.dp else 0.75.dp,
+                            color = if (isSelected) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)
+                        ),
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(18.dp))
+                            .clickable { onSelect(style) }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 11.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            FrameStyleMiniIcon(style = style)
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = when (style) {
+                                        WidgetFrameStyle.HYPER_GLASS -> "HyperOS"
+                                        WidgetFrameStyle.FROSTED_FRAME -> "Frosted"
+                                        WidgetFrameStyle.CRYSTAL_RIM -> "Minimal"
+                                        WidgetFrameStyle.BORDERLESS -> "Clean"
+                                    },
+                                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                                    maxLines = 1
+                                )
+                                Text(
+                                    text = when (style) {
+                                        WidgetFrameStyle.HYPER_GLASS -> "Glass rim"
+                                        WidgetFrameStyle.FROSTED_FRAME -> "Soft frame"
+                                        WidgetFrameStyle.CRYSTAL_RIM -> "Thin edge"
+                                        WidgetFrameStyle.BORDERLESS -> "No border"
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FrameStyleMiniIcon(style: WidgetFrameStyle) {
+    Canvas(modifier = Modifier.size(32.dp)) {
+        val cr = CornerRadius(9.dp.toPx())
+        // Mini sky-sunset fill
+        drawRoundRect(
+            brush = Brush.linearGradient(
+                listOf(Color(0xFF4BA3E3), Color(0xFF28588A))
+            ),
+            cornerRadius = cr
+        )
+        when (style) {
+            WidgetFrameStyle.HYPER_GLASS -> {
+                drawRoundRect(
+                    brush = Brush.linearGradient(
+                        listOf(Color(0xCCFFFFFF), Color(0x33FFFFFF), Color(0x99FFFFFF))
+                    ),
+                    cornerRadius = cr,
+                    style = Stroke(width = 1.8.dp.toPx())
+                )
+            }
+            WidgetFrameStyle.FROSTED_FRAME -> {
+                drawRoundRect(
+                    color = Color(0x55FFFFFF),
+                    cornerRadius = cr,
+                    style = Stroke(width = 4.5.dp.toPx())
+                )
+                drawRoundRect(
+                    color = Color(0x99FFFFFF),
+                    cornerRadius = cr,
+                    style = Stroke(width = 1.dp.toPx())
+                )
+            }
+            WidgetFrameStyle.CRYSTAL_RIM -> {
+                drawRoundRect(
+                    color = Color(0x66FFFFFF),
+                    cornerRadius = cr,
+                    style = Stroke(width = 1.dp.toPx())
+                )
+            }
+            WidgetFrameStyle.BORDERLESS -> Unit
+        }
+    }
+}
+
+@Composable
+private fun CollageLayoutGrid(
+    selected: WidgetCollageLayout,
+    onSelect: (WidgetCollageLayout) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        WidgetCollageLayout.entries.forEach { layout ->
+            val isSelected = layout == selected
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
+                else MaterialTheme.colorScheme.surfaceContainer,
+                border = BorderStroke(
+                    width = if (isSelected) 1.5.dp else 0.75.dp,
+                    color = if (isSelected) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)
+                ),
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(16.dp))
+                    .clickable { onSelect(layout) }
+            ) {
+                Column(
+                    modifier = Modifier.padding(vertical = 10.dp, horizontal = 4.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    CollageMiniDiagram(
+                        layout = layout,
+                        tint = if (isSelected) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = when (layout) {
+                            WidgetCollageLayout.AUTO -> "Auto"
+                            WidgetCollageLayout.HERO_SIDE -> "Hero"
+                            WidgetCollageLayout.GRID_2X2 -> "2×2"
+                            WidgetCollageLayout.BENTO_4 -> "Bento"
+                        },
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                        ),
+                        maxLines = 1
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CollageMiniDiagram(layout: WidgetCollageLayout, tint: Color) {
+    Canvas(modifier = Modifier.size(width = 34.dp, height = 24.dp)) {
+        val cr = CornerRadius(5.dp.toPx())
+        val fill = tint.copy(alpha = 0.16f)
+        val stroke = Stroke(width = 1.2.dp.toPx())
+        drawRoundRect(color = fill, cornerRadius = cr)
+        drawRoundRect(color = tint.copy(alpha = 0.75f), cornerRadius = cr, style = stroke)
+        when (layout) {
+            WidgetCollageLayout.AUTO, WidgetCollageLayout.BENTO_4 -> {
+                val x = size.width * 0.52f
+                val y = size.height * 0.52f
+                val x2 = x + (size.width - x) * 0.5f
+                drawLine(tint, Offset(x, 0f), Offset(x, size.height), strokeWidth = 1.dp.toPx())
+                drawLine(tint, Offset(x, y), Offset(size.width, y), strokeWidth = 1.dp.toPx())
+                drawLine(tint, Offset(x2, y), Offset(x2, size.height), strokeWidth = 1.dp.toPx())
+            }
+            WidgetCollageLayout.HERO_SIDE -> {
+                val x = size.width * 0.58f
+                val y = size.height * 0.5f
+                drawLine(tint, Offset(x, 0f), Offset(x, size.height), strokeWidth = 1.dp.toPx())
+                drawLine(tint, Offset(x, y), Offset(size.width, y), strokeWidth = 1.dp.toPx())
+            }
+            WidgetCollageLayout.GRID_2X2 -> {
+                val x = size.width * 0.5f
+                val y = size.height * 0.5f
+                drawLine(tint, Offset(x, 0f), Offset(x, size.height), strokeWidth = 1.dp.toPx())
+                drawLine(tint, Offset(0f, y), Offset(size.width, y), strokeWidth = 1.dp.toPx())
+            }
+        }
+    }
+}
+
+@Composable
+private fun <T> SegmentedPillRow(
+    options: List<T>,
+    selected: T,
+    labelOf: (T) -> String,
+    onSelect: (T) -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(4.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            options.forEach { option ->
+                val isSelected = option == selected
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = if (isSelected) MaterialTheme.colorScheme.primary
+                    else Color.Transparent,
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable { onSelect(option) }
+                ) {
+                    Text(
+                        text = labelOf(option),
+                        style = MaterialTheme.typography.labelMedium.copy(
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                        ),
+                        color = if (isSelected) MaterialTheme.colorScheme.onPrimary
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(vertical = 9.dp, horizontal = 4.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun IntervalGridSelector(
+    selected: WidgetShuffleInterval,
+    onSelect: (WidgetShuffleInterval) -> Unit
+) {
+    val rows = WidgetShuffleInterval.entries.chunked(5)
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        rows.forEach { row ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                row.forEach { interval ->
+                    val isSelected = interval == selected
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (isSelected) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.surfaceContainer,
+                        border = if (isSelected) null
+                        else BorderStroke(0.75.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)),
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable { onSelect(interval) }
+                    ) {
+                        Text(
+                            text = if (interval == WidgetShuffleInterval.MANUAL) "Off" else intervalLabel(interval),
+                            style = MaterialTheme.typography.labelMedium.copy(
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                            ),
+                            color = if (isSelected) MaterialTheme.colorScheme.onPrimary
+                            else MaterialTheme.colorScheme.onSurface,
+                            textAlign = TextAlign.Center,
+                            maxLines = 1,
+                            modifier = Modifier.padding(vertical = 9.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TonalActionButton(
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.68f),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .clickable(onClick = onClick)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            Icon(
+                icon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                color = MaterialTheme.colorScheme.onPrimaryContainer
+            )
+        }
+    }
+}
+
+@Composable
+private fun SourceOptionRow(
+    icon: ImageVector,
+    title: String,
+    subtitle: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(18.dp),
+        color = if (selected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+        else MaterialTheme.colorScheme.surfaceContainer,
+        border = BorderStroke(
+            width = if (selected) 1.4.dp else 0.75.dp,
+            color = if (selected) MaterialTheme.colorScheme.primary
+            else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.28f)
+        ),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .clickable(onClick = onClick)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 11.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .clip(RoundedCornerShape(11.dp))
+                    .background(
+                        if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                        else MaterialTheme.colorScheme.surfaceContainerHigh
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = if (selected) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold)
+                )
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Box(
+                modifier = Modifier
+                    .size(22.dp)
+                    .clip(CircleShape)
+                    .background(if (selected) MaterialTheme.colorScheme.primary else Color.Transparent)
+                    .border(
+                        width = 1.6.dp,
+                        color = if (selected) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.outline.copy(alpha = 0.65f),
+                        shape = CircleShape
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                if (selected) {
+                    Icon(
+                        Icons.Rounded.Check,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onPrimary,
+                        modifier = Modifier.size(14.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun WidgetToggleRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    val haptic = LocalHapticFeedback.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .clickable {
+                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                onCheckedChange(!checked)
+            }
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium)
+            )
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = {
+                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                onCheckedChange(it)
+            }
+        )
+    }
+}
+
+@Composable
+private fun SubtleRowDivider() {
+    HorizontalDivider(
+        modifier = Modifier.padding(vertical = 2.dp),
+        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.25f)
+    )
 }
 
 // =====================================================================
@@ -1105,7 +1943,6 @@ private fun PhotoMultiPickerScreen(
                     }
                 }
 
-                // Quick album filter bar
                 LazyRow(
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -1197,150 +2034,8 @@ private fun PhotoMultiPickerScreen(
 }
 
 // =====================================================================
-// REUSABLE SETTINGS UI HELPERS
+// LABELS & METADATA
 // =====================================================================
-
-@Composable
-private fun WidgetSettingsCard(
-    title: String,
-    content: @Composable ColumnScope.() -> Unit
-) {
-    Surface(
-        shape = RoundedCornerShape(24.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.padding(bottom = 12.dp)
-            )
-            content()
-        }
-    }
-}
-
-@Composable
-private fun SourceOptionRow(
-    title: String,
-    subtitle: String,
-    selected: Boolean,
-    onClick: () -> Unit
-) {
-    Surface(
-        shape = RoundedCornerShape(16.dp),
-        color = if (selected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.42f)
-        else MaterialTheme.colorScheme.surfaceContainer,
-        border = if (selected) BorderStroke(1.4.dp, MaterialTheme.colorScheme.primary) else null,
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
-            .clickable(onClick = onClick)
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold)
-                )
-                Text(
-                    text = subtitle,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-            Box(
-                modifier = Modifier
-                    .size(22.dp)
-                    .clip(CircleShape)
-                    .background(if (selected) MaterialTheme.colorScheme.primary else Color.Transparent)
-                    .border(
-                        width = 1.6.dp,
-                        color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
-                        shape = CircleShape
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                if (selected) {
-                    Icon(
-                        Icons.Rounded.Check,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onPrimary,
-                        modifier = Modifier.size(14.dp)
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun WidgetToggleRow(
-    title: String,
-    subtitle: String,
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .clickable { onCheckedChange(!checked) }
-            .padding(vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium)
-            )
-            Text(
-                text = subtitle,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
-    }
-}
-
-@Composable
-private fun <T> ChipRow(
-    options: List<T>,
-    selected: T,
-    labelOf: (T) -> String,
-    onSelect: (T) -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        options.forEach { option ->
-            val isSelected = option == selected
-            FilterChip(
-                selected = isSelected,
-                onClick = { onSelect(option) },
-                label = { Text(labelOf(option)) },
-                shape = RoundedCornerShape(14.dp),
-                colors = FilterChipDefaults.filterChipColors(
-                    selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
-                    selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer
-                )
-            )
-        }
-    }
-}
 
 internal fun widgetKindTitle(kind: PhotoWidgetKind): String = when (kind) {
     PhotoWidgetKind.FRAME -> "Photo Frame"
@@ -1350,6 +2045,18 @@ internal fun widgetKindTitle(kind: PhotoWidgetKind): String = when (kind) {
     PhotoWidgetKind.STRIP -> "Photo Strip"
     PhotoWidgetKind.FAVORITES -> "Favorites Frame"
     PhotoWidgetKind.PHOTO_DATE -> "Photo & Date"
+}
+
+private fun sourceIcon(source: WidgetPhotoSource): ImageVector = when (source) {
+    WidgetPhotoSource.SELECTED_PHOTOS -> Icons.Rounded.PhotoLibrary
+    WidgetPhotoSource.SELECTED_ALBUMS -> Icons.Rounded.Folder
+    WidgetPhotoSource.ALL_PHONE_RANDOM -> Icons.Rounded.Shuffle
+    WidgetPhotoSource.SMART_GROUPS -> Icons.Rounded.AutoAwesome
+    WidgetPhotoSource.LOCATION_GROUPS -> Icons.Rounded.LocationOn
+    WidgetPhotoSource.DAY_GROUPS -> Icons.Rounded.Today
+    WidgetPhotoSource.MEMORIES_MIX -> Icons.Rounded.AutoAwesome
+    WidgetPhotoSource.FAVORITES_ONLY -> Icons.Rounded.Favorite
+    WidgetPhotoSource.FAVORITES_AND_RECENT -> Icons.Rounded.Favorite
 }
 
 private fun sourceOptionsForKind(kind: PhotoWidgetKind): List<WidgetPhotoSource> = when (kind) {
