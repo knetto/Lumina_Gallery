@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="320dp"
+    android:height="320dp"
+    android:viewportWidth="320"
+    android:viewportHeight="320">
+    <!-- Warm alpine sunset sky -->
+    <path android:pathData="M0,0h320v320h-320z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="160"
+                android:endY="320"
+                android:startX="160"
+                android:startY="0"
+                android:type="linear">
+                <item android:color="#2E3668" android:offset="0" />
+                <item android:color="#8F4C7A" android:offset="0.34" />
+                <item android:color="#E87D6A" android:offset="0.62" />
+                <item android:color="#FBB87C" android:offset="0.82" />
+                <item android:color="#1B223C" android:offset="1" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <!-- Soft sun glow -->
+    <path android:pathData="M214,132m-68,0a68,68 0,1 1,136 0a68,68 0,1 1,-136 0">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:centerX="214"
+                android:centerY="132"
+                android:gradientRadius="68"
+                android:type="radial">
+                <item android:color="#D9FFF0C4" android:offset="0" />
+                <item android:color="#66FFBA7A" android:offset="0.45" />
+                <item android:color="#00FF9668" android:offset="1" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <!-- Glowing sun disc -->
+    <path
+        android:fillColor="#FFF5D9"
+        android:pathData="M214,132m-21,0a21,21 0,1 1,42 0a21,21 0,1 1,-42 0" />
+    <!-- Soft cloud bands -->
+    <path
+        android:fillColor="#38FFD2B8"
+        android:pathData="M-10,98 Q65,78 140,94 T330,86 L330,118 Q240,126 140,114 T-10,120 Z" />
+    <!-- Far misty mountain range -->
+    <path android:pathData="M0,210 L58,152 L116,184 L182,138 L254,178 L320,148 L320,320 L0,320 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="160"
+                android:endY="320"
+                android:startX="160"
+                android:startY="138"
+                android:type="linear">
+                <item android:color="#6E4570" android:offset="0" />
+                <item android:color="#3A2A52" android:offset="1" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <!-- Mid ridge -->
+    <path android:pathData="M0,236 L86,178 L164,218 L244,166 L320,206 L320,320 L0,320 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="160"
+                android:endY="320"
+                android:startX="160"
+                android:startY="166"
+                android:type="linear">
+                <item android:color="#3D2B54" android:offset="0" />
+                <item android:color="#1E1B3A" android:offset="1" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <!-- Lake reflection -->
+    <path android:pathData="M0,248 L320,248 L320,320 L0,320 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="160"
+                android:endY="320"
+                android:startX="160"
+                android:startY="248"
+                android:type="linear">
+                <item android:color="#D9453B64" android:offset="0" />
+                <item android:color="#14182D" android:offset="1" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <!-- Sun shimmer on water -->
+    <path
+        android:fillColor="#6BFFBE85"
+        android:pathData="M180,254 L248,254 L236,264 L192,264 Z M192,272 L238,272 L230,278 L200,278 Z M202,286 L228,286 L223,290 L207,290 Z" />
+    <!-- Foreground pine headland -->
+    <path
+        android:fillColor="#11162A"
+        android:pathData="M0,260 Q72,246 134,274 L170,320 L0,320 Z" />
+</vector>

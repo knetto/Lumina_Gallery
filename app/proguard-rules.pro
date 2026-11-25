@@ -37,6 +37,14 @@
 -keepclasseswithmembers class com.luminagallery.drive.data.remote.auth.** {
     kotlinx.serialization.KSerializer serializer(...);
 }
+-keep,includedescriptorclasses class com.luminagallery.drive.widget.**$$serializer { *; }
+-keepclassmembers class com.luminagallery.drive.widget.** {
+    *** Companion;
+}
+-keepclasseswithmembers class com.luminagallery.drive.widget.** {
+    kotlinx.serialization.KSerializer serializer(...);
+}
+-keep class com.luminagallery.drive.widget.LuminaWidgetRefreshWorker { *; }
 
 # Retrofit 2
 -keepattributes Signature, Exceptions, RuntimeVisibleAnnotations, RuntimeVisibleParameterAnnotations

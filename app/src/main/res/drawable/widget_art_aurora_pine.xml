@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="320dp"
+    android:height="320dp"
+    android:viewportWidth="320"
+    android:viewportHeight="320">
+    <!-- Deep northern night sky -->
+    <path android:pathData="M0,0h320v320h-320z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="160"
+                android:endY="320"
+                android:startX="160"
+                android:startY="0"
+                android:type="linear">
+                <item android:color="#081427" android:offset="0" />
+                <item android:color="#0F2C4A" android:offset="0.48" />
+                <item android:color="#163F5A" android:offset="0.78" />
+                <item android:color="#091522" android:offset="1" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <!-- Aurora emerald ribbon -->
+    <path android:pathData="M-20,126 Q72,42 162,92 T340,46 L340,142 Q242,174 156,144 T-20,188 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="240"
+                android:endY="180"
+                android:startX="60"
+                android:startY="46"
+                android:type="linear">
+                <item android:color="#B332F2B3" android:offset="0" />
+                <item android:color="#8C2AD4E8" android:offset="0.52" />
+                <item android:color="#6E825BFF" android:offset="1" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <!-- Secondary violet aurora -->
+    <path android:pathData="M20,40 Q140,8 232,68 T340,70 L340,118 Q232,102 140,78 T20,86 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="300"
+                android:endY="118"
+                android:startX="40"
+                android:startY="24"
+                android:type="linear">
+                <item android:color="#003CF2B9" android:offset="0" />
+                <item android:color="#667AF5D2" android:offset="0.5" />
+                <item android:color="#52A475FF" android:offset="1" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <!-- Stars -->
+    <path
+        android:fillColor="#D9FFFFFF"
+        android:pathData="M48,34a2,2 0,1 0,4 0a2,2 0,1 0,-4 0M114,24a1.5,1.5 0,1 0,3 0a1.5,1.5 0,1 0,-3 0M262,38a2,2 0,1 0,4 0a2,2 0,1 0,-4 0M218,18a1.5,1.5 0,1 0,3 0a1.5,1.5 0,1 0,-3 0M86,62a1.4,1.4 0,1 0,2.8 0a1.4,1.4 0,1 0,-2.8 0" />
+    <!-- Snowy mountain peaks -->
+    <path
+        android:fillColor="#112438"
+        android:pathData="M0,240 L74,174 L148,224 L224,158 L320,218 L320,320 L0,320 Z" />
+    <path
+        android:fillColor="#091522"
+        android:pathData="M0,264 L96,216 L194,256 L278,208 L320,236 L320,320 L0,320 Z" />
+</vector>

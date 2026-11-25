@@ -4,7 +4,6 @@ import android.app.PendingIntent
 import android.appwidget.AppWidgetManager
 import android.appwidget.AppWidgetProvider
 import android.content.ComponentName
-import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -13,88 +12,96 @@ import android.graphics.ImageDecoder
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.provider.MediaStore
 import android.util.Log
+import android.util.SizeF
 import android.view.View
 import android.view.WindowManager
 import android.widget.RemoteViews
-import com.luminagallery.drive.LuminaApplication
+import androidx.annotation.RequiresApi
 import com.luminagallery.drive.MainActivity
 import com.luminagallery.drive.R
-import com.luminagallery.drive.data.local.LocalMediaRepository
-import com.luminagallery.drive.data.local.entity.PhotoLocationEntity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.time.LocalDate
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.roundToInt
 import kotlin.math.sqrt
-import kotlin.random.Random
 
-internal enum class PhotoWidgetLayout(val layoutId: Int, val thumbnailEdge: Int) {
-    FRAME(R.layout.widget_lumina_photo, 720),
-    STRIP(R.layout.widget_lumina_photo_strip, 480),
-    COLLAGE(R.layout.widget_lumina_photo_collage, 520),
-    SHUFFLE(R.layout.widget_lumina_photo_shuffle, 720),
-    MEMORIES(R.layout.widget_lumina_photo_collage, 520)
-}
-
-/** The original provider name keeps existing Photo Frames installed across upgrades. */
+/**
+ * Base provider for all Lumina HyperOS-style glass photo widgets.
+ * The original class name (`LuminaPhotoWidgetProvider`) is preserved so existing Photo Frame
+ * widgets stay intact across app updates.
+ */
 internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
-    protected open val layout = PhotoWidgetLayout.FRAME
+    open val kind: PhotoWidgetKind = PhotoWidgetKind.FRAME
 
     override fun onUpdate(
         context: Context,
         appWidgetManager: AppWidgetManager,
         appWidgetIds: IntArray
-    ) = updateWidgets(context, appWidgetManager, appWidgetIds, advance = layout == PhotoWidgetLayout.MEMORIES)
+    ) {
+        WidgetRefreshScheduler.syncSchedule(context)
+        updateWidgets(context, appWidgetManager, appWidgetIds, advance = false, checkIntervalDue = true)
+    }
 
     override fun onAppWidgetOptionsChanged(
         context: Context,
         appWidgetManager: AppWidgetManager,
         appWidgetId: Int,
         newOptions: Bundle
-    ) = updateWidgets(context, appWidgetManager, intArrayOf(appWidgetId))
+    ) {
+        // Re-render at exact new resized aspect ratio without skipping the user's current photo/group
+        updateWidgets(context, appWidgetManager, intArrayOf(appWidgetId), advance = false, checkIntervalDue = false)
+    }
 
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != ACTION_NEXT_PHOTO) {
             super.onReceive(context, intent)
             return
         }
-        val widgetId = intent.getIntExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, AppWidgetManager.INVALID_APPWIDGET_ID)
+        val widgetId = intent.getIntExtra(
+            AppWidgetManager.EXTRA_APPWIDGET_ID,
+            AppWidgetManager.INVALID_APPWIDGET_ID
+        )
+        if (widgetId == AppWidgetManager.INVALID_APPWIDGET_ID) return
         val manager = AppWidgetManager.getInstance(context)
         if (manager.getAppWidgetInfo(widgetId)?.provider != ComponentName(context, javaClass)) return
-        updateWidgets(context, manager, intArrayOf(widgetId), advance = true)
+        updateWidgets(context, manager, intArrayOf(widgetId), advance = true, checkIntervalDue = false)
     }
 
     override fun onDeleted(context: Context, appWidgetIds: IntArray) {
         super.onDeleted(context, appWidgetIds)
-        val prefs = context.getSharedPreferences(PHOTO_WIDGET_PREFS, Context.MODE_PRIVATE)
-        val editor = prefs.edit()
         for (id in appWidgetIds) {
-            editor.remove("idx_$id")
-            editor.remove("seconds_$id")
-            editor.remove("source_$id")
+            PhotoWidgetSettings.delete(context, id)
         }
-        editor.apply()
+        WidgetRefreshScheduler.syncSchedule(context)
+    }
+
+    override fun onDisabled(context: Context) {
+        super.onDisabled(context)
+        WidgetRefreshScheduler.syncSchedule(context)
     }
 
     private fun updateWidgets(
         context: Context,
         manager: AppWidgetManager,
         widgetIds: IntArray,
-        advance: Boolean = false
+        advance: Boolean = false,
+        checkIntervalDue: Boolean = false
     ) {
         if (widgetIds.isEmpty()) return
         val pendingResult = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                renderWidgets(context, manager, widgetIds, advance)
+                renderWidgets(context, manager, widgetIds, advance, checkIntervalDue)
             } catch (error: RuntimeException) {
                 Log.w(TAG, "Unable to refresh photo widgets", error)
             } finally {
@@ -107,334 +114,504 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
         context: Context,
         manager: AppWidgetManager,
         widgetIds: IntArray,
-        advance: Boolean = false
+        advance: Boolean = false,
+        checkIntervalDue: Boolean = false
     ) = withContext(Dispatchers.IO) {
         val appContext = context.applicationContext
         val provider = ComponentName(appContext, this@LuminaPhotoWidgetProvider.javaClass)
         updateMutex.withLock {
-            val candidates = queryCandidatePhotos(appContext)
             for (widgetId in widgetIds) {
                 if (manager.getAppWidgetInfo(widgetId)?.provider != provider) continue
-                updateSingleWidget(appContext, manager, widgetId, advance, candidates)
+                runCatching {
+                    updateSingleWidget(appContext, manager, widgetId, advance, checkIntervalDue)
+                }.onFailure { err ->
+                    Log.w(TAG, "Failed rendering widget $widgetId ($kind)", err)
+                }
             }
         }
     }
 
-    private fun updateSingleWidget(
+    private suspend fun updateSingleWidget(
         context: Context,
         manager: AppWidgetManager,
         widgetId: Int,
         advance: Boolean,
-        candidates: WidgetPhotos
+        checkIntervalDue: Boolean
     ) {
+        val settings = PhotoWidgetSettings.load(context, widgetId, kind)
+        val prefs = context.getSharedPreferences(PHOTO_WIDGET_PREFS, Context.MODE_PRIVATE)
+        val now = System.currentTimeMillis()
+        val lastAdvance = prefs.getLong("last_advance_$widgetId", 0L)
+        val effectiveAdvance = advance || (
+            checkIntervalDue && isWidgetAdvanceDue(settings.shuffleInterval, lastAdvance, now)
+        )
         val options = manager.getAppWidgetOptions(widgetId)
-        val defaultWidth = if (layout == PhotoWidgetLayout.FRAME || layout == PhotoWidgetLayout.SHUFFLE) 140 else 250
-        val widthDp = options.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH).takeIf { it > 0 } ?: defaultWidth
-        val heightDp = options.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT).takeIf { it > 0 } ?: DEFAULT_HEIGHT_DP
-        val settings = PhotoWidgetSettings.load(context, widgetId)
-        if (layout == PhotoWidgetLayout.SHUFFLE) {
-            val bitmapEdge = widgetThumbnailEdge(context, options, widthDp, heightDp, SHUFFLE_FRAMES)
-            renderShuffle(context, manager, widgetId, widthDp, settings, candidates.special, bitmapEdge)
+        val widgetSizes = resolveWidgetSizesDp(options)
+        val primarySize = widgetSizes.first()
+
+        val maxSlots = if (kind.isMultiPhoto) 4 else 1
+        val useFastSlideshow = settings.shuffleInterval.isFastSlideshow
+        val requestedFrames = if (useFastSlideshow) SLIDESHOW_FRAME_COUNT else 1
+
+        val selections = WidgetMediaRepository.resolveWidgetFrames(
+            context = context,
+            widgetId = widgetId,
+            kind = kind,
+            settings = settings,
+            slotsPerFrame = maxSlots,
+            frameCount = requestedFrames,
+            advance = effectiveAdvance
+        )
+
+        val today = LocalDate.now()
+        prefs.edit().apply {
+            if (effectiveAdvance || lastAdvance == 0L) {
+                putLong("last_advance_$widgetId", now)
+            }
+            putString("last_date_$widgetId", today.toString())
+        }.apply()
+
+        val canUseResponsiveMap = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            !useFastSlideshow &&
+            widgetSizes.size > 1
+
+        if (canUseResponsiveMap) {
+            updateWithResponsiveSizeMap(
+                context = context,
+                manager = manager,
+                widgetId = widgetId,
+                sizes = widgetSizes.take(2),
+                settings = settings,
+                selection = selections.firstOrNull(),
+                today = today
+            )
             return
         }
 
-        val slots = when (layout) {
-            PhotoWidgetLayout.FRAME -> 1
-            PhotoWidgetLayout.STRIP -> if (widthDp >= 195) 3 else 2
-            else -> 3
-        }
-        val memories = if (layout == PhotoWidgetLayout.MEMORIES) {
-            buildWidgetMemories(candidates.special, candidates.locations, settings.memorySource)
-        } else emptyList()
-        val regularPhotos = when (layout) {
-            PhotoWidgetLayout.FRAME -> candidates.favorites.ifEmpty { candidates.recent }
-            PhotoWidgetLayout.MEMORIES -> emptyList()
-            else -> candidates.favorites + candidates.recent
-        }
-        val choiceCount = if (layout == PhotoWidgetLayout.MEMORIES) memories.size else regularPhotos.size
-        val prefs = context.getSharedPreferences(PHOTO_WIDGET_PREFS, Context.MODE_PRIVATE)
-        val indexKey = "idx_$widgetId"
-        val previousIndex = prefs.getInt(indexKey, -1)
-        val targetIndex = if (choiceCount > 0) {
-            Math.floorMod(if (previousIndex < 0) 0 else previousIndex + if (advance) 1 else 0, choiceCount)
-        } else 0
-        if (choiceCount > 0) prefs.edit().putInt(indexKey, targetIndex).apply()
-        val memory = memories.getOrNull(targetIndex)
-        val pool = memory?.photos ?: regularPhotos
-        val photoStart = if (memory != null) 0 else targetIndex
-        val shown = if (pool.isEmpty()) emptyList() else {
-            val bitmapEdge = widgetThumbnailEdge(context, options, widthDp, heightDp, slots)
-            decodePhotos(context, pool, photoStart, slots, bitmapEdge, slots + 4)
-        }
-        val firstPhoto = shown.firstOrNull()?.first
-        val views = RemoteViews(context.packageName, layout.layoutId)
-        views.setOnClickPendingIntent(android.R.id.background, openPhoto(context, widgetId, 0, firstPhoto))
-
-        val imageSlots = if (layout == PhotoWidgetLayout.FRAME) {
-            listOf(R.id.widget_image)
-        } else {
-            listOf(R.id.widget_image, R.id.widget_image_two, R.id.widget_image_three)
-        }
-        imageSlots.forEachIndexed { slot, viewId ->
-            val rendered = shown.getOrNull(slot)
-            setVisible(views, viewId, rendered != null)
-            views.setImageViewBitmap(viewId, rendered?.second)
-            if (rendered != null) {
-                val photo = rendered.first
-                views.setContentDescription(
-                    viewId,
-                    context.getString(R.string.widget_photo_details, photo.albumName, widgetDateLabel(photo.takenAtMs))
-                )
-                views.setOnClickPendingIntent(viewId, openPhoto(context, widgetId, slot, photo))
-            }
-        }
-
-        if (layout == PhotoWidgetLayout.FRAME) {
-            setVisible(views, R.id.widget_empty_icon, firstPhoto == null)
-            setVisible(views, R.id.widget_caption, widthDp >= 100 && heightDp >= 90)
-            views.setTextViewText(R.id.widget_title, firstPhoto?.albumName ?: context.getString(R.string.app_name))
-            views.setTextViewText(
-                R.id.widget_subtitle,
-                firstPhoto?.let { widgetDateLabel(it.takenAtMs) } ?: context.getString(R.string.widget_open_gallery)
+        val remoteViews = if (useFastSlideshow && selections.size > 1) {
+            buildSlideshowRemoteViews(
+                context = context,
+                widgetId = widgetId,
+                sizeDp = primarySize,
+                settings = settings,
+                selections = selections,
+                today = today,
+                scaleDown = 1f
             )
         } else {
-            setVisible(views, R.id.widget_empty_label, shown.isEmpty())
-            if (layout == PhotoWidgetLayout.COLLAGE || layout == PhotoWidgetLayout.MEMORIES) {
-                setVisible(views, R.id.widget_side_photos, shown.size > 1)
-            }
-            if (layout == PhotoWidgetLayout.MEMORIES) {
-                setVisible(views, R.id.widget_caption, memory != null && shown.isNotEmpty() && heightDp >= 90)
-                views.setTextViewText(R.id.widget_title, memory?.title.orEmpty())
-                views.setTextViewText(R.id.widget_subtitle, memory?.subtitle.orEmpty())
-                setVisible(views, R.id.widget_subtitle, memory?.subtitle != null && heightDp >= 124)
-                views.setTextViewText(
-                    R.id.widget_empty_label,
-                    context.getString(
-                        if (settings.memorySource == WidgetMemorySource.TRIPS) R.string.widget_empty_trips
-                        else R.string.widget_empty_memories
-                    )
-                )
-                bindSettings(context, views, widgetId, visible = widthDp >= 96)
-            }
-        }
-
-        val hasNext = if (layout == PhotoWidgetLayout.MEMORIES) {
-            memories.size > 1
-        } else {
-            pool.size > shown.size && (layout != PhotoWidgetLayout.FRAME || widthDp >= 105)
-        }
-        setVisible(views, R.id.widget_next_btn, hasNext)
-        if (hasNext) {
-            val nextIntent = Intent(context, javaClass).apply {
-                action = ACTION_NEXT_PHOTO
-                putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, widgetId)
-            }
-            views.setOnClickPendingIntent(
-                R.id.widget_next_btn,
-                PendingIntent.getBroadcast(context, widgetId, nextIntent, PENDING_FLAGS)
+            buildSingleFrameRemoteViews(
+                context = context,
+                widgetId = widgetId,
+                sizeDp = primarySize,
+                settings = settings,
+                selection = selections.firstOrNull(),
+                today = today,
+                scaleDown = 1f
             )
         }
-        manager.updateAppWidget(widgetId, views)
+
+        try {
+            manager.updateAppWidget(widgetId, remoteViews)
+        } catch (err: IllegalArgumentException) {
+            // Memory-budget fallback if OEM launcher enforces a smaller bitmap cap
+            Log.w(TAG, "Widget $widgetId bitmap budget exceeded, retrying at 0.65x", err)
+            val fallback = buildSingleFrameRemoteViews(
+                context = context,
+                widgetId = widgetId,
+                sizeDp = primarySize,
+                settings = settings,
+                selection = selections.firstOrNull(),
+                today = today,
+                scaleDown = 0.65f
+            )
+            manager.updateAppWidget(widgetId, fallback)
+        }
     }
 
-    private fun renderShuffle(
+    @RequiresApi(Build.VERSION_CODES.S)
+    private fun updateWithResponsiveSizeMap(
         context: Context,
         manager: AppWidgetManager,
         widgetId: Int,
-        widthDp: Int,
+        sizes: List<SizeF>,
         settings: PhotoWidgetSettings,
-        randomPhotos: List<WidgetPhoto>,
-        bitmapEdge: Int
+        selection: WidgetResolvedSelection?,
+        today: LocalDate
     ) {
-        val frames = decodePhotos(context, randomPhotos.shuffled(), 0, SHUFFLE_FRAMES, bitmapEdge, randomPhotos.size)
-        val views = RemoteViews(context.packageName, layout.layoutId)
-        views.removeAllViews(R.id.widget_shuffle_container)
-        if (frames.isNotEmpty()) {
-            val animation = RemoteViews(context.packageName, R.layout.widget_shuffle_animation)
-            val seconds = if (frames.size == 1) MAX_SHUFFLE_SECONDS else settings.shuffleSeconds
-            animation.setInt(R.id.widget_shuffled_photos, "setFlipInterval", seconds * 1000)
-            frames.forEachIndexed { slot, (photo, bitmap) ->
-                val frame = RemoteViews(context.packageName, R.layout.widget_shuffle_frame)
-                frame.setImageViewBitmap(R.id.widget_image, bitmap)
-                frame.setContentDescription(
-                    R.id.widget_image,
-                    context.getString(R.string.widget_photo_details, photo.albumName, widgetDateLabel(photo.takenAtMs))
+        val map = LinkedHashMap<SizeF, RemoteViews>(sizes.size)
+        val perSizeScale = if (sizes.size > 1) 0.85f else 1f
+        for (size in sizes) {
+            map[size] = buildSingleFrameRemoteViews(
+                context = context,
+                widgetId = widgetId,
+                sizeDp = size,
+                settings = settings,
+                selection = selection,
+                today = today,
+                scaleDown = perSizeScale
+            )
+        }
+        try {
+            manager.updateAppWidget(widgetId, RemoteViews(map))
+        } catch (err: IllegalArgumentException) {
+            Log.w(TAG, "Responsive map exceeded bitmap cap for widget $widgetId, falling back", err)
+            val primary = buildSingleFrameRemoteViews(
+                context = context,
+                widgetId = widgetId,
+                sizeDp = sizes.first(),
+                settings = settings,
+                selection = selection,
+                today = today,
+                scaleDown = 0.7f
+            )
+            manager.updateAppWidget(widgetId, primary)
+        }
+    }
+
+    private fun buildSingleFrameRemoteViews(
+        context: Context,
+        widgetId: Int,
+        sizeDp: SizeF,
+        settings: PhotoWidgetSettings,
+        selection: WidgetResolvedSelection?,
+        today: LocalDate,
+        scaleDown: Float
+    ): RemoteViews {
+        val views = RemoteViews(context.packageName, R.layout.widget_lumina_rendered)
+        val rawPhotos = selection?.photos.orEmpty()
+        val pattern = HyperOsGlassRenderer.resolveTilePattern(
+            kind = kind,
+            collageLayout = settings.collageLayout,
+            widthDp = sizeDp.width,
+            heightDp = sizeDp.height,
+            photoCount = rawPhotos.size
+        )
+        val (renderW, renderH, renderDensity) = computeRenderCanvasSize(
+            context = context,
+            sizeDp = sizeDp,
+            frameCount = 1,
+            scaleDown = scaleDown
+        )
+        val slotDecodeEdge = max(renderW, renderH).coerceIn(240, 1080)
+        val decoded = decodePhotos(context, rawPhotos, pattern.maxSlots, slotDecodeEdge)
+        val actualPattern = HyperOsGlassRenderer.resolveTilePattern(
+            kind = kind,
+            collageLayout = settings.collageLayout,
+            widthDp = sizeDp.width,
+            heightDp = sizeDp.height,
+            photoCount = decoded.size
+        )
+
+        val showShuffleBtn = settings.showShuffleButton &&
+            (selection?.totalChoices ?: 0) > 1 &&
+            sizeDp.width >= 96f && sizeDp.height >= 76f
+        val showSettingsBtn = settings.showSettingsButton &&
+            sizeDp.width >= 96f && sizeDp.height >= 76f
+
+        val rendered = HyperOsGlassRenderer.renderWidgetBitmap(
+            photos = decoded.map { it.second },
+            pattern = actualPattern,
+            widthPx = renderW,
+            heightPx = renderH,
+            density = renderDensity,
+            settings = settings,
+            caption = if (decoded.isNotEmpty()) selection?.caption else null,
+            date = today,
+            reserveBottomRightButton = showShuffleBtn,
+            reserveTopLeftButton = showSettingsBtn,
+            overrideCornerRadiusDp = resolveSystemHyperCornerDp(context, settings)
+        )
+        decoded.forEach { it.second.recycle() }
+
+        views.setImageViewBitmap(R.id.widget_rendered_image, rendered)
+        views.setContentDescription(
+            R.id.widget_rendered_image,
+            buildContentDescription(context, decoded.firstOrNull()?.first, selection?.caption)
+        )
+
+        // Root tap fallback
+        val primaryPhoto = decoded.firstOrNull()?.first
+        views.setOnClickPendingIntent(
+            android.R.id.background,
+            buildTapIntent(context, widgetId, slot = 0, photo = primaryPhoto, settings = settings)
+        )
+
+        // Per-tile transparent click targets for multi-photo collages & strips
+        views.removeAllViews(R.id.widget_hit_overlay)
+        if (decoded.size > 1 && settings.tapAction == WidgetTapAction.OPEN_PHOTO) {
+            val hitLayout = hitOverlayLayoutFor(actualPattern)
+            if (hitLayout != null) {
+                val overlay = RemoteViews(context.packageName, hitLayout)
+                val maxViewsInLayout = if (
+                    actualPattern == ResolvedTilePattern.STRIP_VERTICAL_2 ||
+                    actualPattern == ResolvedTilePattern.STRIP_VERTICAL_3 ||
+                    actualPattern == ResolvedTilePattern.HERO_LEFT_2_RIGHT ||
+                    actualPattern == ResolvedTilePattern.HERO_TOP_2_BOTTOM
+                ) 3 else 4
+                val hitIds = intArrayOf(
+                    R.id.widget_hit_0,
+                    R.id.widget_hit_1,
+                    R.id.widget_hit_2,
+                    R.id.widget_hit_3
                 )
-                frame.setOnClickPendingIntent(R.id.widget_image, openPhoto(context, widgetId, slot, photo))
-                animation.addView(R.id.widget_shuffled_photos, frame)
+                for (idx in 0 until maxViewsInLayout) {
+                    val hitId = hitIds[idx]
+                    val photo = decoded.getOrNull(idx)?.first
+                    if (photo != null && idx < actualPattern.maxSlots) {
+                        overlay.setViewVisibility(hitId, View.VISIBLE)
+                        overlay.setContentDescription(
+                            hitId,
+                            context.getString(
+                                R.string.widget_photo_details,
+                                photo.albumName,
+                                widgetDateLabel(photo.takenAtMs)
+                            )
+                        )
+                        overlay.setOnClickPendingIntent(
+                            hitId,
+                            openPhotoPendingIntent(context, widgetId, idx, photo)
+                        )
+                    } else if (actualPattern == ResolvedTilePattern.STRIP_HORIZONTAL_2 ||
+                        actualPattern == ResolvedTilePattern.STRIP_HORIZONTAL_3 ||
+                        actualPattern == ResolvedTilePattern.STRIP_VERTICAL_2
+                    ) {
+                        overlay.setViewVisibility(hitId, View.GONE)
+                    }
+                }
+                views.addView(R.id.widget_hit_overlay, overlay)
             }
+        }
+
+        // Empty state message
+        val isEmpty = decoded.isEmpty()
+        setVisible(views, R.id.widget_empty_state, isEmpty)
+        if (isEmpty) {
+            views.setTextViewText(R.id.widget_empty_label, emptyMessageFor(context, settings))
+        }
+
+        // Optional sleek frosted-glass quick controls
+        bindQuickButtons(
+            context = context,
+            views = views,
+            widgetId = widgetId,
+            showShuffle = showShuffleBtn,
+            showSettings = showSettingsBtn || isEmpty
+        )
+
+        return views
+    }
+
+    private fun buildSlideshowRemoteViews(
+        context: Context,
+        widgetId: Int,
+        sizeDp: SizeF,
+        settings: PhotoWidgetSettings,
+        selections: List<WidgetResolvedSelection>,
+        today: LocalDate,
+        scaleDown: Float
+    ): RemoteViews {
+        val views = RemoteViews(context.packageName, R.layout.widget_lumina_slideshow)
+        views.removeAllViews(R.id.widget_shuffle_container)
+
+        val showShuffleBtn = settings.showShuffleButton && sizeDp.width >= 96f && sizeDp.height >= 76f
+        val showSettingsBtn = settings.showSettingsButton && sizeDp.width >= 96f && sizeDp.height >= 76f
+
+        val maxFrames = selections.size.coerceAtMost(SLIDESHOW_FRAME_COUNT)
+        val (renderW, renderH, renderDensity) = computeRenderCanvasSize(
+            context = context,
+            sizeDp = sizeDp,
+            frameCount = maxFrames,
+            scaleDown = scaleDown
+        )
+        val decodeEdge = max(renderW, renderH).coerceIn(220, 760)
+
+        val animation = RemoteViews(context.packageName, R.layout.widget_shuffle_animation)
+        animation.setInt(
+            R.id.widget_shuffled_photos,
+            "setFlipInterval",
+            settings.effectiveFlipSeconds * 1000
+        )
+
+        var addedFrames = 0
+        selections.take(maxFrames).forEachIndexed { frameIndex, sel ->
+            val pattern = HyperOsGlassRenderer.resolveTilePattern(
+                kind = kind,
+                collageLayout = settings.collageLayout,
+                widthDp = sizeDp.width,
+                heightDp = sizeDp.height,
+                photoCount = sel.photos.size
+            )
+            val decoded = decodePhotos(context, sel.photos, pattern.maxSlots, decodeEdge)
+            if (decoded.isEmpty()) return@forEachIndexed
+
+            val actualPattern = HyperOsGlassRenderer.resolveTilePattern(
+                kind = kind,
+                collageLayout = settings.collageLayout,
+                widthDp = sizeDp.width,
+                heightDp = sizeDp.height,
+                photoCount = decoded.size
+            )
+            val rendered = HyperOsGlassRenderer.renderWidgetBitmap(
+                photos = decoded.map { it.second },
+                pattern = actualPattern,
+                widthPx = renderW,
+                heightPx = renderH,
+                density = renderDensity,
+                settings = settings,
+                caption = sel.caption,
+                date = today,
+                reserveBottomRightButton = showShuffleBtn,
+                reserveTopLeftButton = showSettingsBtn,
+                overrideCornerRadiusDp = resolveSystemHyperCornerDp(context, settings)
+            )
+            val leadPhoto = decoded.first().first
+            decoded.forEach { it.second.recycle() }
+
+            val frameView = RemoteViews(context.packageName, R.layout.widget_shuffle_frame)
+            frameView.setImageViewBitmap(R.id.widget_image, rendered)
+            frameView.setContentDescription(
+                R.id.widget_image,
+                buildContentDescription(context, leadPhoto, sel.caption)
+            )
+            frameView.setOnClickPendingIntent(
+                R.id.widget_image,
+                buildTapIntent(context, widgetId, slot = frameIndex, photo = leadPhoto, settings = settings)
+            )
+            animation.addView(R.id.widget_shuffled_photos, frameView)
+            addedFrames++
+        }
+
+        if (addedFrames > 0) {
             views.addView(R.id.widget_shuffle_container, animation)
         }
-        setVisible(views, R.id.widget_empty_icon, frames.isEmpty())
-        views.setOnClickPendingIntent(android.R.id.background, openPhoto(context, widgetId, -1, null))
-        bindSettings(context, views, widgetId, visible = widthDp >= 96 || frames.isEmpty())
-        manager.updateAppWidget(widgetId, views)
-    }
 
-    private fun decodePhotos(
-        context: Context,
-        pool: List<WidgetPhoto>,
-        start: Int,
-        slots: Int,
-        bitmapEdge: Int,
-        attempts: Int
-    ): List<Pair<WidgetPhoto, Bitmap>> = buildList {
-        for (offset in 0 until minOf(pool.size, attempts)) {
-            val photo = pool[(start + offset) % pool.size]
-            val bitmap = decodeWidgetBitmap(context, Uri.parse(photo.uri), bitmapEdge) ?: continue
-            add(photo to bitmap)
-            if (size == slots) break
-        }
-    }
-
-    private fun bindSettings(context: Context, views: RemoteViews, widgetId: Int, visible: Boolean) {
-        setVisible(views, R.id.widget_settings_btn, visible)
-        val intent = Intent(context, PhotoWidgetSettingsActivity::class.java).apply {
-            putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, widgetId)
+        val isEmpty = addedFrames == 0
+        setVisible(views, R.id.widget_empty_state, isEmpty)
+        if (isEmpty) {
+            views.setTextViewText(R.id.widget_empty_label, emptyMessageFor(context, settings))
         }
         views.setOnClickPendingIntent(
-            R.id.widget_settings_btn,
-            PendingIntent.getActivity(context, widgetId, intent, PENDING_FLAGS)
+            android.R.id.background,
+            buildTapIntent(context, widgetId, slot = -1, photo = null, settings = settings)
         )
+        bindQuickButtons(
+            context = context,
+            views = views,
+            widgetId = widgetId,
+            showShuffle = showShuffleBtn && addedFrames > 0,
+            showSettings = showSettingsBtn || isEmpty
+        )
+        return views
     }
 
-    private fun widgetThumbnailEdge(context: Context, options: Bundle, widthDp: Int, heightDp: Int, slots: Int): Int {
+    private fun resolveSystemHyperCornerDp(context: Context, settings: PhotoWidgetSettings): Float? {
+        if (settings.cornerStyle != WidgetCornerStyle.HYPER_OS) return null
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return null
+        return runCatching {
+            val px = context.resources.getDimension(android.R.dimen.system_app_widget_background_radius)
+            (px / context.resources.displayMetrics.density).coerceIn(20f, 28f)
+        }.getOrNull()
+    }
+
+    private fun hitOverlayLayoutFor(pattern: ResolvedTilePattern): Int? = when (pattern) {
+        ResolvedTilePattern.HERO_LEFT_2_RIGHT -> R.layout.widget_hits_hero_left_2_right
+        ResolvedTilePattern.HERO_TOP_2_BOTTOM -> R.layout.widget_hits_hero_top_2_bottom
+        ResolvedTilePattern.GRID_2X2 -> R.layout.widget_hits_grid_2x2
+        ResolvedTilePattern.BENTO_4_WIDE -> R.layout.widget_hits_bento_4_wide
+        ResolvedTilePattern.STRIP_HORIZONTAL_2,
+        ResolvedTilePattern.STRIP_HORIZONTAL_3,
+        ResolvedTilePattern.STRIP_HORIZONTAL_4 -> R.layout.widget_hits_strip_h
+        ResolvedTilePattern.STRIP_VERTICAL_2,
+        ResolvedTilePattern.STRIP_VERTICAL_3 -> R.layout.widget_hits_strip_v
+        ResolvedTilePattern.SINGLE -> null
+    }
+
+    private fun resolveWidgetSizesDp(options: Bundle): List<SizeF> {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            @Suppress("DEPRECATION")
+            val reported = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                options.getParcelableArrayList(AppWidgetManager.OPTION_APPWIDGET_SIZES, SizeF::class.java)
+            } else {
+                options.getParcelableArrayList<SizeF>(AppWidgetManager.OPTION_APPWIDGET_SIZES)
+            }
+            val valid = reported?.filter { it.width >= 32f && it.height >= 32f }.orEmpty()
+            if (valid.isNotEmpty()) {
+                // Sort portrait-first so primary size matches phone home screen
+                return valid.sortedByDescending { it.height }
+            }
+        }
+        val (defW, defH) = defaultSizeDpForKind(kind)
+        // Portrait home screen size uses (MIN_WIDTH, MAX_HEIGHT)
+        val minW = options.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH)
+        val maxH = options.getInt(AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT)
+        val minH = options.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT)
+        val w = (if (minW > 0) minW.toFloat() else defW).coerceAtLeast(48f)
+        val h = (when {
+            maxH > 0 -> maxH.toFloat()
+            minH > 0 -> minH.toFloat()
+            else -> defH
+        }).coerceAtLeast(48f)
+        return listOf(SizeF(w, h))
+    }
+
+    private fun defaultSizeDpForKind(kind: PhotoWidgetKind): Pair<Float, Float> = when (kind) {
+        PhotoWidgetKind.COLLAGE, PhotoWidgetKind.MEMORIES -> 320f to 165f
+        PhotoWidgetKind.STRIP -> 320f to 84f
+        else -> 160f to 160f
+    }
+
+    /**
+     * Computes exact pixel canvas dimensions matching [sizeDp]'s aspect ratio while safely
+     * respecting Android's RemoteViews total ARGB bitmap memory budget.
+     */
+    private fun computeRenderCanvasSize(
+        context: Context,
+        sizeDp: SizeF,
+        frameCount: Int,
+        scaleDown: Float
+    ): Triple<Int, Int, Float> {
         val metrics = context.resources.displayMetrics
-        val widgetEdgePx = (maxOf(
-            options.getInt(AppWidgetManager.OPTION_APPWIDGET_MAX_WIDTH).coerceAtLeast(widthDp),
-            options.getInt(AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT).coerceAtLeast(heightDp)
-        ) * metrics.density).toInt()
         val windowBounds = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             context.getSystemService(WindowManager::class.java)?.currentWindowMetrics?.bounds
         } else null
         val displayPixels = metrics.widthPixels.toDouble() * metrics.heightPixels
         val windowPixels = windowBounds?.let { it.width().toDouble() * it.height() } ?: displayPixels
-        // Keep total ARGB bitmap pixels below one screen's worth across all photo slots.
-        val budgetEdge = sqrt(minOf(displayPixels, windowPixels) / slots).toInt()
-        return minOf(widgetEdgePx, budgetEdge, layout.thumbnailEdge).coerceAtLeast(1)
-    }
+        // Stay comfortably below Android's 1.5x screen bitmap RemoteViews cap
+        val totalPixelBudget = min(displayPixels, windowPixels) * 0.88
+        val perFrameBudget = totalPixelBudget / frameCount.coerceAtLeast(1)
 
-    private fun openPhoto(context: Context, widgetId: Int, slot: Int, photo: WidgetPhoto?): PendingIntent {
-        val intent = Intent(context, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            data = Uri.parse("lumina-widget://photo/$widgetId/$slot")
-            photo?.let { putExtra(EXTRA_WIDGET_OPEN_ITEM_ID, it.luminaItemId) }
+        val rawW = sizeDp.width * metrics.density * scaleDown
+        val rawH = sizeDp.height * metrics.density * scaleDown
+        val maxCapEdge = if (frameCount > 1) 740f else 1080f
+
+        var factor = 1f
+        val maxSide = max(rawW, rawH)
+        if (maxSide > maxCapEdge) {
+            factor = min(factor, maxCapEdge / maxSide)
         }
-        return PendingIntent.getActivity(context, widgetId, intent, PENDING_FLAGS)
-    }
-
-    private fun setVisible(views: RemoteViews, id: Int, visible: Boolean) {
-        views.setViewVisibility(id, if (visible) View.VISIBLE else View.GONE)
-    }
-
-    private data class WidgetPhotos(
-        val favorites: List<WidgetPhoto> = emptyList(),
-        val recent: List<WidgetPhoto> = emptyList(),
-        val special: List<WidgetPhoto> = emptyList(),
-        val locations: Map<String, PhotoLocationEntity> = emptyMap()
-    )
-
-    private suspend fun queryCandidatePhotos(context: Context): WidgetPhotos {
-        val extrasDao = (context.applicationContext as? LuminaApplication)
-            ?.container?.database?.galleryExtrasDao() ?: return WidgetPhotos()
-        val blockedBucketIds = runCatching {
-            (extrasDao.getAllLockedAlbumIds() + extrasDao.getAllHiddenAlbumIds()).toHashSet()
-        }.getOrElse {
-            Log.w(TAG, "Unable to check widget photo exclusions", it)
-            return WidgetPhotos()
+        val area = rawW.toDouble() * rawH.toDouble()
+        if (area > perFrameBudget && area > 0.0) {
+            factor = min(factor, sqrt(perFrameBudget / area).toFloat())
         }
-        val discoverFavorites = layout != PhotoWidgetLayout.SHUFFLE && layout != PhotoWidgetLayout.MEMORIES
-        val roomFavoriteIds = if (discoverFavorites) {
-            runCatching { extrasDao.getAllFavoriteItemIds().toHashSet() }.getOrDefault(emptySet())
-        } else emptySet()
-        val locations = if (layout == PhotoWidgetLayout.MEMORIES) {
-            runCatching { extrasDao.observeCachedLocations().first().associateBy { it.itemId } }
-                .getOrDefault(emptyMap())
-        } else emptyMap()
 
-        val favorites = ArrayList<WidgetPhoto>(40)
-        val fallback = ArrayList<WidgetPhoto>(40)
-        val special = ArrayList<WidgetPhoto>()
-        var seenForShuffle = 0
-        var olderLocatedPhotos = 0
+        val finalW = (rawW * factor).roundToInt().coerceAtLeast(96)
+        val finalH = (rawH * factor).roundToInt().coerceAtLeast(96)
+        // Scale density proportionally so dp-sized glass rims & typography stay crisp at any downscale
+        val effectiveDensity = (metrics.density * scaleDown * factor).coerceAtLeast(0.75f)
+        return Triple(finalW, finalH, effectiveDensity)
+    }
 
-        val projection = buildList {
-            add(MediaStore.Images.Media._ID)
-            add(MediaStore.Images.Media.BUCKET_ID)
-            add(MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
-            add(MediaStore.Images.Media.DATE_TAKEN)
-            add(MediaStore.Images.Media.DATE_MODIFIED)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                add(MediaStore.MediaColumns.IS_FAVORITE)
-            }
-        }.toTypedArray()
-
-        runCatching {
-            context.contentResolver.query(
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                projection,
-                "${MediaStore.MediaColumns.SIZE} > 0",
-                null,
-                "${MediaStore.Images.Media.DATE_MODIFIED} DESC"
-            )?.use { c ->
-                val idCol = c.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
-                val bucketIdCol = c.getColumnIndex(MediaStore.Images.Media.BUCKET_ID)
-                val bucketCol = c.getColumnIndex(MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
-                val takenCol = c.getColumnIndex(MediaStore.Images.Media.DATE_TAKEN)
-                val modCol = c.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_MODIFIED)
-                val favCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    c.getColumnIndex(MediaStore.MediaColumns.IS_FAVORITE)
-                } else -1
-
-                while (c.moveToNext()) {
-                    if (discoverFavorites && favorites.size >= 40 && fallback.size >= 40) break
-                    if (layout == PhotoWidgetLayout.MEMORIES && special.size >= RECENT_MEMORY_PHOTOS &&
-                        (locations.isEmpty() || olderLocatedPhotos >= RECENT_MEMORY_PHOTOS)
-                    ) break
-                    val rawBucket = if (bucketIdCol >= 0) c.getString(bucketIdCol) else null
-                    val luminaBucketId = "${LocalMediaRepository.LOCAL_BUCKET_PREFIX}${rawBucket ?: "default"}"
-                    // Never leak locked or hidden albums onto the Home Screen widget!
-                    if (luminaBucketId in blockedBucketIds) continue
-
-                    val id = c.getLong(idCol)
-                    val luminaItemId = "${LocalMediaRepository.LOCAL_ITEM_PREFIX}$id"
-                    val isFav = luminaItemId in roomFavoriteIds || (favCol >= 0 && c.getInt(favCol) == 1)
-                    if (discoverFavorites && ((!isFav && fallback.size >= 40) || (isFav && favorites.size >= 40))) continue
-                    val isOlderLocatedPhoto = layout == PhotoWidgetLayout.MEMORIES &&
-                        special.size >= RECENT_MEMORY_PHOTOS && locations.containsKey(luminaItemId)
-                    if (layout == PhotoWidgetLayout.MEMORIES && special.size >= RECENT_MEMORY_PHOTOS &&
-                        !isOlderLocatedPhoto
-                    ) continue
-                    val shuffleSlot = if (layout == PhotoWidgetLayout.SHUFFLE) {
-                        val slot = Random.nextInt(++seenForShuffle)
-                        if (slot >= SHUFFLE_SAMPLE) continue
-                        slot
-                    } else -1
-
-                    val uri = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id).toString()
-                    val album = if (bucketCol >= 0) c.getString(bucketCol) ?: "Photos" else "Photos"
-                    val taken = if (takenCol >= 0) c.getLong(takenCol) else 0L
-                    val ms = if (taken > 0L) taken else c.getLong(modCol) * 1000L
-                    val photo = WidgetPhoto(
-                        luminaItemId = luminaItemId,
-                        uri = uri,
-                        albumName = album,
-                        takenAtMs = ms
-                    )
-                    when (layout) {
-                        PhotoWidgetLayout.SHUFFLE -> {
-                            if (special.size < SHUFFLE_SAMPLE) special += photo else special[shuffleSlot] = photo
-                        }
-                        PhotoWidgetLayout.MEMORIES -> {
-                            special += photo
-                            if (isOlderLocatedPhoto) olderLocatedPhotos++
-                        }
-                        else -> if (isFav) favorites.add(photo) else fallback.add(photo)
-                    }
-                }
-            }
-        }.onFailure { Log.w(TAG, "Unable to query widget photos", it) }
-        return WidgetPhotos(favorites, fallback, special, locations)
+    private fun decodePhotos(
+        context: Context,
+        pool: List<WidgetPhoto>,
+        limit: Int,
+        targetMax: Int
+    ): List<Pair<WidgetPhoto, Bitmap>> = buildList {
+        for (photo in pool) {
+            val bitmap = decodeWidgetBitmap(context, Uri.parse(photo.uri), targetMax) ?: continue
+            add(photo to bitmap)
+            if (size >= limit) break
+        }
     }
 
     private fun decodeWidgetBitmap(context: Context, uri: Uri, targetMax: Int): Bitmap? = runCatching {
@@ -466,34 +643,149 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
         }
     }.getOrNull()
 
+    private fun bindQuickButtons(
+        context: Context,
+        views: RemoteViews,
+        widgetId: Int,
+        showShuffle: Boolean,
+        showSettings: Boolean
+    ) {
+        setVisible(views, R.id.widget_next_btn, showShuffle)
+        if (showShuffle) {
+            views.setOnClickPendingIntent(
+                R.id.widget_next_btn,
+                nextPhotoPendingIntent(context, widgetId)
+            )
+        }
+        setVisible(views, R.id.widget_settings_btn, showSettings)
+        if (showSettings) {
+            views.setOnClickPendingIntent(
+                R.id.widget_settings_btn,
+                openSettingsPendingIntent(context, widgetId)
+            )
+        }
+    }
+
+    private fun buildTapIntent(
+        context: Context,
+        widgetId: Int,
+        slot: Int,
+        photo: WidgetPhoto?,
+        settings: PhotoWidgetSettings
+    ): PendingIntent = when (settings.tapAction) {
+        WidgetTapAction.OPEN_PHOTO -> openPhotoPendingIntent(context, widgetId, slot, photo)
+        WidgetTapAction.SHUFFLE_NEXT -> nextPhotoPendingIntent(context, widgetId)
+        WidgetTapAction.OPEN_SETTINGS -> openSettingsPendingIntent(context, widgetId)
+    }
+
+    private fun nextPhotoPendingIntent(context: Context, widgetId: Int): PendingIntent {
+        val nextIntent = Intent(context, javaClass).apply {
+            action = ACTION_NEXT_PHOTO
+            putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, widgetId)
+        }
+        return PendingIntent.getBroadcast(context, widgetId * 31 + 7, nextIntent, PENDING_FLAGS)
+    }
+
+    private fun openSettingsPendingIntent(context: Context, widgetId: Int): PendingIntent {
+        val intent = Intent(context, PhotoWidgetSettingsActivity::class.java).apply {
+            putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, widgetId)
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        return PendingIntent.getActivity(context, widgetId * 31 + 13, intent, PENDING_FLAGS)
+    }
+
+    private fun openPhotoPendingIntent(
+        context: Context,
+        widgetId: Int,
+        slot: Int,
+        photo: WidgetPhoto?
+    ): PendingIntent {
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            data = Uri.parse("lumina-widget://photo/$widgetId/$slot")
+            photo?.let { putExtra(EXTRA_WIDGET_OPEN_ITEM_ID, it.luminaItemId) }
+        }
+        return PendingIntent.getActivity(context, widgetId * 31 + slot + 1, intent, PENDING_FLAGS)
+    }
+
+    private fun emptyMessageFor(context: Context, settings: PhotoWidgetSettings): String = when (settings.source) {
+        WidgetPhotoSource.SELECTED_PHOTOS -> context.getString(R.string.widget_empty_selected_photos)
+        WidgetPhotoSource.SELECTED_ALBUMS -> context.getString(R.string.widget_empty_selected_albums)
+        WidgetPhotoSource.LOCATION_GROUPS -> context.getString(R.string.widget_empty_trips)
+        WidgetPhotoSource.FAVORITES_ONLY -> context.getString(R.string.widget_empty_favorites)
+        WidgetPhotoSource.DAY_GROUPS, WidgetPhotoSource.MEMORIES_MIX -> context.getString(R.string.widget_empty_memories)
+        else -> context.getString(R.string.widget_open_gallery)
+    }
+
+    private fun buildContentDescription(
+        context: Context,
+        photo: WidgetPhoto?,
+        caption: WidgetCaptionData?
+    ): String = when {
+        caption != null && caption.title.isNotBlank() -> caption.title
+        photo != null -> context.getString(
+            R.string.widget_photo_details,
+            photo.albumName,
+            widgetDateLabel(photo.takenAtMs)
+        )
+        else -> context.getString(R.string.widget_open_gallery)
+    }
+
+    private fun setVisible(views: RemoteViews, id: Int, visible: Boolean) {
+        views.setViewVisibility(id, if (visible) View.VISIBLE else View.GONE)
+    }
+
     companion object {
         const val EXTRA_WIDGET_OPEN_ITEM_ID = "com.luminagallery.drive.EXTRA_WIDGET_OPEN_ITEM_ID"
         private const val ACTION_NEXT_PHOTO = "com.luminagallery.drive.widget.ACTION_NEXT_PHOTO"
         private const val TAG = "LuminaPhotoWidget"
-        private const val DEFAULT_HEIGHT_DP = 140
-        private const val SHUFFLE_FRAMES = 10
-        private const val SHUFFLE_SAMPLE = 16
-        private const val RECENT_MEMORY_PHOTOS = 1500
+        private const val SLIDESHOW_FRAME_COUNT = 6
         private const val PENDING_FLAGS = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         private val updateMutex = Mutex()
+
+        internal fun isWidgetAdvanceDue(
+            interval: WidgetShuffleInterval,
+            lastAdvanceMs: Long,
+            nowMs: Long
+        ): Boolean {
+            if (interval == WidgetShuffleInterval.MANUAL || lastAdvanceMs <= 0L) return false
+            val targetMs = if (interval.isFastSlideshow) {
+                30L * 60L * 1000L
+            } else {
+                interval.intervalMs
+            }
+            return nowMs - lastAdvanceMs >= (targetMs - 30_000L)
+        }
+
+        fun allProviders(): List<LuminaPhotoWidgetProvider> = listOf(
+            LuminaPhotoWidgetProvider(),
+            LuminaPhotoShuffleWidgetProvider(),
+            LuminaPhotoCollageWidgetProvider(),
+            LuminaMemoriesWidgetProvider(),
+            LuminaPhotoStripWidgetProvider(),
+            LuminaFavoritesWidgetProvider(),
+            LuminaPhotoDateWidgetProvider()
+        )
+
+        fun providerForComponent(context: Context, component: ComponentName?): LuminaPhotoWidgetProvider? {
+            if (component == null) return null
+            return allProviders().firstOrNull { ComponentName(context, it.javaClass) == component }
+        }
+
+        suspend fun refreshAllWidgets(context: Context, advance: Boolean = false) {
+            val manager = AppWidgetManager.getInstance(context)
+            for (provider in allProviders()) {
+                val ids = manager.getAppWidgetIds(ComponentName(context, provider.javaClass))
+                if (ids.isEmpty()) continue
+                runCatching { provider.renderWidgets(context, manager, ids, advance = advance) }
+                    .onFailure { Log.w(TAG, "Unable to refresh ${provider.kind} widgets", it) }
+            }
+        }
 
         fun refreshOnExclusionsChanged(context: Context, exclusions: Flow<Set<String>>) {
             CoroutineScope(Dispatchers.IO).launch {
                 exclusions.distinctUntilChanged().drop(1).collect {
-                    val manager = AppWidgetManager.getInstance(context)
-                    val providers = listOf(
-                        LuminaPhotoWidgetProvider(),
-                        LuminaPhotoStripWidgetProvider(),
-                        LuminaPhotoCollageWidgetProvider(),
-                        LuminaPhotoShuffleWidgetProvider(),
-                        LuminaMemoriesWidgetProvider()
-                    )
-                    for (provider in providers) {
-                        val ids = manager.getAppWidgetIds(ComponentName(context, provider.javaClass))
-                        if (ids.isEmpty()) continue
-                        runCatching { provider.renderWidgets(context, manager, ids) }
-                            .onFailure { Log.w(TAG, "Unable to refresh excluded widget photos", it) }
-                    }
+                    refreshAllWidgets(context, advance = false)
                 }
             }
         }
@@ -501,17 +793,25 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
 }
 
 internal class LuminaPhotoStripWidgetProvider : LuminaPhotoWidgetProvider() {
-    override val layout = PhotoWidgetLayout.STRIP
+    override val kind = PhotoWidgetKind.STRIP
 }
 
 internal class LuminaPhotoCollageWidgetProvider : LuminaPhotoWidgetProvider() {
-    override val layout = PhotoWidgetLayout.COLLAGE
+    override val kind = PhotoWidgetKind.COLLAGE
 }
 
 internal class LuminaPhotoShuffleWidgetProvider : LuminaPhotoWidgetProvider() {
-    override val layout = PhotoWidgetLayout.SHUFFLE
+    override val kind = PhotoWidgetKind.RANDOM_SHUFFLE
 }
 
 internal class LuminaMemoriesWidgetProvider : LuminaPhotoWidgetProvider() {
-    override val layout = PhotoWidgetLayout.MEMORIES
+    override val kind = PhotoWidgetKind.MEMORIES
+}
+
+internal class LuminaFavoritesWidgetProvider : LuminaPhotoWidgetProvider() {
+    override val kind = PhotoWidgetKind.FAVORITES
+}
+
+internal class LuminaPhotoDateWidgetProvider : LuminaPhotoWidgetProvider() {
+    override val kind = PhotoWidgetKind.PHOTO_DATE
 }

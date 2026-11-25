@@ -98,6 +98,11 @@ import com.luminagallery.drive.domain.model.ThemeMode
 import com.luminagallery.drive.ui.components.BiometricLockHelper
 import com.luminagallery.drive.ui.components.FormatUtils
 import com.luminagallery.drive.ui.components.LuminaSnackbarHost
+import com.luminagallery.drive.widget.LuminaPhotoWidgetProvider
+import com.luminagallery.drive.widget.WidgetManagerSheetContent
+import com.luminagallery.drive.widget.listPlacedWidgets
+import kotlinx.coroutines.launch
+import androidx.compose.runtime.rememberCoroutineScope
 import java.util.Locale
 
 private enum class SettingsPickerSheet {
@@ -106,7 +111,8 @@ private enum class SettingsPickerSheet {
     GRID_DENSITY,
     ALBUM_SORT,
     CACHE_LIMIT,
-    EXTERNAL_GALLERY
+    EXTERNAL_GALLERY,
+    WIDGET_MANAGER
 }
 
 private val OneUiGroupShape = RoundedCornerShape(26.dp)
@@ -557,6 +563,38 @@ fun SettingsScreen(
                 }
             }
 
+            // 2B. HOME SCREEN WIDGETS
+            item(key = "section_widgets") {
+                val placedWidgets = remember(resumeTick) { listPlacedWidgets(context) }
+                val widgetScope = rememberCoroutineScope()
+                OneUiSettingsSection(title = "Home screen widgets") {
+                    OneUiActionRow(
+                        title = "Manage & customize widgets",
+                        subtitle = if (placedWidgets.isEmpty()) {
+                            "Add HyperOS glass photo frames, random shuffle & smart collages"
+                        } else {
+                            "${placedWidgets.size} active widget${if (placedWidgets.size == 1) "" else "s"} · tap to edit or add new ones"
+                        },
+                        subtitleAccent = placedWidgets.isNotEmpty(),
+                        showChevron = true,
+                        onClick = { activePicker = SettingsPickerSheet.WIDGET_MANAGER }
+                    )
+                    if (placedWidgets.isNotEmpty()) {
+                        OneUiDivider()
+                        OneUiActionRow(
+                            title = "Shuffle all widgets now",
+                            subtitle = "Immediately advance every active home screen widget",
+                            onClick = {
+                                widgetScope.launch {
+                                    LuminaPhotoWidgetProvider.refreshAllWidgets(context, advance = true)
+                                    viewModel.showMessage("Refreshed all home screen widgets")
+                                }
+                            }
+                        )
+                    }
+                }
+            }
+
             // 3. VIEWER & VIDEO PLAYBACK (Signature Samsung Gallery viewer controls)
             item(key = "section_viewer") {
                 OneUiSettingsSection(title = "Viewer & video playback") {
@@ -895,6 +933,13 @@ fun SettingsScreen(
                             viewModel.setExternalGallery(pkg, label)
                             activePicker = null
                         }
+                    )
+                }
+
+                SettingsPickerSheet.WIDGET_MANAGER -> {
+                    WidgetManagerSheetContent(
+                        refreshTick = resumeTick,
+                        onDismiss = { activePicker = null }
                     )
                 }
             }

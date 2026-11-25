@@ -146,6 +146,7 @@
         <!-- Home screen photo widgets -->
         <activity
             android:name=".widget.PhotoWidgetSettingsActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
             android:exported="true"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
@@ -207,6 +208,28 @@
             <meta-data
                 android:name="android.appwidget.provider"
                 android:resource="@xml/lumina_memories_widget_info" />
+        </receiver>
+        <receiver
+            android:name=".widget.LuminaFavoritesWidgetProvider"
+            android:exported="false"
+            android:label="@string/widget_favorites">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/lumina_favorites_widget_info" />
+        </receiver>
+        <receiver
+            android:name=".widget.LuminaPhotoDateWidgetProvider"
+            android:exported="false"
+            android:label="@string/widget_photo_date">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/lumina_photo_date_widget_info" />
         </receiver>
 
         <!-- FileProvider for temporary on-demand Android Share Sheet exports -->

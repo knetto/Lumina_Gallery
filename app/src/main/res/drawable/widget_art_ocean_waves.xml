@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="320dp"
+    android:height="320dp"
+    android:viewportWidth="320"
+    android:viewportHeight="320">
+    <!-- Mediterranean coastal azure sky -->
+    <path android:pathData="M0,0h320v320h-320z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="160"
+                android:endY="320"
+                android:startX="160"
+                android:startY="0"
+                android:type="linear">
+                <item android:color="#2E86DE" android:offset="0" />
+                <item android:color="#64B5F6" android:offset="0.38" />
+                <item android:color="#BEE9FF" android:offset="0.58" />
+                <item android:color="#0C6E8F" android:offset="0.62" />
+                <item android:color="#083B5C" android:offset="1" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <!-- Soft coastal clouds -->
+    <path
+        android:fillColor="#58FFFFFF"
+        android:pathData="M24,78 Q62,56 106,74 Q138,60 176,78 Q198,84 186,96 L28,96 Q12,92 24,78 Z" />
+    <path
+        android:fillColor="#44FFFFFF"
+        android:pathData="M196,112 Q232,96 270,110 Q298,104 320,118 L320,128 L194,128 Z" />
+    <!-- Sunlit cliffs -->
+    <path android:pathData="M0,188 L64,148 L128,170 L172,188 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="86"
+                android:endY="188"
+                android:startX="86"
+                android:startY="148"
+                android:type="linear">
+                <item android:color="#4A7A8C" android:offset="0" />
+                <item android:color="#244B5F" android:offset="1" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <!-- Turquoise cove shallows -->
+    <path android:pathData="M0,218 Q95,198 190,224 T320,212 L320,320 L0,320 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="160"
+                android:endY="320"
+                android:startX="160"
+                android:startY="206"
+                android:type="linear">
+                <item android:color="#19B5C9" android:offset="0" />
+                <item android:color="#0E6F8C" android:offset="0.58" />
+                <item android:color="#083852" android:offset="1" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <!-- Crisp sea foam wave -->
+    <path
+        android:fillColor="#72E6FAFF"
+        android:pathData="M0,248 Q84,234 166,252 T320,242 L320,256 Q234,266 154,256 T0,262 Z" />
+    <!-- Golden sand cove corner -->
+    <path android:pathData="M150,320 Q222,272 320,262 L320,320 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="240"
+                android:endY="320"
+                android:startX="240"
+                android:startY="262"
+                android:type="linear">
+                <item android:color="#F4D7A8" android:offset="0" />
+                <item android:color="#C99B66" android:offset="1" />
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>

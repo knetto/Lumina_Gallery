@@ -8,6 +8,7 @@ import coil3.SingletonImageLoader
 import com.luminagallery.drive.data.repository.sync.LuminaWorkerFactory
 import com.luminagallery.drive.data.repository.sync.MediaIndexScheduler
 import com.luminagallery.drive.widget.LuminaPhotoWidgetProvider
+import com.luminagallery.drive.widget.WidgetRefreshScheduler
 
 class LuminaApplication : Application(), Configuration.Provider, SingletonImageLoader.Factory {
 
@@ -18,6 +19,7 @@ class LuminaApplication : Application(), Configuration.Provider, SingletonImageL
         super.onCreate()
         container = AppContainer(this)
         runCatching { MediaIndexScheduler.ensureScheduled(this) }
+        runCatching { WidgetRefreshScheduler.syncSchedule(this) }
         LuminaPhotoWidgetProvider.refreshOnExclusionsChanged(this, container.galleryExtrasRepository.excludedAlbumIdsFlow)
     }
 
