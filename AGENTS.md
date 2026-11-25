@@ -1,4 +1,4 @@
-# Lumina Gallery — AI Project Guidelines
+ocat# Lumina Gallery — AI Project Guidelines
 
 ## Mandatory Commit & Phone Auto-Update Workflow
 
