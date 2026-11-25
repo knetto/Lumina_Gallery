@@ -33,6 +33,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -58,9 +59,13 @@ import com.luminagallery.drive.LocalGalleryImageLoader
 import com.luminagallery.drive.data.local.LocalMediaRepository
 import com.luminagallery.drive.data.remote.DriveConstants
 import com.luminagallery.drive.data.repository.LocalThumbnailRequest
+import com.luminagallery.drive.domain.model.AlbumCoverPreview
 import com.luminagallery.drive.domain.model.DriveFolder
 
 private val FolderCoverShape = RoundedCornerShape(18.dp)
+
+private val DriveFolder.hasCollageCover: Boolean
+    get() = !isLocal && subfolderCount > 0 && previewCovers.size >= 2
 
 /**
  * Samsung One UI Gallery album tile:
@@ -108,37 +113,33 @@ fun FolderCard(
     val hostView = LocalView.current
     val coverBoundsRef = remember { arrayOf<androidx.compose.ui.geometry.Rect?>(null) }
 
-    val singleCoverMorphInfo = remember(
-        folder.isLocal,
-        folder.isLocked,
-        folder.subfolderCount,
-        folder.previewCovers.size,
-        folder.coverItemId,
-        folder.coverThumbnailLink,
-        folder.coverIsVideo,
-        folder.coverSizeBytes,
-        isUnmeteredWifi
-    ) {
-        val isCollage = !folder.isLocal && folder.subfolderCount > 0 && folder.previewCovers.size >= 2
+    val coverMorphInfo = remember(folder, showDriveBadge, isUnmeteredWifi) {
         val coverId = folder.coverItemId
-        if (folder.isLocked || isCollage || coverId.isNullOrBlank()) {
-            null
-        } else {
-            AlbumCoverMorphInfo(
-                isLocal = folder.isLocal,
-                coverItemId = coverId,
-                coverThumbnailLink = folder.coverThumbnailLink,
-                coverIsVideo = folder.coverIsVideo,
-                coverSizeBytes = folder.coverSizeBytes,
+        when {
+            folder.isLocked -> null
+            folder.hasCollageCover -> AlbumCoverMorphInfo.Collage(
+                previews = folder.previewCovers.take(4),
+                showDriveBadge = showDriveBadge,
+                isUnmeteredWifi = isUnmeteredWifi
+            )
+            coverId.isNullOrBlank() -> null
+            else -> AlbumCoverMorphInfo.Single(
+                preview = AlbumCoverPreview(
+                    itemId = coverId,
+                    thumbnailLink = folder.coverThumbnailLink,
+                    isLocal = folder.isLocal,
+                    isVideo = folder.coverIsVideo,
+                    sizeBytes = folder.coverSizeBytes
+                ),
                 isUnmeteredWifi = isUnmeteredWifi
             )
         }
     }
+    SideEffect { originTracker.recordAlbumCover(folder.id, coverMorphInfo) }
 
     val wrappedOnClick = {
         val vw = hostView.width.toFloat()
         val vh = hostView.height.toFloat()
-        originTracker.recordAlbumCover(folder.id, singleCoverMorphInfo)
         coverBoundsRef[0]?.let { rect ->
             originTracker.recordBounds(folder.id, rect, vw, vh, markAsLast = true)
         }
@@ -172,7 +173,6 @@ fun FolderCard(
                 .onGloballyPositioned { coords ->
                     val rect = coords.boundsInRoot()
                     coverBoundsRef[0] = rect
-                    originTracker.recordAlbumCover(folder.id, singleCoverMorphInfo)
                     originTracker.recordBounds(
                         key = folder.id,
                         boundsInRoot = rect,
@@ -293,7 +293,7 @@ fun FolderCoverArtwork(
     }
 
     // Google Drive folders containing subfolders get Samsung's exact split-collage album group cover!
-    if (!folder.isLocal && folder.subfolderCount > 0 && folder.previewCovers.size >= 2) {
+    if (folder.hasCollageCover) {
         CollectionCoverArtwork(
             previewCovers = folder.previewCovers,
             hasDriveChild = showDriveBadge,

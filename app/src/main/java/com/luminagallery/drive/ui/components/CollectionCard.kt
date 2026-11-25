@@ -30,6 +30,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -94,21 +95,18 @@ fun CollectionCard(
     val hostView = LocalView.current
     val coverBoundsRef = remember { arrayOf<androidx.compose.ui.geometry.Rect?>(null) }
 
-    val singleCoverMorphInfo = remember(collection.previewCovers, isUnmeteredWifi) {
-        val single = collection.previewCovers.singleOrNull()
-        if (single == null) {
-            null
-        } else {
-            AlbumCoverMorphInfo(
-                isLocal = single.isLocal,
-                coverItemId = single.itemId,
-                coverThumbnailLink = single.thumbnailLink,
-                coverIsVideo = single.isVideo,
-                coverSizeBytes = single.sizeBytes,
-                isUnmeteredWifi = isUnmeteredWifi
+    val coverMorphInfo = remember(collection.previewCovers, collection.hasDriveChild, isUnmeteredWifi) {
+        when (collection.previewCovers.size) {
+            0 -> null
+            1 -> AlbumCoverMorphInfo.Single(collection.previewCovers.single(), isUnmeteredWifi)
+            else -> AlbumCoverMorphInfo.Collage(
+                collection.previewCovers.take(4),
+                collection.hasDriveChild,
+                isUnmeteredWifi
             )
         }
     }
+    SideEffect { originTracker.recordAlbumCover(collection.id, coverMorphInfo) }
 
     Column(
         modifier = modifier
@@ -118,7 +116,6 @@ fun CollectionCard(
                 interactionSource = interactionSource,
                 indication = null,
                 onClick = {
-                    originTracker.recordAlbumCover(collection.id, singleCoverMorphInfo)
                     coverBoundsRef[0]?.let { rect ->
                         originTracker.recordBounds(
                             key = collection.id,
@@ -138,7 +135,6 @@ fun CollectionCard(
                 .onGloballyPositioned { coords ->
                     val rect = coords.boundsInRoot()
                     coverBoundsRef[0] = rect
-                    originTracker.recordAlbumCover(collection.id, singleCoverMorphInfo)
                     originTracker.recordBounds(
                         key = collection.id,
                         boundsInRoot = rect,

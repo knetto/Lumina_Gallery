@@ -24,10 +24,12 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.State
@@ -38,6 +40,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.ui.AbsoluteAlignment
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
@@ -54,10 +57,12 @@ import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import coil3.ImageLoader
@@ -69,6 +74,7 @@ import coil3.size.Precision
 import com.luminagallery.drive.LocalGalleryImageLoader
 import com.luminagallery.drive.data.remote.DriveConstants
 import com.luminagallery.drive.data.repository.LocalThumbnailRequest
+import com.luminagallery.drive.domain.model.AlbumCoverPreview
 import com.luminagallery.drive.domain.model.MediaItem
 import kotlin.math.PI
 import kotlin.math.max
@@ -268,14 +274,18 @@ private data class MorphRoundRectShape(
 }
 
 @Immutable
-data class AlbumCoverMorphInfo(
-    val isLocal: Boolean,
-    val coverItemId: String,
-    val coverThumbnailLink: String?,
-    val coverIsVideo: Boolean,
-    val coverSizeBytes: Long,
-    val isUnmeteredWifi: Boolean
-)
+sealed interface AlbumCoverMorphInfo {
+    data class Single(
+        val preview: AlbumCoverPreview,
+        val isUnmeteredWifi: Boolean
+    ) : AlbumCoverMorphInfo
+
+    data class Collage(
+        val previews: List<AlbumCoverPreview>,
+        val showDriveBadge: Boolean,
+        val isUnmeteredWifi: Boolean
+    ) : AlbumCoverMorphInfo
+}
 
 /**
  * Tracks the exact normalized screen center (`TransformOrigin`), pixel bounding rects, and
@@ -302,7 +312,7 @@ class AlbumTransitionOriginTracker {
 
     private val originByKey = lruMap<TransformOrigin>(MAX_TRACKED_ENTRIES)
     private val boundsByKey = lruMap<Rect>(MAX_TRACKED_ENTRIES)
-    private val albumCoverByKey = lruMap<AlbumCoverMorphInfo>(MAX_TRACKED_ENTRIES)
+    private val albumCoverByKey = lruMap<MutableState<AlbumCoverMorphInfo?>>(MAX_TRACKED_ENTRIES)
     private val morphEnabledByEntryId = mutableStateMapOf<String, Boolean>()
 
     private var activeMorphOwnerEntryId: String? = null
@@ -343,15 +353,11 @@ class AlbumTransitionOriginTracker {
     }
 
     fun recordAlbumCover(key: String, info: AlbumCoverMorphInfo?) {
-        if (info == null) {
-            albumCoverByKey.remove(key)
-        } else {
-            albumCoverByKey[key] = info
-        }
+        albumCoverByKey.getOrPut(key) { mutableStateOf(null) }.value = info
     }
 
     fun albumCoverFor(key: String?): AlbumCoverMorphInfo? =
-        if (key != null) albumCoverByKey[key] else null
+        if (key != null) albumCoverByKey[key]?.value else null
 
     fun setMorphEnabled(entryId: String, enabled: Boolean) {
         if (morphEnabledByEntryId.size > 64) {
@@ -583,7 +589,7 @@ fun AnimatedVisibilityScope.HyperOsRectMorphFrame(
     }
 
     val pageDim = rememberPageDimFraction(originTracker)
-    val frameSizeRef = remember { floatArrayOf(0f, 0f) }
+    val frameSize = remember { mutableStateOf(IntSize.Zero) }
 
     Box(
         modifier = Modifier
@@ -611,6 +617,7 @@ fun AnimatedVisibilityScope.HyperOsRectMorphFrame(
         Box(
             modifier = Modifier
                 .fillMaxSize()
+                .onSizeChanged { frameSize.value = it }
                 .graphicsLayer {
                     if (!originTracker.isMorphEnabled(entryId)) return@graphicsLayer
                     val t = morphProgressState.value.coerceIn(0f, 1f)
@@ -618,8 +625,6 @@ fun AnimatedVisibilityScope.HyperOsRectMorphFrame(
 
                     val w = size.width
                     val h = size.height
-                    frameSizeRef[0] = w
-                    frameSizeRef[1] = h
                     if (w <= 1f || h <= 1f) return@graphicsLayer
 
                     val providedSource = sourceRectProvider?.invoke()?.takeIf {
@@ -650,24 +655,15 @@ fun AnimatedVisibilityScope.HyperOsRectMorphFrame(
                     )
 
                     val cur = lerp(src, dst, t)
-                    val curW = cur.width.coerceAtLeast(1f)
-                    val curH = cur.height.coerceAtLeast(1f)
-
                     // Uniform aspect-preserving scale so the photo / album fills cur with zero stretch
-                    val uniformScale = max(curW / src.width, curH / src.height).coerceIn(0.02f, 6f)
-
+                    val uniformScale = morphScale(src, cur)
                     // Exact local clip window that projects pixel-for-pixel onto `cur`
-                    val localW = (curW / uniformScale).coerceIn(1f, src.width)
-                    val localH = (curH / uniformScale).coerceIn(1f, src.height)
-                    val localLeft = src.left + (src.width - localW) * 0.5f
-                    val localTop = src.top + (src.height - localH) * cropBias
-                    val localCx = localLeft + localW * 0.5f
-                    val localCy = localTop + localH * 0.5f
+                    val localClip = morphClipRect(src, cur, uniformScale, cropBias)
 
                     scaleX = uniformScale
                     scaleY = uniformScale
-                    translationX = cur.center.x - w * 0.5f - (localCx - w * 0.5f) * uniformScale
-                    translationY = cur.center.y - h * 0.5f - (localCy - h * 0.5f) * uniformScale
+                    translationX = cur.center.x - w * 0.5f - (localClip.center.x - w * 0.5f) * uniformScale
+                    translationY = cur.center.y - h * 0.5f - (localClip.center.y - h * 0.5f) * uniformScale
 
                     val bell = sin(t * PI.toFloat()).coerceIn(0f, 1f)
                     val visualCornerPx = targetCornerPx * t + bumpCornerPx * bell
@@ -679,17 +675,16 @@ fun AnimatedVisibilityScope.HyperOsRectMorphFrame(
 
                     clip = true
                     shape = MorphRoundRectShape(
-                        left = localLeft,
-                        top = localTop,
-                        right = localLeft + localW,
-                        bottom = localTop + localH,
+                        left = localClip.left,
+                        top = localClip.top,
+                        right = localClip.right,
+                        bottom = localClip.bottom,
                         radius = localRadius
                     )
 
                     // Keep the morphing photo or album-with-cover 100% solid throughout the flight
                     // (since the source slot is vacated and the visuals match pixel-for-pixel!).
-                    // Only crossfade softly at the very end when morphing without a cover overlay
-                    // (e.g. Collection collages) or when the target tile is scrolled off-screen.
+                    // Fade when there is no cover to hand off to or the target is scrolled off-screen.
                     alpha = when {
                         !hasTarget -> (1f - t).coerceIn(0f, 1f)
                         canSolidlyHandOff -> 1f
@@ -699,20 +694,78 @@ fun AnimatedVisibilityScope.HyperOsRectMorphFrame(
         ) {
             content(isMorphing)
 
-            if (isMorphing && albumCoverInfo != null) {
-                AlbumCoverMorphOverlay(
-                    coverInfo = albumCoverInfo,
-                    morphProgressState = morphProgressState,
-                    targetKey = targetKey,
-                    originTracker = originTracker,
-                    fallbackToLastBounds = fallbackToLastBounds,
-                    frameSizeRef = frameSizeRef,
-                    modifier = Modifier.align(Alignment.TopCenter)
-                )
+            if (isMorphing) {
+                when (albumCoverInfo) {
+                    is AlbumCoverMorphInfo.Single -> AlbumCoverMorphOverlay(
+                        coverInfo = albumCoverInfo,
+                        morphProgressState = morphProgressState,
+                        targetKey = targetKey,
+                        originTracker = originTracker,
+                        fallbackToLastBounds = fallbackToLastBounds,
+                        frameSize = frameSize,
+                        modifier = Modifier.align(Alignment.TopCenter)
+                    )
+                    is AlbumCoverMorphInfo.Collage -> {
+                        val target = originTracker.boundsFor(targetKey, fallbackToLastBounds)
+                        if (target != null && target.width >= 16f && target.height >= 16f) {
+                            CollectionCoverArtwork(
+                                previewCovers = albumCoverInfo.previews,
+                                hasDriveChild = albumCoverInfo.showDriveBadge,
+                                isUnmeteredWifi = albumCoverInfo.isUnmeteredWifi,
+                                modifier = Modifier
+                                    .align(AbsoluteAlignment.TopLeft)
+                                    .size(with(density) { target.width.toDp() })
+                                    .graphicsLayer {
+                                        val w = frameSize.value.width.toFloat()
+                                        val h = frameSize.value.height.toFloat()
+                                        if (w <= 1f || h <= 1f || size.width <= 0f || size.height <= 0f) {
+                                            alpha = 0f
+                                            return@graphicsLayer
+                                        }
+                                        val t = morphProgressState.value.coerceIn(0f, 1f)
+                                        alpha = albumCoverAlpha(t)
+                                        if (alpha <= 0f) return@graphicsLayer
+
+                                        val src = Rect(0f, 0f, w, h)
+                                        val dst = originTracker.boundsFor(targetKey, fallbackToLastBounds) ?: target
+                                        val current = lerp(src, dst, t)
+                                        val clip = morphClipRect(
+                                            src, current, morphScale(src, current), verticalCropBias.coerceIn(0f, 1f)
+                                        )
+                                        // Draw the square at tile size, then scale it into the clip.
+                                        // The gaps and badge land at their normal size as the morph ends.
+                                        val scale = max(clip.width / size.width, clip.height / size.height)
+                                        transformOrigin = TransformOrigin(0f, 0f)
+                                        scaleX = scale
+                                        scaleY = scale
+                                        translationX = clip.center.x - size.width * scale * 0.5f
+                                        translationY = clip.center.y - size.height * scale * 0.5f
+                                    }
+                            )
+                        }
+                    }
+                    null -> Unit
+                }
             }
         }
     }
 }
+
+private fun morphScale(source: Rect, current: Rect): Float =
+    max(
+        current.width.coerceAtLeast(1f) / source.width,
+        current.height.coerceAtLeast(1f) / source.height
+    ).coerceIn(0.02f, 6f)
+
+private fun morphClipRect(source: Rect, current: Rect, scale: Float, cropBias: Float): Rect {
+    val width = (current.width.coerceAtLeast(1f) / scale).coerceIn(1f, source.width)
+    val height = (current.height.coerceAtLeast(1f) / scale).coerceIn(1f, source.height)
+    val left = source.left + (source.width - width) * 0.5f
+    val top = source.top + (source.height - height) * cropBias
+    return Rect(left, top, left + width, top + height)
+}
+
+private fun albumCoverAlpha(progress: Float): Float = ((progress - 0.28f) / 0.56f).coerceIn(0f, 1f)
 
 /**
  * Seamless album cover crossfade drawn strictly inside [HyperOsRectMorphFrame] while an album is
@@ -721,44 +774,45 @@ fun AnimatedVisibilityScope.HyperOsRectMorphFrame(
  */
 @Composable
 private fun AlbumCoverMorphOverlay(
-    coverInfo: AlbumCoverMorphInfo,
+    coverInfo: AlbumCoverMorphInfo.Single,
     morphProgressState: State<Float>,
     targetKey: String?,
     originTracker: AlbumTransitionOriginTracker,
     fallbackToLastBounds: Boolean,
-    frameSizeRef: FloatArray,
+    frameSize: State<IntSize>,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val imageLoader = LocalGalleryImageLoader.current
     val coverRequest = remember(coverInfo) {
-        if (coverInfo.isLocal) {
-            val uriStr = coverInfo.coverThumbnailLink ?: return@remember null
+        val preview = coverInfo.preview
+        if (preview.isLocal) {
+            val uriStr = preview.thumbnailLink ?: return@remember null
             ImageRequest.Builder(context)
-                .data(LocalThumbnailRequest(uriStr, coverInfo.coverIsVideo))
+                .data(LocalThumbnailRequest(uriStr, preview.isVideo))
                 .size(420)
                 .precision(Precision.INEXACT)
                 .allowRgb565(true)
-                .memoryCacheKey(DriveConstants.stableThumbMemoryKey(coverInfo.coverItemId))
-                .placeholderMemoryCacheKey(DriveConstants.stableThumbMemoryKey(coverInfo.coverItemId))
+                .memoryCacheKey(DriveConstants.stableThumbMemoryKey(preview.itemId))
+                .placeholderMemoryCacheKey(DriveConstants.stableThumbMemoryKey(preview.itemId))
                 .crossfade(false)
                 .build()
         } else {
             val url = DriveConstants.buildThumbnailUrl(
-                thumbnailLink = coverInfo.coverThumbnailLink,
-                fileId = coverInfo.coverItemId,
+                thumbnailLink = preview.thumbnailLink,
+                fileId = preview.itemId,
                 isUnmeteredWifi = coverInfo.isUnmeteredWifi,
-                isVideo = coverInfo.coverIsVideo,
-                sizeBytes = coverInfo.coverSizeBytes
+                isVideo = preview.isVideo,
+                sizeBytes = preview.sizeBytes
             ) ?: return@remember null
             ImageRequest.Builder(context)
                 .data(url)
                 .size(420)
                 .precision(Precision.INEXACT)
                 .allowRgb565(true)
-                .memoryCacheKey(DriveConstants.stableThumbMemoryKey(coverInfo.coverItemId))
-                .placeholderMemoryCacheKey(DriveConstants.stableThumbMemoryKey(coverInfo.coverItemId))
-                .diskCacheKey(DriveConstants.thumbnailCacheKey(coverInfo.coverItemId, coverInfo.isUnmeteredWifi))
+                .memoryCacheKey(DriveConstants.stableThumbMemoryKey(preview.itemId))
+                .placeholderMemoryCacheKey(DriveConstants.stableThumbMemoryKey(preview.itemId))
+                .diskCacheKey(DriveConstants.thumbnailCacheKey(preview.itemId, coverInfo.isUnmeteredWifi))
                 .crossfade(false)
                 .build()
         }
@@ -772,7 +826,7 @@ private fun AlbumCoverMorphOverlay(
                 val t = morphProgressState.value.coerceIn(0f, 1f)
                 // 100% opaque right at the card (t >= 0.84), dissolving cleanly into the album grid
                 // between t = 0.84 and t = 0.28 so the transition feels like a single living card.
-                val coverAlpha = ((t - 0.28f) / 0.56f).coerceIn(0f, 1f)
+                val coverAlpha = albumCoverAlpha(t)
                 alpha = coverAlpha
                 if (coverAlpha <= 0.002f) return@graphicsLayer
 
@@ -781,8 +835,8 @@ private fun AlbumCoverMorphOverlay(
                 val target = originTracker.boundsFor(targetKey, fallbackToLast = fallbackToLastBounds)
                 val coverSide = size.width
                 if (target != null && coverSide > 1f) {
-                    val parentW = frameSizeRef[0].takeIf { it > 1f } ?: coverSide
-                    val parentH = frameSizeRef[1].takeIf { it > 1f } ?: (coverSide * 2.25f)
+                    val parentW = frameSize.value.width.toFloat().takeIf { it > 1f } ?: coverSide
+                    val parentH = frameSize.value.height.toFloat().takeIf { it > 1f } ?: (coverSide * 2.25f)
                     val curW = (parentW + (target.width - parentW) * t).coerceAtLeast(1f)
                     val curH = (parentH + (target.height - parentH) * t).coerceAtLeast(1f)
                     val uScale = max(curW / parentW, curH / parentH).coerceIn(0.02f, 6f)
