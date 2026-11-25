@@ -29,6 +29,11 @@ internal data class WidgetResolvedSelection(
     val totalChoices: Int = 1
 )
 
+internal data class WidgetFrameResolution(
+    val frames: List<WidgetResolvedSelection>,
+    val privacyVerified: Boolean
+)
+
 /**
  * Privacy-safe MediaStore + Room query layer for all Lumina Home Screen widgets and the
  * Widget Configuration photo/album pickers. Strictly excludes hidden & locked albums.
@@ -157,26 +162,36 @@ internal object WidgetMediaRepository {
     /**
      * Loads exact photos currently shown on a widget by their Lumina item IDs,
      * still enforcing hidden/locked album privacy exclusions.
+     * Returns null if privacy exclusions could not be verified (e.g. transient boot/DB failure).
      */
-    suspend fun loadPhotosByIds(
+    suspend fun loadVerifiedPhotosByIds(
         context: Context,
         photoIds: List<String>
-    ): List<WidgetPhoto> = withContext(Dispatchers.IO) {
+    ): List<WidgetPhoto>? = withContext(Dispatchers.IO) {
         if (photoIds.isEmpty()) return@withContext emptyList()
         val privacy = loadPrivacyContext(
             context = context,
             needFavorites = false,
             needLocations = false,
             needCollections = false
-        ) ?: return@withContext emptyList()
+        ) ?: return@withContext null
         querySpecificPhotos(context, privacy, photoIds)
     }
 
     /**
-     * Resolves a batch of [frameCount] frames for rendering (1 frame for static/scheduled updates,
-     * or up to 6 frames for live fast ViewFlipper slideshows!).
+     * Loads exact photos currently shown on a widget by their Lumina item IDs,
+     * still enforcing hidden/locked album privacy exclusions.
      */
-    suspend fun resolveWidgetFrames(
+    suspend fun loadPhotosByIds(
+        context: Context,
+        photoIds: List<String>
+    ): List<WidgetPhoto> = loadVerifiedPhotosByIds(context, photoIds).orEmpty()
+
+    /**
+     * Resolves widget frames while reporting whether privacy exclusions were verified so callers
+     * can distinguish a truly empty source from a transient boot/storage/DB hiccup.
+     */
+    suspend fun resolveWidgetFramesChecked(
         context: Context,
         widgetId: Int,
         kind: PhotoWidgetKind,
@@ -184,7 +199,7 @@ internal object WidgetMediaRepository {
         slotsPerFrame: Int,
         frameCount: Int,
         advance: Boolean
-    ): List<WidgetResolvedSelection> = withContext(Dispatchers.IO) {
+    ): WidgetFrameResolution = withContext(Dispatchers.IO) {
         val needFavs = settings.source == WidgetPhotoSource.FAVORITES_ONLY ||
             settings.source == WidgetPhotoSource.FAVORITES_AND_RECENT
         val needLocations = settings.source == WidgetPhotoSource.SMART_GROUPS ||
@@ -194,14 +209,59 @@ internal object WidgetMediaRepository {
             settings.selectedAlbumIds.isNotEmpty()
 
         val privacy = loadPrivacyContext(context, needFavs, needLocations, needCollections)
-            ?: return@withContext emptyList()
+            ?: return@withContext WidgetFrameResolution(emptyList(), privacyVerified = false)
 
+        val frames = resolveWidgetFramesWithPrivacy(
+            context = context,
+            widgetId = widgetId,
+            kind = kind,
+            settings = settings,
+            privacy = privacy,
+            slotsPerFrame = slotsPerFrame,
+            frameCount = frameCount,
+            advance = advance
+        )
+        WidgetFrameResolution(frames = frames, privacyVerified = true)
+    }
+
+    /**
+     * Resolves a batch of [frameCount] frames for rendering (1 frame for static/scheduled updates,
+     * or up to 4 frames for live fast ViewFlipper slideshows!).
+     */
+    suspend fun resolveWidgetFrames(
+        context: Context,
+        widgetId: Int,
+        kind: PhotoWidgetKind,
+        settings: PhotoWidgetSettings,
+        slotsPerFrame: Int,
+        frameCount: Int,
+        advance: Boolean
+    ): List<WidgetResolvedSelection> = resolveWidgetFramesChecked(
+        context = context,
+        widgetId = widgetId,
+        kind = kind,
+        settings = settings,
+        slotsPerFrame = slotsPerFrame,
+        frameCount = frameCount,
+        advance = advance
+    ).frames
+
+    private fun resolveWidgetFramesWithPrivacy(
+        context: Context,
+        widgetId: Int,
+        kind: PhotoWidgetKind,
+        settings: PhotoWidgetSettings,
+        privacy: PrivacyContext,
+        slotsPerFrame: Int,
+        frameCount: Int,
+        advance: Boolean
+    ): List<WidgetResolvedSelection> {
         val prefs = context.getSharedPreferences(PHOTO_WIDGET_PREFS, Context.MODE_PRIVATE)
         val indexKey = "idx_$widgetId"
         val prevIdx = prefs.getInt(indexKey, -1)
         val prevGroupKey = prefs.getString("group_key_$widgetId", null)
 
-        when (settings.source) {
+        return when (settings.source) {
             WidgetPhotoSource.SMART_GROUPS,
             WidgetPhotoSource.LOCATION_GROUPS,
             WidgetPhotoSource.DAY_GROUPS,
@@ -210,9 +270,9 @@ internal object WidgetMediaRepository {
                 if (groups.isEmpty()) {
                     // Graceful fallback to random phone photos if no groups exist yet (e.g. empty locations)
                     if (settings.source == WidgetPhotoSource.LOCATION_GROUPS) {
-                        return@withContext emptyList()
+                        return emptyList()
                     }
-                    return@withContext resolveFlatPoolFrames(
+                    return resolveFlatPoolFrames(
                         context = context,
                         widgetId = widgetId,
                         kind = kind,
@@ -264,7 +324,7 @@ internal object WidgetMediaRepository {
                 val albumPhotos = queryAlbumPhotos(context, privacy, resolvedBuckets, settings.excludeScreenshots)
                 if (albumPhotos.isEmpty()) {
                     // If user hasn't picked albums yet, show favorites/recent gracefully
-                    return@withContext if (settings.selectedAlbumIds.isEmpty()) {
+                    return if (settings.selectedAlbumIds.isEmpty()) {
                         resolveFlatPoolFrames(
                             context, widgetId, kind,
                             settings.copy(source = WidgetPhotoSource.FAVORITES_AND_RECENT),
@@ -291,7 +351,7 @@ internal object WidgetMediaRepository {
                                 }
                             }
                         )
-                        return@withContext picked.map { group ->
+                        return picked.map { group ->
                             val chosen = pickDiversePhotosForGroup(
                                 context = context,
                                 groupPhotos = group.photos,
@@ -394,7 +454,7 @@ internal object WidgetMediaRepository {
             captionFor = { chosen ->
                 val first = chosen.firstOrNull() ?: return@buildFramesFromFlatList null
                 val title = when {
-                    kind == PhotoWidgetKind.FAVORITES -> "Favorites"
+                    settings.source == WidgetPhotoSource.FAVORITES_ONLY -> "Favorites"
                     settings.source == WidgetPhotoSource.SELECTED_PHOTOS && chosen.size > 1 -> "Selected Photos"
                     else -> first.albumName.ifBlank { "Photos" }
                 }
@@ -422,7 +482,7 @@ internal object WidgetMediaRepository {
                 groupPhotos.take(slotsPerFrame)
             }
         }
-        val allowStepDown = settings.collageLayout == WidgetCollageLayout.AUTO && kind != PhotoWidgetKind.STRIP
+        val allowStepDown = settings.collageLayout == WidgetCollageLayout.AUTO
         return WidgetPhotoDiversity.selectVisuallyDistinctPhotos(
             context = context,
             candidates = groupPhotos,
@@ -494,7 +554,7 @@ internal object WidgetMediaRepository {
                     candidates = window,
                     desiredMax = step,
                     minSlots = minOf(2, window.size),
-                    allowStepDownOnDuplicates = settings.collageLayout == WidgetCollageLayout.AUTO && kind != PhotoWidgetKind.STRIP,
+                    allowStepDownOnDuplicates = settings.collageLayout == WidgetCollageLayout.AUTO,
                     randomize = shuffle
                 )
             } else {

@@ -46,6 +46,7 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import coil3.request.allowRgb565
@@ -75,7 +76,8 @@ fun CollectionCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     isSelectionMode: Boolean = false,
-    isSelected: Boolean = false
+    isSelected: Boolean = false,
+    compact: Boolean = false
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
@@ -163,11 +165,15 @@ fun CollectionCard(
             )
         }
 
-        Spacer(Modifier.height(6.dp))
+        Spacer(Modifier.height(if (compact) 4.dp else 6.dp))
 
         Text(
             text = collection.name,
-            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Medium),
+            style = if (compact) {
+                MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium, fontSize = 11.5.sp)
+            } else {
+                MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Medium)
+            },
             color = MaterialTheme.colorScheme.onSurface,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -177,7 +183,11 @@ fun CollectionCard(
         if (collection.totalMediaCount > 0) {
             Text(
                 text = collection.totalMediaCount.toString(),
-                style = MaterialTheme.typography.bodySmall,
+                style = if (compact) {
+                    MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp)
+                } else {
+                    MaterialTheme.typography.bodySmall
+                },
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 modifier = Modifier.padding(horizontal = 2.dp, vertical = 1.dp)

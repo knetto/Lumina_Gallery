@@ -577,6 +577,8 @@ fun HomeScreen(
                                     PinchZoomGridContainer(
                                         currentColumns = uiState.gridColumns,
                                         onColumnsChange = viewModel::setGridColumns,
+                                        minColumns = 1,
+                                        maxColumns = 6,
                                         modifier = Modifier.fillMaxSize()
                                     ) {
                                         val hasPartialBanner = uiState.hasPartialMediaPermission
@@ -747,121 +749,131 @@ fun HomeScreen(
                                             onOpenSettingsClick = ::openAppSettings
                                         )
                                     } else {
-                                        DraggableAlbumGrid(
-                                            items = uiState.unifiedAlbumGridItems,
-                                            isUnmeteredWifi = uiState.highResThumbnailsAllowed,
-                                            selectedIds = uiState.selectedAlbumIds,
-                                            forceSelectionMode = uiState.forceAlbumSelectionMode,
-                                            dragReorderEnabled = uiState.albumsFilter == AlbumsTabFilter.ALL,
-                                            showCloudBadges = uiState.showCloudBadges,
-                                            gridState = albumsGridState,
-                                            contentPadding = PaddingValues(
-                                                start = 16.dp,
-                                                end = 16.dp,
-                                                top = 6.dp,
-                                                bottom = if (uiState.isAlbumSelectionMode) 96.dp else 18.dp
-                                            ),
-                                            headerContent = when {
-                                                !uiState.hasLocalMediaPermission -> {
-                                                    {
-                                                        CompactOneUiBanner(
-                                                            icon = Icons.Rounded.PhotoLibrary,
-                                                            title = "Show your phone's photos & albums",
-                                                            subtitle = "Tap to allow Camera, Screenshots, Downloads & RAW",
-                                                            onClick = {
-                                                                mediaPermissionLauncher.launch(
-                                                                    appContainer.localMediaRepository.requiredMediaPermissions()
-                                                                )
-                                                            }
-                                                        )
-                                                    }
-                                                }
-                                                uiState.hasPartialMediaPermission -> {
-                                                    {
-                                                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        PinchZoomGridContainer(
+                                            currentColumns = uiState.albumGridColumns,
+                                            onColumnsChange = viewModel::setAlbumGridColumns,
+                                            minColumns = 2,
+                                            maxColumns = 5,
+                                            columnLabel = { cols -> "$cols albums / row" },
+                                            modifier = Modifier.fillMaxSize()
+                                        ) {
+                                            DraggableAlbumGrid(
+                                                items = uiState.unifiedAlbumGridItems,
+                                                isUnmeteredWifi = uiState.highResThumbnailsAllowed,
+                                                selectedIds = uiState.selectedAlbumIds,
+                                                columns = uiState.albumGridColumns,
+                                                forceSelectionMode = uiState.forceAlbumSelectionMode,
+                                                dragReorderEnabled = uiState.albumsFilter == AlbumsTabFilter.ALL,
+                                                showCloudBadges = uiState.showCloudBadges,
+                                                gridState = albumsGridState,
+                                                contentPadding = PaddingValues(
+                                                    start = 16.dp,
+                                                    end = 16.dp,
+                                                    top = 6.dp,
+                                                    bottom = if (uiState.isAlbumSelectionMode) 96.dp else 18.dp
+                                                ),
+                                                headerContent = when {
+                                                    !uiState.hasLocalMediaPermission -> {
+                                                        {
                                                             CompactOneUiBanner(
                                                                 icon = Icons.Rounded.PhotoLibrary,
-                                                                title = "Limited photo access",
-                                                                subtitle = "Tap to select more photos or allow all",
+                                                                title = "Show your phone's photos & albums",
+                                                                subtitle = "Tap to allow Camera, Screenshots, Downloads & RAW",
                                                                 onClick = {
                                                                     mediaPermissionLauncher.launch(
                                                                         appContainer.localMediaRepository.requiredMediaPermissions()
                                                                     )
                                                                 }
                                                             )
-                                                            if (uiState.albumsFilter != AlbumsTabFilter.ALL || uiState.albumSortMode != AlbumSortMode.CUSTOM) {
-                                                                Row(
-                                                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                                                    verticalAlignment = Alignment.CenterVertically
-                                                                ) {
-                                                                    if (uiState.albumsFilter != AlbumsTabFilter.ALL) {
-                                                                        AlbumsActiveCapsule(
-                                                                            icon = Icons.Outlined.FilterAlt,
-                                                                            label = uiState.albumsFilter.label,
-                                                                            onClick = { showAlbumsFilterDialog = true },
-                                                                            onClear = { viewModel.setAlbumsFilter(AlbumsTabFilter.ALL) }
+                                                        }
+                                                    }
+                                                    uiState.hasPartialMediaPermission -> {
+                                                        {
+                                                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                                CompactOneUiBanner(
+                                                                    icon = Icons.Rounded.PhotoLibrary,
+                                                                    title = "Limited photo access",
+                                                                    subtitle = "Tap to select more photos or allow all",
+                                                                    onClick = {
+                                                                        mediaPermissionLauncher.launch(
+                                                                            appContainer.localMediaRepository.requiredMediaPermissions()
                                                                         )
                                                                     }
-                                                                    if (uiState.albumSortMode != AlbumSortMode.CUSTOM) {
-                                                                        AlbumsActiveCapsule(
-                                                                            icon = Icons.AutoMirrored.Rounded.Sort,
-                                                                            label = uiState.albumSortMode.label,
-                                                                            onClick = { showSortDialog = true },
-                                                                            onClear = { viewModel.setAlbumSortMode(AlbumSortMode.CUSTOM) }
-                                                                        )
+                                                                )
+                                                                if (uiState.albumsFilter != AlbumsTabFilter.ALL || uiState.albumSortMode != AlbumSortMode.CUSTOM) {
+                                                                    Row(
+                                                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                                        verticalAlignment = Alignment.CenterVertically
+                                                                    ) {
+                                                                        if (uiState.albumsFilter != AlbumsTabFilter.ALL) {
+                                                                            AlbumsActiveCapsule(
+                                                                                icon = Icons.Outlined.FilterAlt,
+                                                                                label = uiState.albumsFilter.label,
+                                                                                onClick = { showAlbumsFilterDialog = true },
+                                                                                onClear = { viewModel.setAlbumsFilter(AlbumsTabFilter.ALL) }
+                                                                            )
+                                                                        }
+                                                                        if (uiState.albumSortMode != AlbumSortMode.CUSTOM) {
+                                                                            AlbumsActiveCapsule(
+                                                                                icon = Icons.AutoMirrored.Rounded.Sort,
+                                                                                label = uiState.albumSortMode.label,
+                                                                                onClick = { showSortDialog = true },
+                                                                                onClear = { viewModel.setAlbumSortMode(AlbumSortMode.CUSTOM) }
+                                                                            )
+                                                                        }
                                                                     }
                                                                 }
                                                             }
                                                         }
                                                     }
-                                                }
-                                                uiState.albumsFilter != AlbumsTabFilter.ALL || uiState.albumSortMode != AlbumSortMode.CUSTOM -> {
-                                                    {
-                                                        Row(
-                                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                                            verticalAlignment = Alignment.CenterVertically,
-                                                            modifier = Modifier.padding(bottom = 4.dp)
-                                                        ) {
-                                                            if (uiState.albumsFilter != AlbumsTabFilter.ALL) {
-                                                                AlbumsActiveCapsule(
-                                                                    icon = Icons.Outlined.FilterAlt,
-                                                                    label = uiState.albumsFilter.label,
-                                                                    onClick = { showAlbumsFilterDialog = true },
-                                                                    onClear = { viewModel.setAlbumsFilter(AlbumsTabFilter.ALL) }
-                                                                )
-                                                            }
-                                                            if (uiState.albumSortMode != AlbumSortMode.CUSTOM) {
-                                                                AlbumsActiveCapsule(
-                                                                    icon = Icons.AutoMirrored.Rounded.Sort,
-                                                                    label = uiState.albumSortMode.label,
-                                                                    onClick = { showSortDialog = true },
-                                                                    onClear = { viewModel.setAlbumSortMode(AlbumSortMode.CUSTOM) }
-                                                                )
+                                                    uiState.albumsFilter != AlbumsTabFilter.ALL || uiState.albumSortMode != AlbumSortMode.CUSTOM -> {
+                                                        {
+                                                            Row(
+                                                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                                verticalAlignment = Alignment.CenterVertically,
+                                                                modifier = Modifier.padding(bottom = 4.dp)
+                                                            ) {
+                                                                if (uiState.albumsFilter != AlbumsTabFilter.ALL) {
+                                                                    AlbumsActiveCapsule(
+                                                                        icon = Icons.Outlined.FilterAlt,
+                                                                        label = uiState.albumsFilter.label,
+                                                                        onClick = { showAlbumsFilterDialog = true },
+                                                                        onClear = { viewModel.setAlbumsFilter(AlbumsTabFilter.ALL) }
+                                                                    )
+                                                                }
+                                                                if (uiState.albumSortMode != AlbumSortMode.CUSTOM) {
+                                                                    AlbumsActiveCapsule(
+                                                                        icon = Icons.AutoMirrored.Rounded.Sort,
+                                                                        label = uiState.albumSortMode.label,
+                                                                        onClick = { showSortDialog = true },
+                                                                        onClear = { viewModel.setAlbumSortMode(AlbumSortMode.CUSTOM) }
+                                                                    )
+                                                                }
                                                             }
                                                         }
                                                     }
-                                                }
-                                                else -> null
-                                            },
-                                            onItemClick = { clicked ->
-                                                when (clicked) {
-                                                    is AlbumGridItem.AlbumEntry ->
-                                                        onOpenFolder(clicked.folder.id, clicked.folder.name)
-                                                    is AlbumGridItem.CollectionEntry ->
-                                                        onOpenCollection(clicked.id, clicked.name)
-                                                }
-                                            },
-                                            onToggleSelect = viewModel::toggleAlbumSelection,
-                                            onReorderCommitted = viewModel::saveRootAlbumOrder,
-                                            onDropToGroup = { dragged, target ->
-                                                if (target is AlbumGridItem.CollectionEntry) {
-                                                    viewModel.moveItemIntoCollection(dragged, target.id)
-                                                } else {
-                                                    pendingGroupPair = dragged to target
-                                                }
-                                            },
-                                            modifier = Modifier.fillMaxSize()
-                                        )
+                                                    else -> null
+                                                },
+                                                onItemClick = { clicked ->
+                                                    when (clicked) {
+                                                        is AlbumGridItem.AlbumEntry ->
+                                                            onOpenFolder(clicked.folder.id, clicked.folder.name)
+                                                        is AlbumGridItem.CollectionEntry ->
+                                                            onOpenCollection(clicked.id, clicked.name)
+                                                    }
+                                                },
+                                                onToggleSelect = viewModel::toggleAlbumSelection,
+                                                onReorderCommitted = viewModel::saveRootAlbumOrder,
+                                                onDropToGroup = { dragged, target ->
+                                                    if (target is AlbumGridItem.CollectionEntry) {
+                                                        viewModel.moveItemIntoCollection(dragged, target.id)
+                                                    } else {
+                                                        pendingGroupPair = dragged to target
+                                                    }
+                                                },
+                                                modifier = Modifier.fillMaxSize()
+                                            )
+                                        }
                                     }
                                 }
                             }

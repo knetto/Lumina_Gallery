@@ -1,21 +1,29 @@
 package com.luminagallery.drive.widget
 
 import android.appwidget.AppWidgetManager
+import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import android.util.Log
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import androidx.work.workDataOf
 import java.time.LocalDate
 import java.util.concurrent.TimeUnit
 
 /**
- * Battery-friendly WorkManager worker that advances scheduled Lumina widgets when their
- * configured shuffle interval elapses, refreshes ViewFlipper slideshow batches periodically,
- * and keeps live Date badges accurate across midnight.
+ * Battery-friendly WorkManager worker that:
+ *  - advances scheduled Lumina widgets when their configured shuffle interval elapses,
+ *  - refreshes ViewFlipper slideshow batches periodically,
+ *  - keeps live Date badges accurate across midnight, and
+ *  - sends a lightweight non-advancing keep-alive push so OEM launchers (e.g. Xiaomi HyperOS)
+ *    never leave a widget blank/invisible after purging RemoteViews bitmaps from memory.
  */
 class LuminaWidgetRefreshWorker(
     appContext: Context,
@@ -28,35 +36,32 @@ class LuminaWidgetRefreshWorker(
         val prefs = context.getSharedPreferences(PHOTO_WIDGET_PREFS, Context.MODE_PRIVATE)
         val now = System.currentTimeMillis()
         val todayStr = LocalDate.now().toString()
-        var anyNeedsSchedule = false
+        val forceRefresh = inputData.getBoolean(KEY_FORCE_REFRESH, false)
+        var anyWidgetsPlaced = false
 
         for (provider in LuminaPhotoWidgetProvider.allProviders()) {
             val ids = manager.getAppWidgetIds(ComponentName(context, provider.javaClass))
             for (widgetId in ids) {
+                anyWidgetsPlaced = true
                 val settings = PhotoWidgetSettings.load(context, widgetId, provider.kind)
                 val interval = settings.shuffleInterval
                 val dateChanged = settings.showDateBadge && prefs.getString("last_date_$widgetId", null) != todayStr
                 val autoEnabled = interval != WidgetShuffleInterval.MANUAL
 
-                if (autoEnabled || settings.showDateBadge) {
-                    anyNeedsSchedule = true
-                }
-
                 val lastAdvance = prefs.getLong("last_advance_$widgetId", 0L)
-                val targetWaitMs = when {
-                    interval.isFastSlideshow -> TimeUnit.MINUTES.toMillis(30) // Deal a fresh random batch every 30m
-                    interval == WidgetShuffleInterval.MANUAL -> Long.MAX_VALUE
-                    else -> interval.intervalMs
-                }
-                val isDue = autoEnabled && (now - lastAdvance >= targetWaitMs - 30_000L)
+                val isDue = autoEnabled && LuminaPhotoWidgetProvider.isWidgetAdvanceDue(interval, lastAdvance, now)
 
-                if (isDue || dateChanged) {
+                val lastPush = prefs.getLong("last_push_$widgetId", 0L)
+                val needsKeepAlive = shouldTriggerKeepAliveRefresh(lastPush, now)
+
+                if (forceRefresh || isDue || dateChanged || needsKeepAlive) {
                     runCatching {
                         provider.renderWidgets(
                             context = context,
                             manager = manager,
                             widgetIds = intArrayOf(widgetId),
-                            advance = isDue
+                            advance = isDue,
+                            checkIntervalDue = false
                         )
                     }.onFailure { err ->
                         Log.w(TAG, "Scheduled refresh failed for widget $widgetId", err)
@@ -65,7 +70,7 @@ class LuminaWidgetRefreshWorker(
             }
         }
 
-        if (!anyNeedsSchedule) {
+        if (!anyWidgetsPlaced) {
             WidgetRefreshScheduler.cancel(context)
         }
         return Result.success()
@@ -73,29 +78,48 @@ class LuminaWidgetRefreshWorker(
 
     companion object {
         private const val TAG = "LuminaWidgetWorker"
+        internal const val KEY_FORCE_REFRESH = "force_refresh"
+        internal const val KEEP_ALIVE_INTERVAL_MS = 45L * 60L * 1000L
+
+        internal fun shouldTriggerKeepAliveRefresh(lastPushMs: Long, nowMs: Long): Boolean {
+            if (lastPushMs <= 0L) return true
+            return nowMs - lastPushMs >= KEEP_ALIVE_INTERVAL_MS
+        }
+    }
+}
+
+/**
+ * Self-healing receiver that re-pushes all placed home screen widgets immediately after an
+ * app update (APK auto-update) or phone reboot so widgets never appear blank.
+ */
+class LuminaWidgetRecoveryReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        val action = intent.action ?: return
+        if (action == Intent.ACTION_MY_PACKAGE_REPLACED || action == Intent.ACTION_BOOT_COMPLETED) {
+            val appContext = context.applicationContext
+            WidgetRefreshScheduler.syncSchedule(appContext)
+            WidgetRefreshScheduler.enqueueImmediateRecovery(appContext)
+        }
     }
 }
 
 internal object WidgetRefreshScheduler {
     private const val UNIQUE_WORK_NAME = "lumina_widget_auto_shuffle"
+    private const val RECOVERY_WORK_NAME = "lumina_widget_immediate_recovery"
 
     fun syncSchedule(context: Context) {
         val manager = AppWidgetManager.getInstance(context)
-        var shouldSchedule = false
+        var anyPlaced = false
 
         for (provider in LuminaPhotoWidgetProvider.allProviders()) {
             val ids = manager.getAppWidgetIds(ComponentName(context, provider.javaClass))
-            for (id in ids) {
-                val settings = PhotoWidgetSettings.load(context, id, provider.kind)
-                if (settings.shuffleInterval != WidgetShuffleInterval.MANUAL || settings.showDateBadge) {
-                    shouldSchedule = true
-                    break
-                }
+            if (ids.isNotEmpty()) {
+                anyPlaced = true
+                break
             }
-            if (shouldSchedule) break
         }
 
-        if (!shouldSchedule) {
+        if (!anyPlaced) {
             cancel(context)
             return
         }
@@ -109,6 +133,19 @@ internal object WidgetRefreshScheduler {
             WorkManager.getInstance(context).enqueueUniquePeriodicWork(
                 UNIQUE_WORK_NAME,
                 ExistingPeriodicWorkPolicy.KEEP,
+                request
+            )
+        }
+    }
+
+    fun enqueueImmediateRecovery(context: Context) {
+        val request = OneTimeWorkRequestBuilder<LuminaWidgetRefreshWorker>()
+            .setInputData(workDataOf(LuminaWidgetRefreshWorker.KEY_FORCE_REFRESH to true))
+            .build()
+        runCatching {
+            WorkManager.getInstance(context).enqueueUniqueWork(
+                RECOVERY_WORK_NAME,
+                ExistingWorkPolicy.REPLACE,
                 request
             )
         }

@@ -1,6 +1,7 @@
 package com.luminagallery.drive.widget
 
 import android.graphics.Bitmap
+import android.graphics.BitmapShader
 import android.graphics.BlurMaskFilter
 import android.graphics.Canvas
 import android.graphics.Color
@@ -10,8 +11,6 @@ import android.graphics.LinearGradient
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
-import android.graphics.PorterDuff
-import android.graphics.PorterDuffXfermode
 import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Shader
@@ -92,8 +91,9 @@ internal object HyperOsGlassRenderer {
         val safeH = heightDp.coerceAtLeast(48f)
         val aspect = safeW / safeH
 
-        if (kind == PhotoWidgetKind.STRIP) {
-            return if (aspect < 0.85f) {
+        // Explicit user-chosen layout overrides (gracefully adapting when a day has fewer photos)
+        when (collageLayout) {
+            WidgetCollageLayout.STRIP -> return if (aspect < 0.85f) {
                 if (safeH >= 210f && photoCount >= 3) ResolvedTilePattern.STRIP_VERTICAL_3
                 else ResolvedTilePattern.STRIP_VERTICAL_2
             } else {
@@ -103,10 +103,6 @@ internal object HyperOsGlassRenderer {
                     else -> ResolvedTilePattern.STRIP_HORIZONTAL_2
                 }
             }
-        }
-
-        // Explicit user-chosen layout overrides (gracefully adapting when a day has fewer photos)
-        when (collageLayout) {
             WidgetCollageLayout.HERO_SIDE -> return when {
                 photoCount == 2 -> bestTwoPhotoPattern(safeW, safeH, photoAspectRatios)
                 aspect < 0.82f -> ResolvedTilePattern.HERO_TOP_2_BOTTOM
@@ -232,6 +228,7 @@ internal object HyperOsGlassRenderer {
             ResolvedTilePattern.HERO_LEFT_2_RIGHT
         }
         val candidates = when {
+            aspect >= 2.25f -> listOf(ResolvedTilePattern.STRIP_HORIZONTAL_3)
             aspect >= 2.0f -> listOf(ResolvedTilePattern.STRIP_HORIZONTAL_3, primaryHero)
             aspect < 0.78f -> if (widthDp < 115f) {
                 listOf(ResolvedTilePattern.STRIP_VERTICAL_3, ResolvedTilePattern.HERO_TOP_2_BOTTOM)
@@ -252,6 +249,7 @@ internal object HyperOsGlassRenderer {
     ): ResolvedTilePattern {
         val aspect = widthDp / heightDp
         val candidates = when {
+            aspect >= 2.25f -> listOf(ResolvedTilePattern.STRIP_HORIZONTAL_4)
             aspect >= 2.15f -> listOf(ResolvedTilePattern.STRIP_HORIZONTAL_4, ResolvedTilePattern.BENTO_4_WIDE)
             aspect < 0.82f -> listOf(ResolvedTilePattern.BENTO_4_TOP_HERO, ResolvedTilePattern.GRID_2X2)
             aspect >= 1.22f -> buildList {
@@ -359,157 +357,144 @@ internal object HyperOsGlassRenderer {
         val h = heightPx.coerceAtLeast(64)
         val minEdge = min(w, h).toFloat()
         val targetRadiusDp = overrideCornerRadiusDp ?: settings.cornerStyle.radiusDp
-        val outerRadius = (targetRadiusDp * density)
-            .coerceIn(10f * density, minEdge * 0.42f)
+        val maxOuterRadius = (minEdge * 0.42f).coerceAtLeast(4f)
+        val minOuterRadius = min(10f * density, maxOuterRadius)
+        val outerRadius = (targetRadiusDp * density).coerceIn(minOuterRadius, maxOuterRadius)
         val bounds = RectF(0f, 0f, w.toFloat(), h.toFloat())
         val outerPath = buildContinuousSquirclePath(bounds, outerRadius)
 
-        // 1. Render raw photo / multi-photo composite onto base bitmap
+        // 1. Render raw photo / multi-photo composite + interior effects onto a single working bitmap
         val contentBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        val contentCanvas = Canvas(contentBitmap)
-
-        val multiOuterInset = if (pattern != ResolvedTilePattern.SINGLE && photos.size > 1 &&
-            settings.frameStyle == WidgetFrameStyle.FROSTED_FRAME
-        ) {
-            (minEdge * 0.042f).coerceIn(5.5f * density, 9.5f * density)
-        } else {
-            0f
-        }
-
-        if (photos.isEmpty()) {
-            drawEmptyHyperOsBackdrop(contentCanvas, bounds)
-        } else if (pattern == ResolvedTilePattern.SINGLE || photos.size == 1) {
-            if (settings.frameStyle == WidgetFrameStyle.FROSTED_FRAME) {
-                drawFrostedFramedSingle(contentCanvas, bounds, photos.first(), outerRadius, density)
-            } else {
-                drawCenterCropBitmap(contentCanvas, photos.first(), bounds)
-            }
-        } else {
-            drawMultiPhotoComposite(
-                canvas = contentCanvas,
-                bounds = bounds,
-                photos = photos,
-                pattern = pattern,
-                outerRadius = outerRadius,
-                density = density,
-                extraOuterInset = multiOuterInset
-            )
-        }
-
-        // 2. Apply exact Xiaomi HyperOS continuous-curvature squircle & razor-thin glass rim
         val output = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        val outCanvas = Canvas(output)
+        try {
+            val contentCanvas = Canvas(contentBitmap)
 
-        // Clip everything cleanly into continuous-curvature squircle
-        val clipSave = outCanvas.save()
-        outCanvas.clipPath(outerPath)
-        outCanvas.drawBitmap(contentBitmap, 0f, 0f, null)
+            val multiOuterInset = if (pattern != ResolvedTilePattern.SINGLE && photos.size > 1 &&
+                settings.frameStyle == WidgetFrameStyle.FROSTED_FRAME
+            ) {
+                (minEdge * 0.042f).coerceIn(5.5f * density, 9.5f * density)
+            } else {
+                0f
+            }
 
-        // Draw interior collage dividers with the EXACT same razor-thin clear glass rim as the outside border
-        if (pattern != ResolvedTilePattern.SINGLE && photos.size > 1) {
-            val tileBounds = RectF(
-                bounds.left + multiOuterInset,
-                bounds.top + multiOuterInset,
-                bounds.right - multiOuterInset,
-                bounds.bottom - multiOuterInset
-            )
-            drawCollageGlassDividers(
-                canvas = outCanvas,
-                bounds = bounds,
-                tileBounds = tileBounds,
-                pattern = pattern,
-                outerRadius = outerRadius,
-                density = density,
-                frameStyle = settings.frameStyle
-            )
-        }
-
-        // Subtle inner lighting accent (zero murky grey halo)
-        when (settings.frameStyle) {
-            WidgetFrameStyle.HYPER_GLASS -> {
-                drawHyperOsSubtleInnerSheen(
-                    canvas = outCanvas,
+            if (photos.isEmpty()) {
+                drawEmptyHyperOsBackdrop(contentCanvas, bounds)
+            } else if (pattern == ResolvedTilePattern.SINGLE || photos.size == 1) {
+                if (settings.frameStyle == WidgetFrameStyle.FROSTED_FRAME) {
+                    drawFrostedFramedSingle(contentCanvas, bounds, photos.first(), outerRadius, density)
+                } else {
+                    drawCenterCropBitmap(contentCanvas, photos.first(), bounds)
+                }
+            } else {
+                drawMultiPhotoComposite(
+                    canvas = contentCanvas,
                     bounds = bounds,
+                    photos = photos,
+                    pattern = pattern,
                     outerRadius = outerRadius,
-                    density = density
+                    density = density,
+                    extraOuterInset = multiOuterInset
                 )
             }
-            WidgetFrameStyle.FROSTED_FRAME -> {
-                drawFrostedFrameHighlight(
-                    canvas = outCanvas,
+
+            // Draw interior collage dividers with the EXACT same razor-thin clear glass rim as the outside border
+            if (pattern != ResolvedTilePattern.SINGLE && photos.size > 1) {
+                val tileBounds = RectF(
+                    bounds.left + multiOuterInset,
+                    bounds.top + multiOuterInset,
+                    bounds.right - multiOuterInset,
+                    bounds.bottom - multiOuterInset
+                )
+                drawCollageGlassDividers(
+                    canvas = contentCanvas,
                     bounds = bounds,
+                    tileBounds = tileBounds,
+                    pattern = pattern,
                     outerRadius = outerRadius,
-                    density = density
+                    density = density,
+                    frameStyle = settings.frameStyle
                 )
             }
-            WidgetFrameStyle.CRYSTAL_RIM,
-            WidgetFrameStyle.BORDERLESS -> Unit
-        }
 
-        // 3. Draw optional HyperOS frosted glass Date Badge (top-left)
-        if (settings.showDateBadge && w >= (100f * density) && h >= (86f * density)) {
-            drawHyperOsDateBadge(
-                canvas = outCanvas,
-                backdrop = contentBitmap,
-                bounds = bounds,
-                date = date,
-                density = density,
-                shiftRightForButton = reserveTopLeftButton
-            )
-        }
+            // Subtle inner lighting accent (zero murky grey halo)
+            when (settings.frameStyle) {
+                WidgetFrameStyle.HYPER_GLASS -> {
+                    drawHyperOsSubtleInnerSheen(
+                        canvas = contentCanvas,
+                        bounds = bounds,
+                        outerRadius = outerRadius,
+                        density = density
+                    )
+                }
+                WidgetFrameStyle.FROSTED_FRAME -> {
+                    drawFrostedFrameHighlight(
+                        canvas = contentCanvas,
+                        bounds = bounds,
+                        outerRadius = outerRadius,
+                        density = density
+                    )
+                }
+                WidgetFrameStyle.CRYSTAL_RIM,
+                WidgetFrameStyle.BORDERLESS -> Unit
+            }
 
-        // 4. Draw optional HyperOS Caption overlay (bottom)
-        if (settings.showCaption && caption != null && caption.title.isNotBlank() &&
-            w >= (96f * density) && h >= (84f * density)
-        ) {
-            when (settings.captionStyle) {
-                WidgetCaptionStyle.GLASS_PILL -> drawGlassPillCaption(
-                    canvas = outCanvas,
+            // 2. Draw optional HyperOS frosted glass Date Badge (top-left)
+            if (settings.showDateBadge && w >= (100f * density) && h >= (86f * density)) {
+                drawHyperOsDateBadge(
+                    canvas = contentCanvas,
                     backdrop = contentBitmap,
                     bounds = bounds,
-                    caption = caption,
+                    date = date,
                     density = density,
-                    reserveRightSpace = reserveBottomRightButton
-                )
-                WidgetCaptionStyle.EDITORIAL_FADE -> drawEditorialCaption(
-                    canvas = outCanvas,
-                    bounds = bounds,
-                    caption = caption,
-                    density = density,
-                    reserveRightSpace = reserveBottomRightButton
+                    shiftRightForButton = reserveTopLeftButton
                 )
             }
-        }
 
-        outCanvas.restoreToCount(clipSave)
+            // 3. Draw optional HyperOS Caption overlay (bottom)
+            if (settings.showCaption && caption != null && caption.title.isNotBlank() &&
+                w >= (96f * density) && h >= (84f * density)
+            ) {
+                when (settings.captionStyle) {
+                    WidgetCaptionStyle.GLASS_PILL -> drawGlassPillCaption(
+                        canvas = contentCanvas,
+                        backdrop = contentBitmap,
+                        bounds = bounds,
+                        caption = caption,
+                        density = density,
+                        reserveRightSpace = reserveBottomRightButton
+                    )
+                    WidgetCaptionStyle.EDITORIAL_FADE -> drawEditorialCaption(
+                        canvas = contentCanvas,
+                        bounds = bounds,
+                        caption = caption,
+                        density = density,
+                        reserveRightSpace = reserveBottomRightButton
+                    )
+                }
+            }
 
-        // Anti-aliased alpha mask pass on the exact outer squircle so edges are razor-smooth
-        val maskBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        val maskCanvas = Canvas(maskBitmap)
-        val maskPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE
-            style = Paint.Style.FILL
-        }
-        maskCanvas.drawPath(outerPath, maskPaint)
-        val xferPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
-        }
-        outCanvas.drawBitmap(maskBitmap, 0f, 0f, xferPaint)
-        maskBitmap.recycle()
+            // 4. Composite smoothly through the continuous-curvature squircle using an anti-aliased BitmapShader
+            // (eliminates 3rd full-size maskBitmap allocation & avoids jagged clipPath edges)
+            val outCanvas = Canvas(output)
+            val squirclePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+                shader = BitmapShader(contentBitmap, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
+            }
+            outCanvas.drawPath(outerPath, squirclePaint)
 
-        // Final crisp outer dual-arc rim drawn right after alpha mask so it never gets clipped unevenly
-        if (settings.frameStyle != WidgetFrameStyle.BORDERLESS) {
-            drawDualArcSpecularBorder(
-                canvas = outCanvas,
-                bounds = bounds,
-                outerRadius = outerRadius,
-                density = density,
-                strong = settings.frameStyle == WidgetFrameStyle.HYPER_GLASS ||
-                    settings.frameStyle == WidgetFrameStyle.FROSTED_FRAME
-            )
+            // Final crisp outer dual-arc rim drawn right after squircle pass so it never gets clipped unevenly
+            if (settings.frameStyle != WidgetFrameStyle.BORDERLESS) {
+                drawDualArcSpecularBorder(
+                    canvas = outCanvas,
+                    bounds = bounds,
+                    outerRadius = outerRadius,
+                    density = density,
+                    strong = settings.frameStyle == WidgetFrameStyle.HYPER_GLASS ||
+                        settings.frameStyle == WidgetFrameStyle.FROSTED_FRAME
+                )
+            }
+        } finally {
+            contentBitmap.recycle()
         }
-
-        contentBitmap.recycle()
         return output
     }
 

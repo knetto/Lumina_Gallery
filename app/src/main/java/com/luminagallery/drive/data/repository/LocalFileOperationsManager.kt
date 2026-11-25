@@ -24,6 +24,12 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
 
+data class ParentLocalFolderTarget(
+    val displayName: String,
+    val relativePath: String,
+    val useDcimParent: Boolean
+)
+
 data class InstalledGalleryApp(
     val packageName: String,
     val label: String,
@@ -212,7 +218,20 @@ class LocalFileOperationsManager(
                 val values = ContentValues().apply {
                     put(MediaStore.MediaColumns.RELATIVE_PATH, "$resolvedRelPath/")
                 }
-                val updated = resolver.update(uri, values, null, null)
+                val updated = try {
+                    resolver.update(uri, values, null, null)
+                } catch (_: IllegalArgumentException) {
+                    // Android 10+ restricts primary directories per media type (e.g. Videos moving to Pictures/)
+                    val fallbackBase = if (item.isVideo) Environment.DIRECTORY_MOVIES else Environment.DIRECTORY_PICTURES
+                    val subPath = resolvedRelPath.substringAfter('/', missingDelimiterValue = "")
+                    val fallbackPath = if (subPath.isNotBlank()) "$fallbackBase/$subPath" else fallbackBase
+                    resolver.update(
+                        uri,
+                        ContentValues().apply { put(MediaStore.MediaColumns.RELATIVE_PATH, "$fallbackPath/") },
+                        null,
+                        null
+                    )
+                }
                 if (updated > 0) moved++
             }
             if (moved == 0) {
@@ -580,6 +599,29 @@ class LocalFileOperationsManager(
     }
 
     companion object {
+        /**
+         * Resolves the storage parent ("mother") folder for a local MediaStore relative/storage path.
+         * Examples:
+         *  - "DCIM/Vacation/Day1" -> ParentLocalFolderTarget("Vacation", "DCIM/Vacation", useDcimParent = true)
+         *  - "Pictures/Trips"     -> ParentLocalFolderTarget("Pictures", "Pictures", useDcimParent = false)
+         *  - "DCIM"               -> null (already at primary media root)
+         */
+        fun resolveParentLocalFolder(storagePath: String?): ParentLocalFolderTarget? {
+            val cleaned = storagePath?.trim()?.replace('\\', '/')?.trim('/') ?: return null
+            if (cleaned.isBlank()) return null
+            val segments = cleaned.split('/').map { it.trim() }.filter { it.isNotBlank() && it != "." && it != ".." }
+            if (segments.size < 2) return null
+            val parentSegments = segments.dropLast(1)
+            val parentRelPath = parentSegments.joinToString("/")
+            val displayName = parentSegments.last()
+            val useDcim = parentSegments.first().equals("DCIM", ignoreCase = true)
+            return ParentLocalFolderTarget(
+                displayName = displayName,
+                relativePath = parentRelPath,
+                useDcimParent = useDcim
+            )
+        }
+
         internal fun sanitizeFolderName(raw: String): String {
             val cleaned = raw.trim()
                 .replace(Regex("[\\\\/:*?\"<>|]"), "_")

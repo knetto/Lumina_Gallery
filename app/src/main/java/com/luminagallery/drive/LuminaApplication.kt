@@ -20,6 +20,7 @@ class LuminaApplication : Application(), Configuration.Provider, SingletonImageL
         container = AppContainer(this)
         runCatching { MediaIndexScheduler.ensureScheduled(this) }
         runCatching { WidgetRefreshScheduler.syncSchedule(this) }
+        runCatching { LuminaPhotoWidgetProvider.scheduleColdStartRecovery(this) }
         LuminaPhotoWidgetProvider.refreshOnExclusionsChanged(this, container.galleryExtrasRepository.excludedAlbumIdsFlow)
     }
 

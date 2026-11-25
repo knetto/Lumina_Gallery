@@ -356,6 +356,10 @@ class SettingsViewModel(
         viewModelScope.launch { preferencesManager.setGridColumns(columns) }
     }
 
+    fun setAlbumGridColumns(columns: Int) {
+        viewModelScope.launch { preferencesManager.setAlbumGridColumns(columns) }
+    }
+
     fun setAlbumSortMode(mode: AlbumSortMode) {
         viewModelScope.launch { preferencesManager.setAlbumSortMode(mode) }
     }
@@ -487,6 +491,7 @@ class SettingsViewModel(
             preferencesManager.setDynamicColor(defaults.dynamicColor)
             preferencesManager.setDefaultStartTab(defaults.defaultStartTab)
             preferencesManager.setGridColumns(defaults.gridColumns)
+            preferencesManager.setAlbumGridColumns(defaults.albumGridColumns)
             preferencesManager.setAlbumSortMode(defaults.albumSortMode)
             preferencesManager.setShowDayLocationHeaders(defaults.showDayLocationHeaders)
             preferencesManager.setShowAlbumSidebarDefault(defaults.showAlbumSidebarDefault)

@@ -17,6 +17,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -29,6 +31,8 @@ data class CollectionUiState(
     val items: List<AlbumGridItem> = emptyList(),
     val allCollections: List<AlbumCollectionEntity> = emptyList(),
     val selectedIds: Set<String> = emptySet(),
+    val albumGridColumns: Int = 3,
+    val showCloudBadges: Boolean = true,
     val isUnmeteredWifi: Boolean = true,
     val snackbarMessage: String? = null,
     val wasUngrouped: Boolean = false
@@ -62,12 +66,17 @@ class CollectionViewModel(
         CollectionMeta(name, parentId, crumbs, selected, snack, ungrouped)
     }
 
+    private val prefsSliceFlow = preferencesManager.preferencesFlow
+        .map { it.albumGridColumns to it.showCloudBadges }
+        .distinctUntilChanged()
+
     val uiState: StateFlow<CollectionUiState> = combine(
         organizationRepository.observeGridItems(collectionId),
         organizationRepository.observeAllCollections(),
         networkMonitor.networkState,
+        prefsSliceFlow,
         metaFlow
-    ) { items, allCols, net, meta ->
+    ) { items, allCols, net, (albumCols, showBadges), meta ->
         val latestName = allCols.firstOrNull { it.id == collectionId }?.name ?: meta.name
         CollectionUiState(
             collectionId = collectionId,
@@ -77,6 +86,8 @@ class CollectionViewModel(
             items = items,
             allCollections = allCols,
             selectedIds = meta.selectedIds,
+            albumGridColumns = albumCols,
+            showCloudBadges = showBadges,
             isUnmeteredWifi = net.isUnmeteredWifi,
             snackbarMessage = meta.snackbar,
             wasUngrouped = meta.ungrouped
@@ -89,6 +100,8 @@ class CollectionViewModel(
             collectionName = initialCollectionName,
             breadcrumbs = listOf(BreadcrumbItem(collectionId, initialCollectionName)),
             items = organizationRepository.getCachedGridItems(collectionId),
+            albumGridColumns = preferencesManager.latestPreferences.albumGridColumns,
+            showCloudBadges = preferencesManager.latestPreferences.showCloudBadges,
             isUnmeteredWifi = networkMonitor.networkState.value.isUnmeteredWifi
         )
     )
@@ -105,6 +118,10 @@ class CollectionViewModel(
                 breadcrumbsFlow.value = chain
             }
         }
+    }
+
+    fun setAlbumGridColumns(columns: Int) {
+        viewModelScope.launch { preferencesManager.setAlbumGridColumns(columns) }
     }
 
     fun saveReorder(ordered: List<AlbumGridItem>) {

@@ -117,6 +117,7 @@ data class CloudPreferencesPayload(
     val themeMode: String = ThemeMode.AMOLED_BLACK.name,
     val dynamicColor: Boolean = true,
     val gridColumns: Int = PreferencesManager.DEFAULT_GRID_COLUMNS,
+    val albumGridColumns: Int = PreferencesManager.DEFAULT_ALBUM_GRID_COLUMNS,
     val backgroundSyncEnabled: Boolean = false,
     val albumSortMode: String = AlbumSortMode.CUSTOM.name,
     val defaultStartTab: String = MainTab.ALBUMS.name,
@@ -1801,6 +1802,7 @@ private fun UserPreferences.toCloudPayload(): CloudPreferencesPayload =
         themeMode = themeMode.name,
         dynamicColor = dynamicColor,
         gridColumns = gridColumns,
+        albumGridColumns = albumGridColumns,
         backgroundSyncEnabled = backgroundSyncEnabled,
         albumSortMode = albumSortMode.name,
         defaultStartTab = defaultStartTab.name,
@@ -1826,7 +1828,14 @@ private fun CloudPreferencesPayload.toUserPreferences(current: UserPreferences):
         maxCacheSizeMb = maxCacheSizeMb.coerceIn(250, 2048),
         themeMode = runCatching { ThemeMode.valueOf(themeMode) }.getOrDefault(current.themeMode),
         dynamicColor = dynamicColor,
-        gridColumns = gridColumns.coerceIn(2, 5),
+        gridColumns = gridColumns.coerceIn(
+            PreferencesManager.MIN_PHOTO_GRID_COLUMNS,
+            PreferencesManager.MAX_PHOTO_GRID_COLUMNS
+        ),
+        albumGridColumns = albumGridColumns.coerceIn(
+            PreferencesManager.MIN_ALBUM_GRID_COLUMNS,
+            PreferencesManager.MAX_ALBUM_GRID_COLUMNS
+        ),
         backgroundSyncEnabled = backgroundSyncEnabled,
         albumSortMode = runCatching { AlbumSortMode.valueOf(albumSortMode) }.getOrDefault(current.albumSortMode),
         defaultStartTab = runCatching { MainTab.valueOf(defaultStartTab) }.getOrDefault(current.defaultStartTab),

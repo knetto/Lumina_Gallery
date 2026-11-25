@@ -6,8 +6,10 @@ import android.appwidget.AppWidgetProvider
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.ColorSpace
 import android.graphics.ImageDecoder
 import android.net.Uri
 import android.os.Build
@@ -17,9 +19,9 @@ import android.util.SizeF
 import android.view.View
 import android.view.WindowManager
 import android.widget.RemoteViews
-import androidx.annotation.RequiresApi
 import com.luminagallery.drive.MainActivity
 import com.luminagallery.drive.R
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -29,7 +31,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import java.io.File
+import java.io.FileOutputStream
 import java.time.LocalDate
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -81,6 +87,8 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
         super.onDeleted(context, appWidgetIds)
         for (id in appWidgetIds) {
             PhotoWidgetSettings.delete(context, id)
+            deleteCachedRender(context, id)
+            widgetLocks.remove(id)
         }
         WidgetRefreshScheduler.syncSchedule(context)
     }
@@ -98,12 +106,24 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
         checkIntervalDue: Boolean = false
     ) {
         if (widgetIds.isEmpty()) return
+        val appContext = context.applicationContext
         val pendingResult = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
+            var completed = false
             try {
-                renderWidgets(context, manager, widgetIds, advance, checkIntervalDue)
-            } catch (error: RuntimeException) {
-                Log.w(TAG, "Unable to refresh photo widgets", error)
+                completed = withTimeoutOrNull(BROADCAST_RENDER_TIMEOUT_MS) {
+                    renderWidgets(appContext, manager, widgetIds, advance, checkIntervalDue)
+                    true
+                } == true
+                if (!completed) {
+                    Log.w(TAG, "Broadcast widget render hit timeout; handing off to WorkManager recovery")
+                    WidgetRefreshScheduler.enqueueImmediateRecovery(appContext)
+                }
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: Throwable) {
+                Log.w(TAG, "Unable to refresh photo widgets", err)
+                WidgetRefreshScheduler.enqueueImmediateRecovery(appContext)
             } finally {
                 pendingResult.finish()
             }
@@ -119,12 +139,15 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
     ) = withContext(Dispatchers.IO) {
         val appContext = context.applicationContext
         val provider = ComponentName(appContext, this@LuminaPhotoWidgetProvider.javaClass)
-        updateMutex.withLock {
-            for (widgetId in widgetIds) {
-                if (manager.getAppWidgetInfo(widgetId)?.provider != provider) continue
-                runCatching {
+        for (widgetId in widgetIds) {
+            if (manager.getAppWidgetInfo(widgetId)?.provider != provider) continue
+            val lock = widgetLocks.computeIfAbsent(widgetId) { Mutex() }
+            lock.withLock {
+                try {
                     updateSingleWidget(appContext, manager, widgetId, advance, checkIntervalDue)
-                }.onFailure { err ->
+                } catch (err: CancellationException) {
+                    throw err
+                } catch (err: Throwable) {
                     Log.w(TAG, "Failed rendering widget $widgetId ($kind)", err)
                 }
             }
@@ -146,18 +169,58 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
             checkIntervalDue && isWidgetAdvanceDue(settings.shuffleInterval, lastAdvance, now)
         )
         val options = manager.getAppWidgetOptions(widgetId)
-        val widgetSizes = resolveWidgetSizesDp(options)
-        val primarySize = widgetSizes.first()
+        val primarySize = resolvePrimaryWidgetSizeDp(context, options, kind)
 
         val maxSlots = when (kind) {
-            PhotoWidgetKind.COLLAGE, PhotoWidgetKind.MEMORIES -> 6
-            PhotoWidgetKind.STRIP -> 4
-            else -> 1
+            PhotoWidgetKind.COLLAGE -> if (settings.collageLayout == WidgetCollageLayout.STRIP) 4 else 6
+            PhotoWidgetKind.FRAME -> 1
         }
         val useFastSlideshow = settings.shuffleInterval.isFastSlideshow
         val requestedFrames = if (useFastSlideshow) SLIDESHOW_FRAME_COUNT else 1
+        val today = LocalDate.now()
 
-        val selections = WidgetMediaRepository.resolveWidgetFrames(
+        // Fast-path: on non-advancing updates (resize, launcher restart, app update, keep-alive heartbeat,
+        // appearance-only edit), reuse the currently displayed verified photos directly via indexed SQL lookup.
+        // This avoids scanning thousands of photos on boot/resize and keeps the displayed photo stable!
+        if (!effectiveAdvance && !useFastSlideshow) {
+            val fastSelection = tryResolveFastCachedSelection(
+                context = context,
+                prefs = prefs,
+                widgetId = widgetId,
+                settings = settings,
+                primarySize = primarySize,
+                maxSlots = maxSlots
+            )
+            when (fastSelection) {
+                is FastSelectionResult.PrivacyUnavailable -> {
+                    Log.w(TAG, "Privacy verification unavailable during widget $widgetId recovery; deferring")
+                    WidgetRefreshScheduler.enqueueImmediateRecovery(context)
+                    return
+                }
+                is FastSelectionResult.Hit -> {
+                    if (renderAndPushSingleFrame(
+                            context = context,
+                            manager = manager,
+                            prefs = prefs,
+                            widgetId = widgetId,
+                            sizeDp = primarySize,
+                            settings = settings,
+                            selection = fastSelection.selection,
+                            today = today,
+                            allowCachedBitmapFallback = true
+                        )
+                    ) {
+                        prefs.edit()
+                            .putString("last_date_$widgetId", today.toString())
+                            .apply()
+                        return
+                    }
+                }
+                FastSelectionResult.Miss -> Unit
+            }
+        }
+
+        val resolution = WidgetMediaRepository.resolveWidgetFramesChecked(
             context = context,
             widgetId = widgetId,
             kind = kind,
@@ -166,8 +229,14 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
             frameCount = requestedFrames,
             advance = effectiveAdvance
         )
+        if (!resolution.privacyVerified) {
+            // Transient DB/Direct-Boot failure: never overwrite an active widget with an empty state!
+            Log.w(TAG, "Skipping widget $widgetId overwrite while privacy verification is unavailable")
+            WidgetRefreshScheduler.enqueueImmediateRecovery(context)
+            return
+        }
 
-        val today = LocalDate.now()
+        val selections = resolution.frames
         val primarySelection = selections.firstOrNull()
         prefs.edit().apply {
             if (effectiveAdvance || lastAdvance == 0L) {
@@ -191,102 +260,206 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
             }
         }.apply()
 
-        val canUseResponsiveMap = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-            !useFastSlideshow &&
-            widgetSizes.size > 1
-
-        if (canUseResponsiveMap) {
-            updateWithResponsiveSizeMap(
+        if (useFastSlideshow && selections.size > 1) {
+            pushSlideshowSafely(
                 context = context,
                 manager = manager,
+                prefs = prefs,
                 widgetId = widgetId,
-                sizes = widgetSizes.take(2),
+                sizeDp = primarySize,
                 settings = settings,
-                selection = selections.firstOrNull(),
+                selections = selections,
                 today = today
             )
             return
         }
 
-        val remoteViews = if (useFastSlideshow && selections.size > 1) {
-            buildSlideshowRemoteViews(
-                context = context,
-                widgetId = widgetId,
-                sizeDp = primarySize,
-                settings = settings,
-                selections = selections,
-                today = today,
-                scaleDown = 1f
-            )
-        } else {
-            buildSingleFrameRemoteViews(
-                context = context,
-                widgetId = widgetId,
-                sizeDp = primarySize,
-                settings = settings,
-                selection = selections.firstOrNull(),
-                today = today,
-                scaleDown = 1f
-            )
-        }
-
-        try {
-            manager.updateAppWidget(widgetId, remoteViews)
-        } catch (err: IllegalArgumentException) {
-            // Memory-budget fallback if OEM launcher enforces a smaller bitmap cap
-            Log.w(TAG, "Widget $widgetId bitmap budget exceeded, retrying at 0.65x", err)
-            val fallback = buildSingleFrameRemoteViews(
-                context = context,
-                widgetId = widgetId,
-                sizeDp = primarySize,
-                settings = settings,
-                selection = selections.firstOrNull(),
-                today = today,
-                scaleDown = 0.65f
-            )
-            manager.updateAppWidget(widgetId, fallback)
-        }
+        renderAndPushSingleFrame(
+            context = context,
+            manager = manager,
+            prefs = prefs,
+            widgetId = widgetId,
+            sizeDp = primarySize,
+            settings = settings,
+            selection = primarySelection,
+            today = today,
+            allowCachedBitmapFallback = primarySelection != null && primarySelection.photos.isNotEmpty()
+        )
     }
 
-    @RequiresApi(Build.VERSION_CODES.S)
-    private fun updateWithResponsiveSizeMap(
+    private sealed interface FastSelectionResult {
+        data class Hit(val selection: WidgetResolvedSelection) : FastSelectionResult
+        data object Miss : FastSelectionResult
+        data object PrivacyUnavailable : FastSelectionResult
+    }
+
+    private suspend fun tryResolveFastCachedSelection(
+        context: Context,
+        prefs: android.content.SharedPreferences,
+        widgetId: Int,
+        settings: PhotoWidgetSettings,
+        primarySize: SizeF,
+        maxSlots: Int
+    ): FastSelectionResult {
+        val savedIds = prefs.getString("shown_ids_$widgetId", null)
+            ?.split(",")
+            ?.filter { it.isNotBlank() }
+            .orEmpty()
+        if (savedIds.isEmpty()) return FastSelectionResult.Miss
+
+        val neededSlots = if (kind.isMultiPhoto && settings.collageLayout != WidgetCollageLayout.AUTO) {
+            HyperOsGlassRenderer.resolveTilePattern(
+                kind = kind,
+                collageLayout = settings.collageLayout,
+                widthDp = primarySize.width,
+                heightDp = primarySize.height,
+                photoCount = maxSlots
+            ).maxSlots
+        } else {
+            1
+        }
+        val selectedCap = if (settings.source == WidgetPhotoSource.SELECTED_PHOTOS && settings.selectedPhotoIds.isNotEmpty()) {
+            min(neededSlots, settings.selectedPhotoIds.size)
+        } else {
+            neededSlots
+        }
+        if (savedIds.size < selectedCap) return FastSelectionResult.Miss
+
+        val verified = WidgetMediaRepository.loadVerifiedPhotosByIds(context, savedIds.take(maxSlots))
+            ?: return FastSelectionResult.PrivacyUnavailable
+        // If any previously displayed photo was deleted or moved to a hidden/locked album, resolve fresh!
+        if (verified.size < savedIds.take(maxSlots).size || verified.isEmpty()) {
+            return FastSelectionResult.Miss
+        }
+
+        val savedTitle = prefs.getString("shown_title_$widgetId", null)
+        val savedSub = prefs.getString("shown_sub_$widgetId", null)
+        val caption = if (!savedTitle.isNullOrBlank()) {
+            WidgetCaptionData(savedTitle, savedSub)
+        } else {
+            val first = verified.first()
+            WidgetCaptionData(
+                title = first.albumName.ifBlank { "Photos" },
+                subtitle = widgetDateLabel(first.takenAtMs).takeIf { it.isNotBlank() }
+            )
+        }
+        return FastSelectionResult.Hit(
+            WidgetResolvedSelection(
+                photos = verified,
+                caption = caption,
+                groupKey = prefs.getString("group_key_$widgetId", null),
+                totalChoices = if (settings.source == WidgetPhotoSource.SELECTED_PHOTOS && settings.selectedPhotoIds.size <= 1) 1 else 2
+            )
+        )
+    }
+
+    /**
+     * Builds & pushes a single-frame RemoteViews with progressive scale-down retries on any IPC/memory
+     * failure, plus disk-cached last-good bitmap protection against transient URI decode failures.
+     */
+    private fun renderAndPushSingleFrame(
         context: Context,
         manager: AppWidgetManager,
+        prefs: android.content.SharedPreferences,
         widgetId: Int,
-        sizes: List<SizeF>,
+        sizeDp: SizeF,
         settings: PhotoWidgetSettings,
         selection: WidgetResolvedSelection?,
+        today: LocalDate,
+        allowCachedBitmapFallback: Boolean
+    ): Boolean {
+        val scales = floatArrayOf(1.0f, 0.68f, 0.45f)
+        for ((attempt, scale) in scales.withIndex()) {
+            try {
+                val built = buildSingleFrameRemoteViews(
+                    context = context,
+                    widgetId = widgetId,
+                    sizeDp = sizeDp,
+                    settings = settings,
+                    selection = selection,
+                    today = today,
+                    scaleDown = scale,
+                    allowCachedBitmapFallback = allowCachedBitmapFallback
+                )
+                if (built.hadTransientDecodeFailure) {
+                    if (built.usedDiskFallback && built.views != null) {
+                        manager.updateAppWidget(widgetId, built.views)
+                        prefs.edit().putLong("last_push_$widgetId", System.currentTimeMillis()).apply()
+                    }
+                    WidgetRefreshScheduler.enqueueImmediateRecovery(context)
+                    return false
+                }
+                val views = built.views ?: return false
+                manager.updateAppWidget(widgetId, views)
+                prefs.edit().putLong("last_push_$widgetId", System.currentTimeMillis()).apply()
+                built.renderedBitmapToCache?.let { bmp ->
+                    saveCachedRender(context, widgetId, bmp)
+                }
+                return true
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: Throwable) {
+                Log.w(
+                    TAG,
+                    "Widget $widgetId push failed at scale=${scale}x (attempt ${attempt + 1}/${scales.size})",
+                    err
+                )
+            }
+        }
+        return false
+    }
+
+    private fun pushSlideshowSafely(
+        context: Context,
+        manager: AppWidgetManager,
+        prefs: android.content.SharedPreferences,
+        widgetId: Int,
+        sizeDp: SizeF,
+        settings: PhotoWidgetSettings,
+        selections: List<WidgetResolvedSelection>,
         today: LocalDate
     ) {
-        val map = LinkedHashMap<SizeF, RemoteViews>(sizes.size)
-        val perSizeScale = if (sizes.size > 1) 0.85f else 1f
-        for (size in sizes) {
-            map[size] = buildSingleFrameRemoteViews(
-                context = context,
-                widgetId = widgetId,
-                sizeDp = size,
-                settings = settings,
-                selection = selection,
-                today = today,
-                scaleDown = perSizeScale
-            )
+        // Attempt 1 & 2: full live slideshow (normal, then compact scale)
+        for (scale in floatArrayOf(1.0f, 0.68f)) {
+            try {
+                val views = buildSlideshowRemoteViews(
+                    context = context,
+                    widgetId = widgetId,
+                    sizeDp = sizeDp,
+                    settings = settings,
+                    selections = selections,
+                    today = today,
+                    scaleDown = scale
+                )
+                manager.updateAppWidget(widgetId, views)
+                prefs.edit().putLong("last_push_$widgetId", System.currentTimeMillis()).apply()
+                return
+            } catch (err: CancellationException) {
+                throw err
+            } catch (err: Throwable) {
+                Log.w(TAG, "Widget $widgetId slideshow push failed at ${scale}x, retrying", err)
+            }
         }
-        try {
-            manager.updateAppWidget(widgetId, RemoteViews(map))
-        } catch (err: IllegalArgumentException) {
-            Log.w(TAG, "Responsive map exceeded bitmap cap for widget $widgetId, falling back", err)
-            val primary = buildSingleFrameRemoteViews(
-                context = context,
-                widgetId = widgetId,
-                sizeDp = sizes.first(),
-                settings = settings,
-                selection = selection,
-                today = today,
-                scaleDown = 0.7f
-            )
-            manager.updateAppWidget(widgetId, primary)
-        }
+        // Final guaranteed fallback: single frame so the widget NEVER goes blank on strict launchers!
+        renderAndPushSingleFrame(
+            context = context,
+            manager = manager,
+            prefs = prefs,
+            widgetId = widgetId,
+            sizeDp = sizeDp,
+            settings = settings,
+            selection = selections.firstOrNull(),
+            today = today,
+            allowCachedBitmapFallback = true
+        )
     }
+
+    private data class BuiltSingleFrame(
+        val views: RemoteViews?,
+        val renderedBitmapToCache: Bitmap? = null,
+        val hadTransientDecodeFailure: Boolean = false,
+        val usedDiskFallback: Boolean = false
+    )
 
     private fun buildSingleFrameRemoteViews(
         context: Context,
@@ -295,8 +468,9 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
         settings: PhotoWidgetSettings,
         selection: WidgetResolvedSelection?,
         today: LocalDate,
-        scaleDown: Float
-    ): RemoteViews {
+        scaleDown: Float,
+        allowCachedBitmapFallback: Boolean
+    ): BuiltSingleFrame {
         val views = RemoteViews(context.packageName, R.layout.widget_lumina_rendered)
         val rawPhotos = selection?.photos.orEmpty()
         val varietySeed = (selection?.groupKey?.hashCode() ?: widgetId) and 0x7FFFFFFF
@@ -315,8 +489,32 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
             frameCount = 1,
             scaleDown = scaleDown
         )
-        val slotDecodeEdge = max(renderW, renderH).coerceIn(240, 1080)
+        val slotDecodeEdge = if (prePattern.maxSlots > 1) {
+            (max(renderW, renderH) * 0.78f).roundToInt().coerceIn(200, 640)
+        } else {
+            max(renderW, renderH).coerceIn(240, 840)
+        }
         val decodedRaw = decodePhotos(context, rawPhotos, prePattern.maxSlots, slotDecodeEdge)
+
+        // If MediaStore reported photos, yet none could be decoded (transient storage/permission hiccup),
+        // fall back to the last good rendered bitmap on disk instead of wiping out the widget!
+        if (rawPhotos.isNotEmpty() && decodedRaw.isEmpty()) {
+            if (allowCachedBitmapFallback) {
+                val cached = readCachedRender(context, widgetId)
+                if (cached != null) {
+                    setVisible(views, R.id.widget_loading_placeholder, false)
+                    views.setImageViewBitmap(R.id.widget_rendered_image, cached)
+                    setVisible(views, R.id.widget_empty_state, false)
+                    views.setOnClickPendingIntent(
+                        android.R.id.background,
+                        buildTapIntent(context, widgetId, slot = 0, photo = rawPhotos.firstOrNull(), settings = settings)
+                    )
+                    return BuiltSingleFrame(views = views, hadTransientDecodeFailure = true, usedDiskFallback = true)
+                }
+            }
+            return BuiltSingleFrame(views = null, hadTransientDecodeFailure = true, usedDiskFallback = false)
+        }
+
         // Use actual decoded bitmap aspect ratios so orientation-aware layout + slot matching is 100% accurate!
         val (actualPattern, decoded) = HyperOsGlassRenderer.resolveSmartPatternAndOrder(
             kind = kind,
@@ -334,21 +532,25 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
         val showSettingsBtn = settings.showSettingsButton &&
             sizeDp.width >= 96f && sizeDp.height >= 76f
 
-        val rendered = HyperOsGlassRenderer.renderWidgetBitmap(
-            photos = decoded.map { it.second },
-            pattern = actualPattern,
-            widthPx = renderW,
-            heightPx = renderH,
-            density = renderDensity,
-            settings = settings,
-            caption = if (decoded.isNotEmpty()) selection?.caption else null,
-            date = today,
-            reserveBottomRightButton = showShuffleBtn,
-            reserveTopLeftButton = showSettingsBtn,
-            overrideCornerRadiusDp = resolveSystemHyperCornerDp(context, settings)
-        )
-        decodedRaw.forEach { it.second.recycle() }
+        val rendered = try {
+            HyperOsGlassRenderer.renderWidgetBitmap(
+                photos = decoded.map { it.second },
+                pattern = actualPattern,
+                widthPx = renderW,
+                heightPx = renderH,
+                density = renderDensity,
+                settings = settings,
+                caption = if (decoded.isNotEmpty()) selection?.caption else null,
+                date = today,
+                reserveBottomRightButton = showShuffleBtn,
+                reserveTopLeftButton = showSettingsBtn,
+                overrideCornerRadiusDp = resolveSystemHyperCornerDp(context, settings)
+            )
+        } finally {
+            decodedRaw.forEach { it.second.recycle() }
+        }
 
+        setVisible(views, R.id.widget_loading_placeholder, false)
         views.setImageViewBitmap(R.id.widget_rendered_image, rendered)
         views.setContentDescription(
             R.id.widget_rendered_image,
@@ -421,7 +623,10 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
             showSettings = showSettingsBtn || isEmpty
         )
 
-        return views
+        return BuiltSingleFrame(
+            views = views,
+            renderedBitmapToCache = if (!isEmpty) rendered else null
+        )
     }
 
     private fun buildSlideshowRemoteViews(
@@ -446,7 +651,7 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
             frameCount = maxFrames,
             scaleDown = scaleDown
         )
-        val decodeEdge = max(renderW, renderH).coerceIn(220, 760)
+        val decodeEdge = max(renderW, renderH).coerceIn(200, 560)
 
         val animation = RemoteViews(context.packageName, R.layout.widget_shuffle_animation)
         animation.setInt(
@@ -456,6 +661,7 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
         )
 
         var addedFrames = 0
+        var firstFrameBitmap: Bitmap? = null
         selections.take(maxFrames).forEachIndexed { frameIndex, sel ->
             val varietySeed = ((sel.groupKey?.hashCode() ?: widgetId) + frameIndex) and 0x7FFFFFFF
             val prePattern = HyperOsGlassRenderer.resolveTilePattern(
@@ -479,21 +685,27 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
                 aspectRatioOf = { (_, bmp) -> (bmp.width.toFloat() / bmp.height.coerceAtLeast(1)).coerceIn(0.35f, 3.0f) },
                 varietySeed = varietySeed
             )
-            val rendered = HyperOsGlassRenderer.renderWidgetBitmap(
-                photos = decoded.map { it.second },
-                pattern = actualPattern,
-                widthPx = renderW,
-                heightPx = renderH,
-                density = renderDensity,
-                settings = settings,
-                caption = sel.caption,
-                date = today,
-                reserveBottomRightButton = showShuffleBtn,
-                reserveTopLeftButton = showSettingsBtn,
-                overrideCornerRadiusDp = resolveSystemHyperCornerDp(context, settings)
-            )
+            val rendered = try {
+                HyperOsGlassRenderer.renderWidgetBitmap(
+                    photos = decoded.map { it.second },
+                    pattern = actualPattern,
+                    widthPx = renderW,
+                    heightPx = renderH,
+                    density = renderDensity,
+                    settings = settings,
+                    caption = sel.caption,
+                    date = today,
+                    reserveBottomRightButton = showShuffleBtn,
+                    reserveTopLeftButton = showSettingsBtn,
+                    overrideCornerRadiusDp = resolveSystemHyperCornerDp(context, settings)
+                )
+            } finally {
+                decodedRaw.forEach { it.second.recycle() }
+            }
             val leadPhoto = decoded.first().first
-            decodedRaw.forEach { it.second.recycle() }
+            if (firstFrameBitmap == null) {
+                firstFrameBitmap = rendered
+            }
 
             val frameView = RemoteViews(context.packageName, R.layout.widget_shuffle_frame)
             frameView.setImageViewBitmap(R.id.widget_image, rendered)
@@ -510,7 +722,26 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
         }
 
         if (addedFrames > 0) {
+            firstFrameBitmap?.let { backdrop ->
+                // Same Bitmap reference is deduplicated by RemoteViews.BitmapCache -> zero extra memory!
+                views.setImageViewBitmap(R.id.widget_slideshow_backdrop, backdrop)
+            }
             views.addView(R.id.widget_shuffle_container, animation)
+        } else {
+            val emptyBackdrop = HyperOsGlassRenderer.renderWidgetBitmap(
+                photos = emptyList(),
+                pattern = ResolvedTilePattern.SINGLE,
+                widthPx = renderW,
+                heightPx = renderH,
+                density = renderDensity,
+                settings = settings,
+                caption = null,
+                date = today,
+                reserveBottomRightButton = false,
+                reserveTopLeftButton = true,
+                overrideCornerRadiusDp = resolveSystemHyperCornerDp(context, settings)
+            )
+            views.setImageViewBitmap(R.id.widget_slideshow_backdrop, emptyBackdrop)
         }
 
         val isEmpty = addedFrames == 0
@@ -575,12 +806,10 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
         ResolvedTilePattern.SINGLE -> 0
     }
 
-    private fun resolveWidgetSizesDp(options: Bundle): List<SizeF> =
-        resolveWidgetSizesDpForKind(options, kind)
-
     /**
-     * Computes exact pixel canvas dimensions matching [sizeDp]'s aspect ratio while safely
-     * respecting Android's RemoteViews total ARGB bitmap memory budget.
+     * Computes exact pixel canvas dimensions matching [sizeDp]'s aspect ratio while staying
+     * well below Android & OEM launcher RemoteViews ARGB bitmap memory/IPC budgets so widgets
+     * are never silently evicted or blanked out on Xiaomi HyperOS / MIUI launchers.
      */
     private fun computeRenderCanvasSize(
         context: Context,
@@ -594,13 +823,18 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
         } else null
         val displayPixels = metrics.widthPixels.toDouble() * metrics.heightPixels
         val windowPixels = windowBounds?.let { it.width().toDouble() * it.height() } ?: displayPixels
-        // Stay comfortably below Android's 1.5x screen bitmap RemoteViews cap
-        val totalPixelBudget = min(displayPixels, windowPixels) * 0.88
+        val screenPixels = min(displayPixels, windowPixels)
+        // Stay comfortably below OEM launcher bitmap caps even with multiple placed widgets
+        val totalPixelBudget = if (frameCount > 1) {
+            min(screenPixels * 0.36, 480_000.0)
+        } else {
+            min(screenPixels * 0.45, 580_000.0)
+        }
         val perFrameBudget = totalPixelBudget / frameCount.coerceAtLeast(1)
 
         val rawW = sizeDp.width * metrics.density * scaleDown
         val rawH = sizeDp.height * metrics.density * scaleDown
-        val maxCapEdge = if (frameCount > 1) 740f else 1080f
+        val maxCapEdge = if (frameCount > 1) 560f else 840f
 
         var factor = 1f
         val maxSide = max(rawW, rawH)
@@ -632,21 +866,27 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
         }
     }
 
-    private fun decodeWidgetBitmap(context: Context, uri: Uri, targetMax: Int): Bitmap? = runCatching {
+    private fun decodeWidgetBitmap(context: Context, uri: Uri, targetMax: Int): Bitmap? {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            val src = ImageDecoder.createSource(context.contentResolver, uri)
-            ImageDecoder.decodeBitmap(src) { decoder, info, _ ->
-                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
-                val maxDim = maxOf(info.size.width, info.size.height)
-                if (maxDim > targetMax) {
-                    val scale = targetMax.toFloat() / maxDim
-                    decoder.setTargetSize(
-                        (info.size.width * scale).toInt().coerceAtLeast(1),
-                        (info.size.height * scale).toInt().coerceAtLeast(1)
-                    )
+            val decoded = runCatching {
+                val src = ImageDecoder.createSource(context.contentResolver, uri)
+                ImageDecoder.decodeBitmap(src) { decoder, info, _ ->
+                    decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                    decoder.memorySizePolicy = ImageDecoder.MEMORY_POLICY_LOW_RAM
+                    decoder.setTargetColorSpace(ColorSpace.get(ColorSpace.Named.SRGB))
+                    val maxDim = maxOf(info.size.width, info.size.height)
+                    if (maxDim > targetMax) {
+                        val scale = targetMax.toFloat() / maxDim
+                        decoder.setTargetSize(
+                            (info.size.width * scale).toInt().coerceAtLeast(1),
+                            (info.size.height * scale).toInt().coerceAtLeast(1)
+                        )
+                    }
                 }
-            }
-        } else {
+            }.getOrNull()
+            if (decoded != null) return decoded
+        }
+        return runCatching {
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             context.contentResolver.openInputStream(uri)?.use {
                 BitmapFactory.decodeStream(it, null, bounds)
@@ -654,12 +894,15 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
             var sample = 1
             val maxDim = maxOf(bounds.outWidth, bounds.outHeight)
             while (maxDim / sample > targetMax) sample *= 2
-            val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+            val opts = BitmapFactory.Options().apply {
+                inSampleSize = sample
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+            }
             context.contentResolver.openInputStream(uri)?.use {
                 BitmapFactory.decodeStream(it, null, opts)
             }
-        }
-    }.getOrNull()
+        }.getOrNull()
+    }
 
     private fun bindQuickButtons(
         context: Context,
@@ -757,11 +1000,27 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
         const val EXTRA_WIDGET_OPEN_ITEM_ID = "com.luminagallery.drive.EXTRA_WIDGET_OPEN_ITEM_ID"
         private const val ACTION_NEXT_PHOTO = "com.luminagallery.drive.widget.ACTION_NEXT_PHOTO"
         private const val TAG = "LuminaPhotoWidget"
-        private const val SLIDESHOW_FRAME_COUNT = 6
+        private const val SLIDESHOW_FRAME_COUNT = 4
+        private const val BROADCAST_RENDER_TIMEOUT_MS = 7_500L
+        private const val COLD_START_RECOVERY_MIN_AGE_MS = 5L * 60L * 1000L
+        private const val RENDER_CACHE_DIR = "widget_renders"
         private const val PENDING_FLAGS = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        private val updateMutex = Mutex()
+        private val widgetLocks = ConcurrentHashMap<Int, Mutex>()
 
-        internal fun resolveWidgetSizesDpForKind(options: Bundle, kind: PhotoWidgetKind): List<SizeF> {
+        internal fun resolvePrimaryWidgetSizeDp(
+            context: Context,
+            options: Bundle,
+            kind: PhotoWidgetKind
+        ): SizeF {
+            val isLandscape = context.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+            return resolveWidgetSizesDpForKind(options, kind, isLandscape = isLandscape).first()
+        }
+
+        internal fun resolveWidgetSizesDpForKind(
+            options: Bundle,
+            kind: PhotoWidgetKind,
+            isLandscape: Boolean = false
+        ): List<SizeF> {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 @Suppress("DEPRECATION")
                 val reported = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -771,19 +1030,29 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
                 }
                 val valid = reported?.filter { it.width >= 32f && it.height >= 32f }.orEmpty()
                 if (valid.isNotEmpty()) {
-                    return valid.sortedByDescending { it.height }
+                    return if (isLandscape) {
+                        valid.sortedByDescending { it.width }
+                    } else {
+                        valid.sortedByDescending { it.height }
+                    }
                 }
             }
             val (defW, defH) = when (kind) {
-                PhotoWidgetKind.COLLAGE, PhotoWidgetKind.MEMORIES -> 320f to 165f
-                PhotoWidgetKind.STRIP -> 320f to 84f
-                else -> 160f to 160f
+                PhotoWidgetKind.COLLAGE -> 320f to 165f
+                PhotoWidgetKind.FRAME -> 160f to 160f
             }
             val minW = options.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH)
+            val maxW = options.getInt(AppWidgetManager.OPTION_APPWIDGET_MAX_WIDTH)
             val maxH = options.getInt(AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT)
             val minH = options.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT)
-            val w = (if (minW > 0) minW.toFloat() else defW).coerceAtLeast(48f)
+            val w = (when {
+                isLandscape && maxW > 0 -> maxW.toFloat()
+                minW > 0 -> minW.toFloat()
+                maxW > 0 -> maxW.toFloat()
+                else -> defW
+            }).coerceAtLeast(48f)
             val h = (when {
+                isLandscape && minH > 0 -> minH.toFloat()
                 maxH > 0 -> maxH.toFloat()
                 minH > 0 -> minH.toFloat()
                 else -> defH
@@ -807,12 +1076,7 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
 
         fun allProviders(): List<LuminaPhotoWidgetProvider> = listOf(
             LuminaPhotoWidgetProvider(),
-            LuminaPhotoShuffleWidgetProvider(),
-            LuminaPhotoCollageWidgetProvider(),
-            LuminaMemoriesWidgetProvider(),
-            LuminaPhotoStripWidgetProvider(),
-            LuminaFavoritesWidgetProvider(),
-            LuminaPhotoDateWidgetProvider()
+            LuminaPhotoCollageWidgetProvider()
         )
 
         fun providerForComponent(context: Context, component: ComponentName?): LuminaPhotoWidgetProvider? {
@@ -830,36 +1094,79 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
             }
         }
 
+        /**
+         * Lightweight non-advancing recovery when the app process cold-starts, immediately
+         * restoring any widget whose RemoteViews was evicted by the OEM launcher.
+         */
+        fun scheduleColdStartRecovery(context: Context) {
+            val appContext = context.applicationContext
+            CoroutineScope(Dispatchers.IO).launch {
+                val manager = AppWidgetManager.getInstance(appContext)
+                val prefs = appContext.getSharedPreferences(PHOTO_WIDGET_PREFS, Context.MODE_PRIVATE)
+                val now = System.currentTimeMillis()
+                for (provider in allProviders()) {
+                    val ids = manager.getAppWidgetIds(ComponentName(appContext, provider.javaClass))
+                    val staleIds = ids.filter { id ->
+                        val lastPush = prefs.getLong("last_push_$id", 0L)
+                        lastPush <= 0L || (now - lastPush) >= COLD_START_RECOVERY_MIN_AGE_MS
+                    }.toIntArray()
+                    if (staleIds.isEmpty()) continue
+                    runCatching {
+                        provider.renderWidgets(appContext, manager, staleIds, advance = false, checkIntervalDue = true)
+                    }.onFailure {
+                        Log.w(TAG, "Cold-start recovery failed for ${provider.kind}", it)
+                    }
+                }
+            }
+        }
+
         fun refreshOnExclusionsChanged(context: Context, exclusions: Flow<Set<String>>) {
             CoroutineScope(Dispatchers.IO).launch {
                 exclusions.distinctUntilChanged().drop(1).collect {
+                    clearRenderCache(context)
                     refreshAllWidgets(context, advance = false)
                 }
             }
         }
-    }
-}
 
-internal class LuminaPhotoStripWidgetProvider : LuminaPhotoWidgetProvider() {
-    override val kind = PhotoWidgetKind.STRIP
+        internal fun deleteCachedRender(context: Context, widgetId: Int) {
+            runCatching {
+                cacheFileFor(context, widgetId).delete()
+            }
+        }
+
+        internal fun clearRenderCache(context: Context) {
+            runCatching {
+                File(context.noBackupFilesDir, RENDER_CACHE_DIR).deleteRecursively()
+            }
+        }
+
+        private fun cacheFileFor(context: Context, widgetId: Int): File {
+            val dir = File(context.noBackupFilesDir, RENDER_CACHE_DIR)
+            if (!dir.exists()) dir.mkdirs()
+            return File(dir, "widget_$widgetId.png")
+        }
+
+        private fun saveCachedRender(context: Context, widgetId: Int, bitmap: Bitmap) {
+            runCatching {
+                val target = cacheFileFor(context, widgetId)
+                val tmp = File(target.parentFile, "widget_${widgetId}.tmp")
+                FileOutputStream(tmp).use { out ->
+                    bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+                }
+                if (target.exists()) target.delete()
+                tmp.renameTo(target)
+            }
+        }
+
+        private fun readCachedRender(context: Context, widgetId: Int): Bitmap? = runCatching {
+            val file = cacheFileFor(context, widgetId)
+            if (!file.isFile || file.length() <= 0L) return@runCatching null
+            BitmapFactory.decodeFile(file.absolutePath)
+        }.getOrNull()
+    }
 }
 
 internal class LuminaPhotoCollageWidgetProvider : LuminaPhotoWidgetProvider() {
     override val kind = PhotoWidgetKind.COLLAGE
-}
-
-internal class LuminaPhotoShuffleWidgetProvider : LuminaPhotoWidgetProvider() {
-    override val kind = PhotoWidgetKind.RANDOM_SHUFFLE
-}
-
-internal class LuminaMemoriesWidgetProvider : LuminaPhotoWidgetProvider() {
-    override val kind = PhotoWidgetKind.MEMORIES
-}
-
-internal class LuminaFavoritesWidgetProvider : LuminaPhotoWidgetProvider() {
-    override val kind = PhotoWidgetKind.FAVORITES
-}
-
-internal class LuminaPhotoDateWidgetProvider : LuminaPhotoWidgetProvider() {
-    override val kind = PhotoWidgetKind.PHOTO_DATE
 }

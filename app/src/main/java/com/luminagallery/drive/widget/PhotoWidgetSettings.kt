@@ -15,7 +15,8 @@ internal enum class PhotoWidgetKind(
     val defaultShowCaption: Boolean,
     val defaultShowDateBadge: Boolean,
     val defaultShowShuffleButton: Boolean,
-    val defaultShowSettingsButton: Boolean
+    val defaultShowSettingsButton: Boolean,
+    val defaultAvoidSimilarPhotos: Boolean
 ) {
     FRAME(
         defaultSource = WidgetPhotoSource.FAVORITES_AND_RECENT,
@@ -23,59 +24,21 @@ internal enum class PhotoWidgetKind(
         defaultShowCaption = false,
         defaultShowDateBadge = false,
         defaultShowShuffleButton = false,
-        defaultShowSettingsButton = false
-    ),
-    RANDOM_SHUFFLE(
-        defaultSource = WidgetPhotoSource.ALL_PHONE_RANDOM,
-        defaultInterval = WidgetShuffleInterval.MIN_30,
-        defaultShowCaption = false,
-        defaultShowDateBadge = false,
-        defaultShowShuffleButton = true,
-        defaultShowSettingsButton = false
+        defaultShowSettingsButton = false,
+        defaultAvoidSimilarPhotos = true
     ),
     COLLAGE(
         defaultSource = WidgetPhotoSource.SMART_GROUPS,
         defaultInterval = WidgetShuffleInterval.HOUR_1,
-        defaultShowCaption = true,
-        defaultShowDateBadge = false,
-        defaultShowShuffleButton = true,
-        defaultShowSettingsButton = false
-    ),
-    MEMORIES(
-        defaultSource = WidgetPhotoSource.MEMORIES_MIX,
-        defaultInterval = WidgetShuffleInterval.HOUR_3,
-        defaultShowCaption = true,
-        defaultShowDateBadge = false,
-        defaultShowShuffleButton = true,
-        defaultShowSettingsButton = false
-    ),
-    STRIP(
-        defaultSource = WidgetPhotoSource.FAVORITES_AND_RECENT,
-        defaultInterval = WidgetShuffleInterval.HOUR_1,
-        defaultShowCaption = false,
-        defaultShowDateBadge = false,
-        defaultShowShuffleButton = true,
-        defaultShowSettingsButton = false
-    ),
-    FAVORITES(
-        defaultSource = WidgetPhotoSource.FAVORITES_ONLY,
-        defaultInterval = WidgetShuffleInterval.HOUR_1,
         defaultShowCaption = false,
         defaultShowDateBadge = false,
         defaultShowShuffleButton = false,
-        defaultShowSettingsButton = false
-    ),
-    PHOTO_DATE(
-        defaultSource = WidgetPhotoSource.ALL_PHONE_RANDOM,
-        defaultInterval = WidgetShuffleInterval.HOUR_1,
-        defaultShowCaption = false,
-        defaultShowDateBadge = false,
-        defaultShowShuffleButton = false,
-        defaultShowSettingsButton = false
+        defaultShowSettingsButton = false,
+        defaultAvoidSimilarPhotos = true
     );
 
     val isMultiPhoto: Boolean
-        get() = this == COLLAGE || this == MEMORIES || this == STRIP
+        get() = this == COLLAGE
 }
 
 @Serializable
@@ -125,6 +88,7 @@ internal enum class WidgetCornerStyle(val radiusDp: Float) {
 @Serializable
 internal enum class WidgetCollageLayout {
     AUTO,
+    STRIP,
     HERO_SIDE,
     GRID_2X2,
     BENTO_4,
@@ -187,6 +151,9 @@ internal data class PhotoWidgetSettings(
                 remove("seed_$widgetId")
                 remove("last_advance_$widgetId")
                 remove("group_key_$widgetId")
+                remove("shown_ids_$widgetId")
+                remove("shown_title_$widgetId")
+                remove("shown_sub_$widgetId")
             }
         }.apply()
     }
@@ -203,6 +170,7 @@ internal data class PhotoWidgetSettings(
         fun defaultsFor(kind: PhotoWidgetKind): PhotoWidgetSettings = PhotoWidgetSettings(
             source = kind.defaultSource,
             shuffleInterval = kind.defaultInterval,
+            avoidSimilarPhotos = kind.defaultAvoidSimilarPhotos,
             showCaption = kind.defaultShowCaption,
             showDateBadge = kind.defaultShowDateBadge,
             showShuffleButton = kind.defaultShowShuffleButton,
@@ -257,6 +225,7 @@ internal data class PhotoWidgetSettings(
                 .remove("shown_ids_$widgetId")
                 .remove("shown_title_$widgetId")
                 .remove("shown_sub_$widgetId")
+                .remove("last_push_$widgetId")
                 .remove("seconds_$widgetId")
                 .remove("source_$widgetId")
                 .apply()

@@ -338,6 +338,7 @@ data class UserPreferences(
     val themeMode: ThemeMode = ThemeMode.AMOLED_BLACK,
     val dynamicColor: Boolean = true,
     val gridColumns: Int = 4,
+    val albumGridColumns: Int = 3,
     val backgroundSyncEnabled: Boolean = false,
     val albumSortMode: AlbumSortMode = AlbumSortMode.CUSTOM,
     val defaultStartTab: MainTab = MainTab.ALBUMS,

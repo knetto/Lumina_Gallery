@@ -45,6 +45,8 @@
     kotlinx.serialization.KSerializer serializer(...);
 }
 -keep class com.luminagallery.drive.widget.LuminaWidgetRefreshWorker { *; }
+-keep class com.luminagallery.drive.widget.LuminaWidgetRecoveryReceiver { *; }
+-keep enum com.luminagallery.drive.widget.** { *; }
 
 # Retrofit 2
 -keepattributes Signature, Exceptions, RuntimeVisibleAnnotations, RuntimeVisibleParameterAnnotations

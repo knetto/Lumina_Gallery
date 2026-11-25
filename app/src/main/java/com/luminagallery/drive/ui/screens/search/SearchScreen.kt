@@ -283,6 +283,8 @@ fun SearchScreen(
             PinchZoomGridContainer(
                 currentColumns = uiState.gridColumns,
                 onColumnsChange = viewModel::setGridColumns,
+                minColumns = 1,
+                maxColumns = 6,
                 modifier = Modifier.fillMaxSize()
             ) {
                 val orderedResultIds = remember(uiState.results) { uiState.results.map { it.id } }

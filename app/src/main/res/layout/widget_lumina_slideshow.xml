@@ -5,6 +5,13 @@
     android:layout_height="match_parent"
     android:background="@android:color/transparent">
 
+    <!-- Static first-frame backdrop guarantees the widget never turns invisible if OEM launcher stalls ViewFlipper -->
+    <ImageView
+        android:id="@+id/widget_slideshow_backdrop"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:scaleType="fitXY" />
+
     <FrameLayout
         android:id="@+id/widget_shuffle_container"
         android:layout_width="match_parent"

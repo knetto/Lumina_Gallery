@@ -161,10 +161,11 @@ class PhotoWidgetSettingsActivity : ComponentActivity() {
 
         val kind = provider.kind
         val initialSettings = PhotoWidgetSettings.load(this, widgetId, kind)
-        val actualWidgetSizeDp = LuminaPhotoWidgetProvider.resolveWidgetSizesDpForKind(
+        val actualWidgetSizeDp = LuminaPhotoWidgetProvider.resolvePrimaryWidgetSizeDp(
+            this,
             manager.getAppWidgetOptions(widgetId),
             kind
-        ).first()
+        )
         val appContainer = (application as? LuminaApplication)?.container
 
         setContent {
@@ -209,6 +210,9 @@ class PhotoWidgetSettingsActivity : ComponentActivity() {
                         lifecycleScope.launch {
                             try {
                                 updated.save(applicationContext, widgetId, resetState = sourceChanged)
+                                if (sourceChanged) {
+                                    LuminaPhotoWidgetProvider.deleteCachedRender(applicationContext, widgetId)
+                                }
                                 WidgetRefreshScheduler.syncSchedule(applicationContext)
                                 provider.renderWidgets(
                                     applicationContext,
@@ -467,10 +471,10 @@ private fun WidgetSettingsRoot(
                         }
                     )
 
-                    if (kind == PhotoWidgetKind.COLLAGE || kind == PhotoWidgetKind.MEMORIES) {
+                    if (kind.isMultiPhoto) {
                         Spacer(Modifier.height(14.dp))
                         Text(
-                            text = "Collage layout",
+                            text = "Collage shape",
                             style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -483,6 +487,16 @@ private fun WidgetSettingsRoot(
                             }
                         )
                     }
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        text = if (kind.isMultiPhoto) {
+                            "Tip: Long-press the widget on your home screen to resize freely (e.g. 4×1 strip, 2×2, 4×2, or 4×4)."
+                        } else {
+                            "Tip: Long-press the widget on your home screen to resize it to any grid size."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
 
                 // 2. PHOTO SOURCE SECTION
@@ -1136,38 +1150,40 @@ private suspend fun loadPreviewSample(
     usePlacedWidgetPhotos: Boolean,
     advanceRandom: Boolean
 ): PreviewPhotoSample {
-    val maxSlots = when (kind) {
-        PhotoWidgetKind.COLLAGE, PhotoWidgetKind.MEMORIES -> 6
-        PhotoWidgetKind.STRIP -> 4
-        else -> 1
-    }
+    val maxSlots = if (kind.isMultiPhoto) 6 else 1
 
     // 1. If editing an already-placed widget with its unchanged source, load the EXACT photos currently shown on it!
+    var placedPhotos: List<WidgetPhoto> = emptyList()
+    var placedBitmaps: List<Bitmap> = emptyList()
+    var placedCaption: WidgetCaptionData? = null
     if (usePlacedWidgetPhotos && widgetId >= 0) {
         val prefs = context.getSharedPreferences(PHOTO_WIDGET_PREFS, Context.MODE_PRIVATE)
         val savedIdsRaw = prefs.getString("shown_ids_$widgetId", null)
         val savedIds = savedIdsRaw?.split(",")?.filter { it.isNotBlank() }.orEmpty()
         if (savedIds.isNotEmpty()) {
-            val exactPhotos = WidgetMediaRepository.loadPhotosByIds(context, savedIds.take(maxSlots))
-            val exactBitmaps = exactPhotos.mapNotNull { decodePreviewUri(context, Uri.parse(it.uri), 480) }
-            if (exactBitmaps.isNotEmpty()) {
+            placedPhotos = WidgetMediaRepository.loadPhotosByIds(context, savedIds.take(maxSlots))
+            placedBitmaps = placedPhotos.mapNotNull { decodePreviewUri(context, Uri.parse(it.uri), 480) }
+            if (placedBitmaps.isNotEmpty()) {
                 val savedTitle = prefs.getString("shown_title_$widgetId", null)
                 val savedSub = prefs.getString("shown_sub_$widgetId", null)
-                val caption = if (!savedTitle.isNullOrBlank()) {
+                placedCaption = if (!savedTitle.isNullOrBlank()) {
                     WidgetCaptionData(savedTitle, savedSub)
                 } else {
-                    val first = exactPhotos.first()
+                    val first = placedPhotos.first()
                     WidgetCaptionData(
                         title = first.albumName.ifBlank { "Photos" },
                         subtitle = widgetDateLabel(first.takenAtMs).takeIf { it.isNotBlank() }
                     )
                 }
-                return PreviewPhotoSample(exactBitmaps, caption)
+                if (placedBitmaps.size >= maxSlots) {
+                    return PreviewPhotoSample(placedBitmaps, placedCaption)
+                }
             }
         }
     }
 
-    // 2. Otherwise resolve live sample photos matching the newly selected source / shuffle preview
+    // 2. Resolve live sample photos matching the selected source (or pad placed collage preview up to 6 tiles
+    //    so switching between Strip / Bento / Mosaic 5 / 6-Grid previews every tile immediately!)
     val resolved = runCatching {
         WidgetMediaRepository.resolveWidgetFrames(
             context = context,
@@ -1180,9 +1196,13 @@ private suspend fun loadPreviewSample(
         ).firstOrNull()
     }.getOrNull()
 
-    val decoded = resolved?.photos.orEmpty().mapNotNull { photo ->
-        decodePreviewUri(context, Uri.parse(photo.uri), 480)
-    }.ifEmpty {
+    val usedIds = placedPhotos.mapTo(HashSet()) { it.luminaItemId }
+    val extraDecoded = resolved?.photos.orEmpty()
+        .filterNot { it.luminaItemId in usedIds }
+        .take((maxSlots - placedBitmaps.size).coerceAtLeast(0))
+        .mapNotNull { photo -> decodePreviewUri(context, Uri.parse(photo.uri), 480) }
+
+    val decoded = (placedBitmaps + extraDecoded).ifEmpty {
         val artIds = listOf(
             R.drawable.widget_art_sunset_peaks,
             R.drawable.widget_art_ocean_waves,
@@ -1192,11 +1212,9 @@ private suspend fun loadPreviewSample(
         artIds.take(maxSlots).mapNotNull { resId -> renderDrawableToBitmap(context, resId, 320, 320) }
     }
 
-    val caption = resolved?.caption ?: when (kind) {
+    val caption = placedCaption ?: resolved?.caption ?: when (kind) {
         PhotoWidgetKind.COLLAGE -> WidgetCaptionData("Amalfi Coast", "Location group")
-        PhotoWidgetKind.MEMORIES -> WidgetCaptionData("1 year ago", "On This Day")
-        PhotoWidgetKind.FAVORITES -> WidgetCaptionData("Favorites", "Curated picks")
-        else -> WidgetCaptionData("Summer Trip", "24 photos")
+        PhotoWidgetKind.FRAME -> WidgetCaptionData("Summer Trip", "24 photos")
     }
     return PreviewPhotoSample(decoded, caption)
 }
@@ -1399,11 +1417,12 @@ private fun CollageLayoutGrid(
     val rows = listOf(
         listOf(
             WidgetCollageLayout.AUTO,
+            WidgetCollageLayout.STRIP,
             WidgetCollageLayout.HERO_SIDE,
-            WidgetCollageLayout.GRID_2X2,
-            WidgetCollageLayout.BENTO_4
+            WidgetCollageLayout.GRID_2X2
         ),
         listOf(
+            WidgetCollageLayout.BENTO_4,
             WidgetCollageLayout.BENTO_TOP,
             WidgetCollageLayout.MOSAIC_5,
             WidgetCollageLayout.GRID_6
@@ -1442,15 +1461,7 @@ private fun CollageLayoutGrid(
                                 else MaterialTheme.colorScheme.onSurfaceVariant
                             )
                             Text(
-                                text = when (layout) {
-                                    WidgetCollageLayout.AUTO -> "Smart"
-                                    WidgetCollageLayout.HERO_SIDE -> "Hero + 2"
-                                    WidgetCollageLayout.GRID_2X2 -> "2×2"
-                                    WidgetCollageLayout.BENTO_4 -> "Bento 4"
-                                    WidgetCollageLayout.BENTO_TOP -> "Top Hero"
-                                    WidgetCollageLayout.MOSAIC_5 -> "Mosaic 5"
-                                    WidgetCollageLayout.GRID_6 -> "6-Grid"
-                                },
+                                text = collageLayoutLabel(layout),
                                 style = MaterialTheme.typography.labelSmall.copy(
                                     fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
                                 ),
@@ -1481,6 +1492,12 @@ private fun CollageMiniDiagram(layout: WidgetCollageLayout, tint: Color) {
                 drawLine(tint, Offset(x, 0f), Offset(x, size.height), strokeWidth = lw)
                 drawLine(tint, Offset(x, y), Offset(size.width, y), strokeWidth = lw)
                 drawLine(tint, Offset(x2, y), Offset(x2, size.height), strokeWidth = lw)
+            }
+            WidgetCollageLayout.STRIP -> {
+                for (i in 1..3) {
+                    val x = size.width * (i / 4f)
+                    drawLine(tint, Offset(x, 0f), Offset(x, size.height), strokeWidth = lw)
+                }
             }
             WidgetCollageLayout.HERO_SIDE -> {
                 val x = size.width * 0.58f
@@ -2105,12 +2122,18 @@ private fun PhotoMultiPickerScreen(
 
 internal fun widgetKindTitle(kind: PhotoWidgetKind): String = when (kind) {
     PhotoWidgetKind.FRAME -> "Photo Frame"
-    PhotoWidgetKind.RANDOM_SHUFFLE -> "Random Phone Shuffle"
-    PhotoWidgetKind.COLLAGE -> "Smart Collage"
-    PhotoWidgetKind.MEMORIES -> "Memories & Flashbacks"
-    PhotoWidgetKind.STRIP -> "Photo Strip"
-    PhotoWidgetKind.FAVORITES -> "Favorites Frame"
-    PhotoWidgetKind.PHOTO_DATE -> "Photo & Date"
+    PhotoWidgetKind.COLLAGE -> "Photo Collage"
+}
+
+internal fun collageLayoutLabel(layout: WidgetCollageLayout): String = when (layout) {
+    WidgetCollageLayout.AUTO -> "Smart"
+    WidgetCollageLayout.STRIP -> "Photo Strip"
+    WidgetCollageLayout.HERO_SIDE -> "Hero + 2"
+    WidgetCollageLayout.GRID_2X2 -> "2×2"
+    WidgetCollageLayout.BENTO_4 -> "Bento 4"
+    WidgetCollageLayout.BENTO_TOP -> "Top Hero"
+    WidgetCollageLayout.MOSAIC_5 -> "Mosaic 5"
+    WidgetCollageLayout.GRID_6 -> "6-Grid"
 }
 
 private fun sourceIcon(source: WidgetPhotoSource): ImageVector = when (source) {
@@ -2128,44 +2151,21 @@ private fun sourceIcon(source: WidgetPhotoSource): ImageVector = when (source) {
 private fun sourceOptionsForKind(kind: PhotoWidgetKind): List<WidgetPhotoSource> = when (kind) {
     PhotoWidgetKind.COLLAGE -> listOf(
         WidgetPhotoSource.SMART_GROUPS,
-        WidgetPhotoSource.LOCATION_GROUPS,
-        WidgetPhotoSource.DAY_GROUPS,
-        WidgetPhotoSource.SELECTED_ALBUMS,
-        WidgetPhotoSource.SELECTED_PHOTOS,
-        WidgetPhotoSource.ALL_PHONE_RANDOM
-    )
-    PhotoWidgetKind.MEMORIES -> listOf(
         WidgetPhotoSource.MEMORIES_MIX,
         WidgetPhotoSource.LOCATION_GROUPS,
         WidgetPhotoSource.DAY_GROUPS,
         WidgetPhotoSource.SELECTED_ALBUMS,
-        WidgetPhotoSource.SELECTED_PHOTOS
-    )
-    PhotoWidgetKind.STRIP -> listOf(
-        WidgetPhotoSource.FAVORITES_AND_RECENT,
-        WidgetPhotoSource.SELECTED_ALBUMS,
         WidgetPhotoSource.SELECTED_PHOTOS,
-        WidgetPhotoSource.SMART_GROUPS,
+        WidgetPhotoSource.FAVORITES_ONLY,
         WidgetPhotoSource.ALL_PHONE_RANDOM
     )
-    PhotoWidgetKind.RANDOM_SHUFFLE -> listOf(
-        WidgetPhotoSource.ALL_PHONE_RANDOM,
-        WidgetPhotoSource.SELECTED_ALBUMS,
-        WidgetPhotoSource.SELECTED_PHOTOS,
-        WidgetPhotoSource.FAVORITES_ONLY
-    )
-    PhotoWidgetKind.FAVORITES -> listOf(
-        WidgetPhotoSource.FAVORITES_ONLY,
+    PhotoWidgetKind.FRAME -> listOf(
         WidgetPhotoSource.FAVORITES_AND_RECENT,
-        WidgetPhotoSource.SELECTED_PHOTOS,
-        WidgetPhotoSource.SELECTED_ALBUMS
-    )
-    PhotoWidgetKind.FRAME, PhotoWidgetKind.PHOTO_DATE -> listOf(
-        WidgetPhotoSource.SELECTED_PHOTOS,
-        WidgetPhotoSource.SELECTED_ALBUMS,
         WidgetPhotoSource.ALL_PHONE_RANDOM,
         WidgetPhotoSource.FAVORITES_ONLY,
-        WidgetPhotoSource.FAVORITES_AND_RECENT
+        WidgetPhotoSource.SELECTED_ALBUMS,
+        WidgetPhotoSource.SELECTED_PHOTOS,
+        WidgetPhotoSource.MEMORIES_MIX
     )
 }
 

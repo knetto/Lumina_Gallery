@@ -109,6 +109,7 @@ private enum class SettingsPickerSheet {
     THEME,
     START_TAB,
     GRID_DENSITY,
+    ALBUM_GRID_DENSITY,
     ALBUM_SORT,
     CACHE_LIMIT,
     EXTERNAL_GALLERY,
@@ -521,9 +522,17 @@ fun SettingsScreen(
                     OneUiDivider()
 
                     OneUiValueRow(
-                        title = "Grid density",
+                        title = "Photo grid density",
                         value = gridColumnsLabel(prefs.gridColumns),
                         onClick = { activePicker = SettingsPickerSheet.GRID_DENSITY }
+                    )
+
+                    OneUiDivider()
+
+                    OneUiValueRow(
+                        title = "Album grid density",
+                        value = gridColumnsLabel(prefs.albumGridColumns),
+                        onClick = { activePicker = SettingsPickerSheet.ALBUM_GRID_DENSITY }
                     )
 
                     OneUiDivider()
@@ -571,7 +580,7 @@ fun SettingsScreen(
                     OneUiActionRow(
                         title = "Manage & customize widgets",
                         subtitle = if (placedWidgets.isEmpty()) {
-                            "Add HyperOS glass photo frames, random shuffle & smart collages"
+                            "Add HyperOS glass photo frames & adaptive collages"
                         } else {
                             "${placedWidgets.size} active widget${if (placedWidgets.size == 1) "" else "s"} · tap to edit or add new ones"
                         },
@@ -866,17 +875,35 @@ fun SettingsScreen(
                 )
 
                 SettingsPickerSheet.GRID_DENSITY -> OneUiPickerSheetContent(
-                    title = "Grid density",
+                    title = "Photo grid density",
                     options = listOf(
+                        PickerOption(1, "1 column", "Full-width single photo stream"),
                         PickerOption(2, "2 columns", "Large detailed thumbnails"),
                         PickerOption(3, "3 columns", "Balanced medium tiles"),
                         PickerOption(4, "4 columns", "Samsung Gallery default"),
-                        PickerOption(5, "5 columns", "Compact overview for large libraries")
+                        PickerOption(5, "5 columns", "Compact overview"),
+                        PickerOption(6, "6 columns", "Ultra-dense library overview")
                     ),
                     selected = prefs.gridColumns,
                     onSelect = {
                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                         viewModel.setGridColumns(it)
+                        activePicker = null
+                    }
+                )
+
+                SettingsPickerSheet.ALBUM_GRID_DENSITY -> OneUiPickerSheetContent(
+                    title = "Album grid density",
+                    options = listOf(
+                        PickerOption(2, "2 columns", "Large showcase album covers"),
+                        PickerOption(3, "3 columns", "Samsung Gallery default"),
+                        PickerOption(4, "4 columns", "Compact album overview"),
+                        PickerOption(5, "5 columns", "Dense album grid")
+                    ),
+                    selected = prefs.albumGridColumns,
+                    onSelect = {
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        viewModel.setAlbumGridColumns(it)
                         activePicker = null
                     }
                 )
@@ -1638,7 +1665,8 @@ private fun startTabLabel(tab: MainTab): String = when (tab) {
     MainTab.STORIES -> "Stories"
 }
 
-private fun gridColumnsLabel(columns: Int): String = "$columns columns"
+private fun gridColumnsLabel(columns: Int): String =
+    if (columns == 1) "1 column" else "$columns columns"
 
 private fun formatMbLabel(mb: Int): String =
     if (mb >= 1024) String.format(Locale.US, "%.1f GB", mb / 1024f) else "$mb MB"

@@ -51,12 +51,11 @@ sealed interface FolderGridEntry {
     }
 
     @Immutable
-    data class SubfolderTripleRow(
-        val first: DriveFolder,
-        val second: DriveFolder?,
-        val third: DriveFolder?
+    data class SubfolderRow(
+        val folders: List<DriveFolder>,
+        val rowColumns: Int
     ) : FolderGridEntry {
-        override val stableKey: String = "folder_row_${first.id}_${second?.id ?: "x"}_${third?.id ?: "y"}"
+        override val stableKey: String = "folder_row_${rowColumns}_${folders.joinToString("_") { it.id }}"
         override val scrollDateLabel: String = "Folders"
     }
 
@@ -95,6 +94,7 @@ data class FolderUiState(
     val unfilteredItemCount: Int = 0,
     val gridEntries: List<FolderGridEntry> = emptyList(),
     val gridColumns: Int = 4,
+    val albumGridColumns: Int = 3,
     val showCloudBadges: Boolean = true,
     val isRefreshing: Boolean = false,
     val hasCompletedInitialLoad: Boolean = false,
@@ -152,6 +152,10 @@ class FolderViewModel(
     private val pendingTrashFlow = MutableStateFlow<IntentSender?>(null)
     private val snackbarFlow = MutableStateFlow<String?>(null)
 
+    private val albumGridColumnsFlow = preferencesManager.preferencesFlow
+        .map { it.albumGridColumns }
+        .distinctUntilChanged()
+
     private val displayOptionsFlow = combine(
         mediaFilterFlow,
         mediaGroupByFlow,
@@ -160,10 +164,13 @@ class FolderViewModel(
         combine(
             extrasRepository.favoriteItemIdsFlow,
             extrasRepository.lockedAlbumIdsFlow,
-            extrasRepository.excludedAlbumIdsFlow
-        ) { favIds, lockedIds, excludedIds -> Triple(favIds, lockedIds, excludedIds) }
-    ) { filter, groupBy, sort, sidebar, (favIds, lockedIds, excludedIds) ->
-        DisplayOptions(filter, groupBy, sort, sidebar, favIds, lockedIds, excludedIds)
+            extrasRepository.excludedAlbumIdsFlow,
+            albumGridColumnsFlow
+        ) { favIds, lockedIds, excludedIds, albumCols ->
+            DisplayExtraOpts(favIds, lockedIds, excludedIds, albumCols)
+        }
+    ) { filter, groupBy, sort, sidebar, extra ->
+        DisplayOptions(filter, groupBy, sort, sidebar, extra.favIds, extra.lockedIds, extra.excludedIds, extra.albumCols)
     }
 
     private val rawContentFlow = activeFolderFlow.flatMapLatest { (activeId, activeName) ->
@@ -218,7 +225,8 @@ class FolderViewModel(
                             subfolders = markedSubfolders,
                             mediaItems = processed,
                             groupBy = opts.groupBy,
-                            sort = opts.sort
+                            sort = opts.sort,
+                            subfolderColumns = opts.albumGridColumns
                         )
                         FolderContent(
                             folderId = activeId,
@@ -283,6 +291,7 @@ class FolderViewModel(
         .map { prefs ->
             FolderPrefsSlice(
                 gridColumns = prefs.gridColumns,
+                albumGridColumns = prefs.albumGridColumns,
                 showCloudBadges = prefs.showCloudBadges,
                 wifiOnlyHighRes = prefs.wifiOnlyHighRes,
                 lockHiddenAlbums = prefs.lockHiddenAlbums
@@ -304,6 +313,7 @@ class FolderViewModel(
         FolderMeta(
             breadcrumbs = crumbs,
             gridColumns = prefs.gridColumns,
+            albumGridColumns = prefs.albumGridColumns,
             showCloudBadges = prefs.showCloudBadges,
             isRefreshing = refreshing,
             hasLoadedOnce = loaded,
@@ -356,6 +366,7 @@ class FolderViewModel(
             unfilteredItemCount = content.unfilteredCount,
             gridEntries = content.gridEntries,
             gridColumns = meta.gridColumns,
+            albumGridColumns = meta.albumGridColumns,
             showCloudBadges = meta.showCloudBadges,
             isRefreshing = meta.isRefreshing,
             hasCompletedInitialLoad = meta.hasLoadedOnce ||
@@ -407,7 +418,8 @@ class FolderViewModel(
                 subfolders = cachedSubfolders,
                 mediaItems = cachedMedia,
                 groupBy = AlbumMediaGroupBy.NONE,
-                sort = AlbumMediaSort.DATE_DESC
+                sort = AlbumMediaSort.DATE_DESC,
+                subfolderColumns = initialPrefs.albumGridColumns
             )
         } else {
             emptyList()
@@ -425,6 +437,7 @@ class FolderViewModel(
             unfilteredItemCount = cachedMedia.size,
             gridEntries = initialEntries,
             gridColumns = initialPrefs.gridColumns,
+            albumGridColumns = initialPrefs.albumGridColumns,
             showCloudBadges = initialPrefs.showCloudBadges,
             hasCompletedInitialLoad = isLocal || cachedSubfolders.isNotEmpty() || cachedMedia.isNotEmpty(),
             isOnline = initialNet.isOnline,
@@ -518,7 +531,13 @@ class FolderViewModel(
     }
 
     fun toggleSidebar() {
-        showSidebarFlow.update { !it }
+        setSidebarVisible(!showSidebarFlow.value)
+    }
+
+    fun setSidebarVisible(visible: Boolean) {
+        if (showSidebarFlow.value == visible) return
+        showSidebarFlow.value = visible
+        viewModelScope.launch { preferencesManager.setShowAlbumSidebarDefault(visible) }
     }
 
     fun enterSelectionMode() {
@@ -571,6 +590,10 @@ class FolderViewModel(
 
     fun setGridColumns(columns: Int) {
         viewModelScope.launch { preferencesManager.setGridColumns(columns) }
+    }
+
+    fun setAlbumGridColumns(columns: Int) {
+        viewModelScope.launch { preferencesManager.setAlbumGridColumns(columns) }
     }
 
     fun toggleSelection(itemId: String) {
@@ -755,21 +778,22 @@ class FolderViewModel(
         subfolders: List<DriveFolder>,
         mediaItems: List<MediaItem>,
         groupBy: AlbumMediaGroupBy,
-        sort: AlbumMediaSort
+        sort: AlbumMediaSort,
+        subfolderColumns: Int = 3
     ): List<FolderGridEntry> {
         val entries = ArrayList<FolderGridEntry>(subfolders.size + mediaItems.size + 16)
+        val safeCols = subfolderColumns.coerceIn(2, 5)
         if (mode == FolderViewMode.HIERARCHY && subfolders.isNotEmpty()) {
             // Only show the "Folders" subheading when media sits directly underneath;
-            // folder-only views match Samsung's clean full-width 3-column album grid.
+            // folder-only views match Samsung's clean full-width album grid.
             if (mediaItems.isNotEmpty()) {
                 entries.add(FolderGridEntry.SubfoldersHeading(subfolders.size))
             }
-            subfolders.chunked(3).forEach { triple ->
+            subfolders.chunked(safeCols).forEach { chunk ->
                 entries.add(
-                    FolderGridEntry.SubfolderTripleRow(
-                        first = triple[0],
-                        second = triple.getOrNull(1),
-                        third = triple.getOrNull(2)
+                    FolderGridEntry.SubfolderRow(
+                        folders = chunk,
+                        rowColumns = safeCols
                     )
                 )
             }
@@ -878,6 +902,13 @@ class FolderViewModel(
         }
     }
 
+    private data class DisplayExtraOpts(
+        val favIds: Set<String>,
+        val lockedIds: Set<String>,
+        val excludedIds: Set<String>,
+        val albumCols: Int
+    )
+
     private data class DisplayOptions(
         val filter: AlbumMediaFilter,
         val groupBy: AlbumMediaGroupBy,
@@ -885,11 +916,13 @@ class FolderViewModel(
         val showSidebar: Boolean,
         val favoriteIds: Set<String>,
         val lockedIds: Set<String> = emptySet(),
-        val excludedIds: Set<String> = emptySet()
+        val excludedIds: Set<String> = emptySet(),
+        val albumGridColumns: Int = 3
     )
 
     private data class FolderPrefsSlice(
         val gridColumns: Int,
+        val albumGridColumns: Int,
         val showCloudBadges: Boolean,
         val wifiOnlyHighRes: Boolean,
         val lockHiddenAlbums: Boolean
@@ -915,6 +948,7 @@ class FolderViewModel(
     private data class FolderMeta(
         val breadcrumbs: List<BreadcrumbItem>,
         val gridColumns: Int,
+        val albumGridColumns: Int,
         val showCloudBadges: Boolean,
         val isRefreshing: Boolean,
         val hasLoadedOnce: Boolean,

@@ -62,9 +62,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.luminagallery.drive.domain.model.AlbumGridItem
+import com.luminagallery.drive.ui.components.AlbumParentDropZone
 import com.luminagallery.drive.ui.components.AlbumSelectionActionBar
 import com.luminagallery.drive.ui.components.DraggableAlbumGrid
 import com.luminagallery.drive.ui.components.LuminaSnackbarHost
+import com.luminagallery.drive.ui.components.PinchZoomGridContainer
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -115,7 +117,7 @@ fun CollectionScreen(
                                 overflow = TextOverflow.Ellipsis
                             )
                             Text(
-                                text = "${uiState.items.size} ${if (uiState.items.size == 1) "item" else "items"} · Drag to reorder or group",
+                                text = "${uiState.items.size} ${if (uiState.items.size == 1) "item" else "items"} · Drag up to move out",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -257,35 +259,85 @@ fun CollectionScreen(
                     }
                 }
             } else {
-                DraggableAlbumGrid(
-                    items = uiState.items,
-                    isUnmeteredWifi = uiState.isUnmeteredWifi,
-                    selectedIds = uiState.selectedIds,
-                    contentPadding = PaddingValues(
-                        start = 16.dp,
-                        end = 16.dp,
-                        top = 12.dp,
-                        bottom = if (uiState.isSelectionMode) 112.dp else 32.dp
-                    ),
-                    onItemClick = { clicked ->
-                        when (clicked) {
-                            is AlbumGridItem.AlbumEntry ->
-                                onOpenAlbum(clicked.folder.id, clicked.folder.name)
-                            is AlbumGridItem.CollectionEntry ->
-                                onOpenSubCollection(clicked.id, clicked.name)
-                        }
-                    },
-                    onToggleSelect = viewModel::toggleSelection,
-                    onReorderCommitted = viewModel::saveReorder,
-                    onDropToGroup = { dragged, target ->
-                        if (target is AlbumGridItem.CollectionEntry) {
-                            viewModel.moveItemIntoCollection(dragged, target.id)
+                val parentDropZones = remember(uiState.parentCollectionId, uiState.breadcrumbs) {
+                    val parentId = uiState.parentCollectionId
+                    val parentName = if (parentId != null) {
+                        uiState.breadcrumbs.dropLast(1).lastOrNull()?.name ?: "Parent folder"
+                    } else null
+                    buildList {
+                        if (parentId != null && parentName != null) {
+                            add(
+                                AlbumParentDropZone(
+                                    key = "parent_$parentId",
+                                    label = "Move to $parentName",
+                                    targetParentId = parentId,
+                                    isRoot = false
+                                )
+                            )
+                            add(
+                                AlbumParentDropZone(
+                                    key = "root_albums",
+                                    label = "Move to Albums",
+                                    targetParentId = null,
+                                    isRoot = true
+                                )
+                            )
                         } else {
-                            pendingGroupPair = dragged to target
+                            add(
+                                AlbumParentDropZone(
+                                    key = "root_albums",
+                                    label = "Drop here to move to Albums",
+                                    targetParentId = null,
+                                    isRoot = true
+                                )
+                            )
                         }
-                    },
+                    }
+                }
+                PinchZoomGridContainer(
+                    currentColumns = uiState.albumGridColumns,
+                    onColumnsChange = viewModel::setAlbumGridColumns,
+                    minColumns = 2,
+                    maxColumns = 5,
+                    columnLabel = { cols -> "$cols albums / row" },
                     modifier = Modifier.fillMaxSize()
-                )
+                ) {
+                    DraggableAlbumGrid(
+                        items = uiState.items,
+                        isUnmeteredWifi = uiState.isUnmeteredWifi,
+                        selectedIds = uiState.selectedIds,
+                        columns = uiState.albumGridColumns,
+                        showCloudBadges = uiState.showCloudBadges,
+                        topDropZones = parentDropZones,
+                        onDropOnTopZone = { dragged, zone ->
+                            viewModel.moveItemIntoCollection(dragged, zone.targetParentId)
+                        },
+                        contentPadding = PaddingValues(
+                            start = 16.dp,
+                            end = 16.dp,
+                            top = 12.dp,
+                            bottom = if (uiState.isSelectionMode) 112.dp else 32.dp
+                        ),
+                        onItemClick = { clicked ->
+                            when (clicked) {
+                                is AlbumGridItem.AlbumEntry ->
+                                    onOpenAlbum(clicked.folder.id, clicked.folder.name)
+                                is AlbumGridItem.CollectionEntry ->
+                                    onOpenSubCollection(clicked.id, clicked.name)
+                            }
+                        },
+                        onToggleSelect = viewModel::toggleSelection,
+                        onReorderCommitted = viewModel::saveReorder,
+                        onDropToGroup = { dragged, target ->
+                            if (target is AlbumGridItem.CollectionEntry) {
+                                viewModel.moveItemIntoCollection(dragged, target.id)
+                            } else {
+                                pendingGroupPair = dragged to target
+                            }
+                        },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
             }
 
             val selectedItems = remember(uiState.items, uiState.selectedIds) {

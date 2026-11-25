@@ -3,6 +3,7 @@ package com.luminagallery.drive
 import com.luminagallery.drive.data.local.entity.PhotoLocationEntity
 import com.luminagallery.drive.widget.HyperOsGlassRenderer
 import com.luminagallery.drive.widget.LuminaPhotoWidgetProvider
+import com.luminagallery.drive.widget.LuminaWidgetRefreshWorker
 import com.luminagallery.drive.widget.PhotoWidgetKind
 import com.luminagallery.drive.widget.PhotoWidgetSettings
 import com.luminagallery.drive.widget.ResolvedTilePattern
@@ -128,29 +129,54 @@ class WidgetMemoriesTest {
                 PhotoWidgetKind.COLLAGE, WidgetCollageLayout.AUTO, 170f, 170f, 4
             )
         )
-        // Strip flips from horizontal 4-photo row to vertical 3-photo stack on portrait resize
+        // Photo Strip layout inside Collage flips from horizontal 4-photo row to vertical 3-photo stack on portrait resize
         assertEquals(
             ResolvedTilePattern.STRIP_HORIZONTAL_4,
             HyperOsGlassRenderer.resolveTilePattern(
-                PhotoWidgetKind.STRIP, WidgetCollageLayout.AUTO, 320f, 80f, 4
+                PhotoWidgetKind.COLLAGE, WidgetCollageLayout.STRIP, 320f, 80f, 4
             )
         )
         assertEquals(
             ResolvedTilePattern.STRIP_VERTICAL_3,
             HyperOsGlassRenderer.resolveTilePattern(
-                PhotoWidgetKind.STRIP, WidgetCollageLayout.AUTO, 90f, 280f, 4
+                PhotoWidgetKind.COLLAGE, WidgetCollageLayout.STRIP, 90f, 280f, 4
+            )
+        )
+        // Smart Auto Collage also becomes a clean 4-photo horizontal strip when resized down to a 4x1 banner
+        assertEquals(
+            ResolvedTilePattern.STRIP_HORIZONTAL_4,
+            HyperOsGlassRenderer.resolveTilePattern(
+                PhotoWidgetKind.COLLAGE, WidgetCollageLayout.AUTO, 320f, 80f, 4
             )
         )
     }
 
     @Test
-    fun widgetDefaultsMatchEachWidgetKindPurpose() {
-        assertEquals(WidgetPhotoSource.ALL_PHONE_RANDOM, PhotoWidgetSettings.defaultsFor(PhotoWidgetKind.RANDOM_SHUFFLE).source)
+    fun widgetDefaultsDisableOverlaysAndEnableAvoidSimilarPhotos() {
+        assertEquals(listOf(PhotoWidgetKind.FRAME, PhotoWidgetKind.COLLAGE), LuminaPhotoWidgetProvider.allProviders().map { it.kind })
+        assertEquals(WidgetPhotoSource.FAVORITES_AND_RECENT, PhotoWidgetSettings.defaultsFor(PhotoWidgetKind.FRAME).source)
         assertEquals(WidgetPhotoSource.SMART_GROUPS, PhotoWidgetSettings.defaultsFor(PhotoWidgetKind.COLLAGE).source)
-        assertEquals(WidgetPhotoSource.FAVORITES_ONLY, PhotoWidgetSettings.defaultsFor(PhotoWidgetKind.FAVORITES).source)
         for (kind in PhotoWidgetKind.entries) {
-            assertFalse("Live date badge must be OFF by default for $kind", PhotoWidgetSettings.defaultsFor(kind).showDateBadge)
+            val defaults = PhotoWidgetSettings.defaultsFor(kind)
+            assertFalse("Caption must be OFF by default for $kind", defaults.showCaption)
+            assertFalse("Live date badge must be OFF by default for $kind", defaults.showDateBadge)
+            assertFalse("Shuffle button must be OFF by default for $kind", defaults.showShuffleButton)
+            assertFalse("Settings button must be OFF by default for $kind", defaults.showSettingsButton)
+            assertTrue("Avoid similar photos must be ON by default for $kind", defaults.avoidSimilarPhotos)
         }
+    }
+
+    @Test
+    fun keepAliveRefreshTriggersAfterStaleIntervalOrFirstPush() {
+        val now = 10_000_000_000L
+        assertTrue(LuminaWidgetRefreshWorker.shouldTriggerKeepAliveRefresh(0L, now))
+        assertFalse(LuminaWidgetRefreshWorker.shouldTriggerKeepAliveRefresh(now - 10 * 60_000L, now))
+        assertTrue(
+            LuminaWidgetRefreshWorker.shouldTriggerKeepAliveRefresh(
+                now - LuminaWidgetRefreshWorker.KEEP_ALIVE_INTERVAL_MS,
+                now
+            )
+        )
     }
 
     @Test

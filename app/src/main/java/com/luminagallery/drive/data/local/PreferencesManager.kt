@@ -44,7 +44,8 @@ class PreferencesManager(private val context: Context) {
             maxCacheSizeMb = (prefs[KEY_MAX_CACHE_MB] ?: DEFAULT_CACHE_MB).coerceIn(250, 2048),
             themeMode = themeMode,
             dynamicColor = prefs[KEY_DYNAMIC_COLOR] ?: true,
-            gridColumns = (prefs[KEY_GRID_COLUMNS] ?: DEFAULT_GRID_COLUMNS).coerceIn(2, 5),
+            gridColumns = (prefs[KEY_GRID_COLUMNS] ?: DEFAULT_GRID_COLUMNS).coerceIn(MIN_PHOTO_GRID_COLUMNS, MAX_PHOTO_GRID_COLUMNS),
+            albumGridColumns = (prefs[KEY_ALBUM_GRID_COLUMNS] ?: DEFAULT_ALBUM_GRID_COLUMNS).coerceIn(MIN_ALBUM_GRID_COLUMNS, MAX_ALBUM_GRID_COLUMNS),
             backgroundSyncEnabled = prefs[KEY_BACKGROUND_SYNC] ?: false,
             albumSortMode = sortMode,
             defaultStartTab = startTab,
@@ -90,7 +91,13 @@ class PreferencesManager(private val context: Context) {
 
     suspend fun setGridColumns(columns: Int) {
         context.galleryDataStore.edit { prefs ->
-            prefs[KEY_GRID_COLUMNS] = columns.coerceIn(2, 5)
+            prefs[KEY_GRID_COLUMNS] = columns.coerceIn(MIN_PHOTO_GRID_COLUMNS, MAX_PHOTO_GRID_COLUMNS)
+        }
+    }
+
+    suspend fun setAlbumGridColumns(columns: Int) {
+        context.galleryDataStore.edit { prefs ->
+            prefs[KEY_ALBUM_GRID_COLUMNS] = columns.coerceIn(MIN_ALBUM_GRID_COLUMNS, MAX_ALBUM_GRID_COLUMNS)
         }
     }
 
@@ -279,7 +286,8 @@ class PreferencesManager(private val context: Context) {
             prefs[KEY_MAX_CACHE_MB] = synced.maxCacheSizeMb.coerceIn(250, 2048)
             prefs[KEY_THEME_MODE] = synced.themeMode.name
             prefs[KEY_DYNAMIC_COLOR] = synced.dynamicColor
-            prefs[KEY_GRID_COLUMNS] = synced.gridColumns.coerceIn(2, 5)
+            prefs[KEY_GRID_COLUMNS] = synced.gridColumns.coerceIn(MIN_PHOTO_GRID_COLUMNS, MAX_PHOTO_GRID_COLUMNS)
+            prefs[KEY_ALBUM_GRID_COLUMNS] = synced.albumGridColumns.coerceIn(MIN_ALBUM_GRID_COLUMNS, MAX_ALBUM_GRID_COLUMNS)
             prefs[KEY_BACKGROUND_SYNC] = synced.backgroundSyncEnabled
             prefs[KEY_ALBUM_SORT_MODE] = synced.albumSortMode.name
             prefs[KEY_DEFAULT_START_TAB] = synced.defaultStartTab.name
@@ -335,11 +343,17 @@ class PreferencesManager(private val context: Context) {
     companion object {
         const val DEFAULT_CACHE_MB = 500
         const val DEFAULT_GRID_COLUMNS = 4
+        const val MIN_PHOTO_GRID_COLUMNS = 1
+        const val MAX_PHOTO_GRID_COLUMNS = 6
+        const val DEFAULT_ALBUM_GRID_COLUMNS = 3
+        const val MIN_ALBUM_GRID_COLUMNS = 2
+        const val MAX_ALBUM_GRID_COLUMNS = 5
 
         private val KEY_MAX_CACHE_MB = intPreferencesKey("max_cache_mb")
         private val KEY_THEME_MODE = stringPreferencesKey("theme_mode")
         private val KEY_DYNAMIC_COLOR = booleanPreferencesKey("dynamic_color")
         private val KEY_GRID_COLUMNS = intPreferencesKey("grid_columns")
+        private val KEY_ALBUM_GRID_COLUMNS = intPreferencesKey("album_grid_columns")
         private val KEY_BACKGROUND_SYNC = booleanPreferencesKey("background_sync_enabled")
         private val KEY_ALBUM_SORT_MODE = stringPreferencesKey("album_sort_mode")
         private val KEY_DEFAULT_START_TAB = stringPreferencesKey("default_start_tab")

@@ -115,6 +115,7 @@ data class HomeUiState(
     val albumsFilter: AlbumsTabFilter = AlbumsTabFilter.ALL,
     val stories: List<GalleryStory> = emptyList(),
     val gridColumns: Int = 4,
+    val albumGridColumns: Int = 3,
     val showCloudBadges: Boolean = true,
     val lockHiddenAlbums: Boolean = false,
     val highResThumbnailsAllowed: Boolean = true,
@@ -302,6 +303,7 @@ class HomeViewModel(
         .map { prefs ->
             HomePrefsSlice(
                 gridColumns = prefs.gridColumns,
+                albumGridColumns = prefs.albumGridColumns,
                 albumSortMode = prefs.albumSortMode,
                 showCloudBadges = prefs.showCloudBadges,
                 lockHiddenAlbums = prefs.lockHiddenAlbums,
@@ -321,6 +323,7 @@ class HomeViewModel(
             selectedTab = tab,
             albumsFilter = filter,
             gridColumns = prefs.gridColumns,
+            albumGridColumns = prefs.albumGridColumns,
             albumSortMode = prefs.albumSortMode,
             showCloudBadges = prefs.showCloudBadges,
             lockHiddenAlbums = prefs.lockHiddenAlbums,
@@ -374,6 +377,7 @@ class HomeViewModel(
             albumsFilter = misc.albumsFilter,
             stories = extras.stories,
             gridColumns = misc.gridColumns,
+            albumGridColumns = misc.albumGridColumns,
             showCloudBadges = misc.showCloudBadges,
             lockHiddenAlbums = misc.lockHiddenAlbums,
             highResThumbnailsAllowed = drive.networkState.isUnmeteredWifi || !misc.wifiOnlyHighRes,
@@ -404,6 +408,8 @@ class HomeViewModel(
         initialValue = HomeUiState(
             hasLocalMediaPermission = localMediaRepository.hasMediaPermission(),
             hasPartialMediaPermission = localMediaRepository.hasPartialMediaPermission(),
+            gridColumns = preferencesManager.latestPreferences.gridColumns,
+            albumGridColumns = preferencesManager.latestPreferences.albumGridColumns,
             serviceAccountState = credentialStore.state.value,
             networkState = networkMonitor.networkState.value
         )
@@ -578,6 +584,10 @@ class HomeViewModel(
 
     fun setGridColumns(columns: Int) {
         viewModelScope.launch { preferencesManager.setGridColumns(columns) }
+    }
+
+    fun setAlbumGridColumns(columns: Int) {
+        viewModelScope.launch { preferencesManager.setAlbumGridColumns(columns) }
     }
 
     fun togglePictureSelection(itemId: String) {
@@ -1035,6 +1045,7 @@ class HomeViewModel(
 
     private data class HomePrefsSlice(
         val gridColumns: Int,
+        val albumGridColumns: Int,
         val albumSortMode: AlbumSortMode,
         val showCloudBadges: Boolean,
         val lockHiddenAlbums: Boolean,
@@ -1078,6 +1089,7 @@ class HomeViewModel(
         val selectedTab: MainTab,
         val albumsFilter: AlbumsTabFilter,
         val gridColumns: Int,
+        val albumGridColumns: Int,
         val albumSortMode: AlbumSortMode,
         val showCloudBadges: Boolean,
         val lockHiddenAlbums: Boolean,

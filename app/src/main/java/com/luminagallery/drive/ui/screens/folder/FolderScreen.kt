@@ -7,20 +7,18 @@ import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.Crossfade
-import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
-import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
@@ -28,19 +26,19 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
-import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -51,7 +49,6 @@ import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -62,10 +59,15 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Sort
 import androidx.compose.material.icons.outlined.FilterAlt
 import androidx.compose.material.icons.rounded.CalendarMonth
+import androidx.compose.material.icons.rounded.ChevronLeft
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.DriveFileMove
+import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.FolderOpen
+import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.MoreVert
+import androidx.compose.material.icons.rounded.MoveUp
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.SelectAll
 import androidx.compose.material3.AlertDialog
@@ -78,7 +80,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -87,9 +88,10 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -98,27 +100,51 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.util.VelocityTracker
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import coil3.compose.AsyncImage
+import coil3.request.ImageRequest
+import coil3.request.allowRgb565
+import coil3.request.crossfade
+import coil3.size.Precision
+import com.luminagallery.drive.data.remote.DriveConstants
+import com.luminagallery.drive.data.repository.LocalFileOperationsManager
+import com.luminagallery.drive.data.repository.LocalThumbnailRequest
 import com.luminagallery.drive.domain.model.AlbumGridItem
 import com.luminagallery.drive.domain.model.AlbumMediaFilter
 import com.luminagallery.drive.domain.model.AlbumMediaGroupBy
 import com.luminagallery.drive.domain.model.AlbumMediaSort
 import com.luminagallery.drive.domain.model.BreadcrumbItem
+import com.luminagallery.drive.domain.model.DriveFolder
 import com.luminagallery.drive.domain.model.FolderViewMode
 import com.luminagallery.drive.domain.model.GalleryStory
+import com.luminagallery.drive.domain.model.MediaItem
 import com.luminagallery.drive.domain.model.SidebarAlbumNode
 import com.luminagallery.drive.domain.model.StoryCategory
+import kotlin.math.abs
+import kotlin.math.roundToInt
 import com.luminagallery.drive.ui.components.BiometricLockHelper
 import com.luminagallery.drive.ui.components.CollagePdfBottomSheet
 import com.luminagallery.drive.ui.components.CollectionCoverArtwork
@@ -190,12 +216,93 @@ fun FolderScreen(
     var showSortDialog by remember { mutableStateOf(false) }
     var showSlideshow by remember { mutableStateOf(false) }
     var showMoveCopySheet by remember { mutableStateOf(false) }
+    var moveSheetInitialMoveMode by remember { mutableStateOf(false) }
+    var moveSheetOverrideItems by remember { mutableStateOf<List<MediaItem>?>(null) }
     var showCollagePdfSheet by remember { mutableStateOf(false) }
     var showTrashConfirmLocal by remember { mutableStateOf(false) }
     var showRenameAlbumDialog by remember { mutableStateOf(false) }
     var pendingAlbumRenameName by remember { mutableStateOf<String?>(null) }
     var showAllFilesAccessLockDialog by remember { mutableStateOf(false) }
     var pendingAllFilesAction by remember { mutableStateOf<String?>(null) }
+
+    // State for dragging local photos/videos out to the parent folder ("moeder folder") or sidebar albums
+    val density = LocalDensity.current
+    var activePhotoDrag by remember { mutableStateOf<ActivePhotoDragState?>(null) }
+    var pendingDragMove by remember { mutableStateOf<PendingPhotoMoveRequest?>(null) }
+    var rootBoxOriginInRoot by remember { mutableStateOf(Offset.Zero) }
+    var gridOriginInRoot by remember { mutableStateOf(Offset.Zero) }
+    val topDropZoneRects = remember { mutableStateMapOf<String, Rect>() }
+    val sidebarAlbumDropTargets = remember { mutableStateMapOf<String, SidebarDropTarget>() }
+    val sidebarCollapsedGroupRects = remember { mutableStateMapOf<String, Rect>() }
+    var hoveredPhotoDropTargetKey by remember { mutableStateOf<String?>(null) }
+    var hoveredCollapsedGroupId by remember { mutableStateOf<String?>(null) }
+    var springLoadedExpandGroupId by remember { mutableStateOf<String?>(null) }
+
+    fun executeLocalPhotoMoveNow(
+        items: List<MediaItem>,
+        targetName: String,
+        useDcimParent: Boolean,
+        targetRelPath: String?
+    ) {
+        scope.launch {
+            appContainer.localFileOperationsManager.moveLocalItemsToAlbum(
+                items = items,
+                albumFolderName = targetName,
+                useDcimParent = useDcimParent,
+                targetRelativePath = targetRelPath
+            ).onSuccess { count ->
+                appContainer.localMediaRepository.notifyPermissionChanged()
+                viewModel.clearSelection()
+                viewModel.showMessage(
+                    if (count == 1) "Moved 1 item to $targetName" else "Moved $count items to $targetName"
+                )
+            }.onFailure { err ->
+                viewModel.showMessage(err.localizedMessage ?: "Failed to move item(s)")
+            }
+        }
+    }
+
+    val photoMovePermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        val pending = pendingDragMove
+        pendingDragMove = null
+        if (result.resultCode == Activity.RESULT_OK && pending != null) {
+            executeLocalPhotoMoveNow(
+                items = pending.items,
+                targetName = pending.targetName,
+                useDcimParent = pending.useDcimParent,
+                targetRelPath = pending.targetRelativePath
+            )
+        } else {
+            viewModel.showMessage("Move cancelled")
+        }
+    }
+
+    fun startLocalPhotoMove(
+        items: List<MediaItem>,
+        targetName: String,
+        useDcimParent: Boolean,
+        targetRelPath: String?
+    ) {
+        val movable = items.filter { it.isLocal && !HiddenLockedFolderManager.isHiddenFileUri(it.localContentUri) }
+        if (movable.isEmpty()) {
+            viewModel.showMessage("Unlock private album first to move items")
+            return
+        }
+        val sender = appContainer.localFileOperationsManager.buildWritePermissionSender(movable)
+        if (sender != null) {
+            pendingDragMove = PendingPhotoMoveRequest(
+                items = movable,
+                targetName = targetName,
+                useDcimParent = useDcimParent,
+                targetRelativePath = targetRelPath
+            )
+            photoMovePermissionLauncher.launch(IntentSenderRequest.Builder(sender).build())
+        } else {
+            executeLocalPhotoMoveNow(movable, targetName, useDcimParent, targetRelPath)
+        }
+    }
 
     val allFilesAccessLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
@@ -303,16 +410,60 @@ fun FolderScreen(
         flattenSidebarAlbumOrder(uiState.sidebarNodes)
     }
     // Just like Samsung Gallery: while browsing a folder-of-folders (nested container albums)
-    // with no direct photos, show a full-width 3-column album grid without the left sidebar!
+    // with no direct photos, show a full-width album grid without the left sidebar!
     val isFolderContainerOnly = uiState.viewMode == FolderViewMode.HIERARCHY &&
         uiState.subfolders.isNotEmpty() &&
         uiState.mediaItems.isEmpty()
-    val effectiveShowSidebar = uiState.showSidebar && hasSidebarContent && !isFolderContainerOnly
+    val canHaveSidebar = hasSidebarContent && !isFolderContainerOnly
+    val effectiveShowSidebar = uiState.showSidebar && canHaveSidebar
     val effectiveColumns = if (effectiveShowSidebar) {
-        (uiState.gridColumns - 1).coerceIn(2, 5)
+        (uiState.gridColumns - 1).coerceIn(1, 5)
     } else {
-        uiState.gridColumns
+        uiState.gridColumns.coerceIn(1, 6)
     }
+
+    val sidebarMaxWidthDp = 94.dp
+    val sidebarMaxWidthPx = with(density) { sidebarMaxWidthDp.toPx() }
+    val sidebarFraction = remember {
+        Animatable(if (effectiveShowSidebar) 1f else 0f)
+    }
+    var sidebarAutoOpenedByDrag by remember { mutableStateOf(false) }
+
+    LaunchedEffect(effectiveShowSidebar) {
+        sidebarFraction.animateTo(
+            targetValue = if (effectiveShowSidebar) 1f else 0f,
+            animationSpec = spring(
+                dampingRatio = Spring.DampingRatioNoBouncy,
+                stiffness = 430f
+            )
+        )
+    }
+
+    // Spring-loaded folder auto-expand when hovering dragged photo(s) over a collapsed group in sidebar
+    LaunchedEffect(hoveredCollapsedGroupId, activePhotoDrag != null) {
+        val groupId = hoveredCollapsedGroupId
+        if (groupId != null && activePhotoDrag != null) {
+            delay(420L)
+            springLoadedExpandGroupId = groupId
+            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+        }
+    }
+
+    // Resolve parent ("moeder") storage folder for local albums (e.g. DCIM/Vakantie/Dag1 -> DCIM/Vakantie)
+    val parentLocalFolder = remember(uiState.isLocalAlbum, uiState.unfilteredMediaItems, uiState.mediaItems) {
+        if (!uiState.isLocalAlbum) null
+        else {
+            val sample = uiState.unfilteredMediaItems.firstOrNull() ?: uiState.mediaItems.firstOrNull()
+            LocalFileOperationsManager.resolveParentLocalFolder(sample?.storagePath)
+        }
+    }
+    val canDragMovePhotos = uiState.isLocalAlbum && !uiState.isLockedAlbum && uiState.mediaItems.isNotEmpty()
+    val latestFolderId by rememberUpdatedState(uiState.folderId)
+    val latestCanHaveSidebar by rememberUpdatedState(canHaveSidebar)
+    val latestEffectiveShowSidebar by rememberUpdatedState(effectiveShowSidebar)
+    val latestIsPhotoDragActive by rememberUpdatedState(activePhotoDrag != null)
+    val latestParentLocalFolder by rememberUpdatedState(parentLocalFolder)
+    val latestSidebarWidthPx by rememberUpdatedState(sidebarMaxWidthPx)
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -587,55 +738,309 @@ fun FolderScreen(
             }
         }
     ) { innerPadding ->
+        val edgeRevealThresholdPx = with(density) { 54.dp.toPx() }
+        val topDropZoneOtherKey = "__photo_drop_other__"
+        val topDropZoneParentKey = "__photo_drop_parent__"
+
+        fun updatePhotoDragHover(localGridOffset: Offset) {
+            val pointerInRoot = gridOriginInRoot + localGridOffset
+            val pointerInBox = pointerInRoot - rootBoxOriginInRoot
+            activePhotoDrag = activePhotoDrag?.copy(pointerInBox = pointerInBox)
+
+            // Auto-reveal sidebar if hidden and dragging near the left edge
+            if (canHaveSidebar && !effectiveShowSidebar && pointerInBox.x <= edgeRevealThresholdPx && !sidebarAutoOpenedByDrag) {
+                sidebarAutoOpenedByDrag = true
+                scope.launch {
+                    sidebarFraction.animateTo(
+                        1f,
+                        spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 430f)
+                    )
+                }
+            }
+
+            // 1. Check top parent/other drop zones first
+            val hitTopKey = topDropZoneRects.entries.firstOrNull { (_, rect) ->
+                rect.contains(pointerInRoot)
+            }?.key
+            if (hitTopKey != null) {
+                hoveredCollapsedGroupId = null
+                if (hoveredPhotoDropTargetKey != hitTopKey) {
+                    hoveredPhotoDropTargetKey = hitTopKey
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                }
+                return
+            }
+
+            // 2. Check local album targets in the sidebar rail (only when sidebar is visible)
+            val sidebarVisibleForDrop = sidebarFraction.value > 0.35f
+            val hitSidebarKey = if (sidebarVisibleForDrop) {
+                sidebarAlbumDropTargets.entries.firstOrNull { (id, target) ->
+                    id != latestFolderId && target.boundsInRoot.contains(pointerInRoot)
+                }?.key
+            } else {
+                null
+            }
+            if (hitSidebarKey != null) {
+                hoveredCollapsedGroupId = null
+                if (hoveredPhotoDropTargetKey != hitSidebarKey) {
+                    hoveredPhotoDropTargetKey = hitSidebarKey
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                }
+                return
+            }
+
+            // 3. Check collapsed sidebar groups for spring-loaded auto-expand
+            hoveredPhotoDropTargetKey = null
+            val hitGroupId = if (sidebarVisibleForDrop) {
+                sidebarCollapsedGroupRects.entries.firstOrNull { (_, rect) ->
+                    rect.contains(pointerInRoot)
+                }?.key
+            } else {
+                null
+            }
+            hoveredCollapsedGroupId = hitGroupId
+        }
+
+        fun finishPhotoDrag(cancelled: Boolean) {
+            val drag = activePhotoDrag
+            val targetKey = hoveredPhotoDropTargetKey
+            val wasAutoOpened = sidebarAutoOpenedByDrag
+
+            activePhotoDrag = null
+            hoveredPhotoDropTargetKey = null
+            hoveredCollapsedGroupId = null
+            springLoadedExpandGroupId = null
+            sidebarAutoOpenedByDrag = false
+
+            if (wasAutoOpened && !effectiveShowSidebar) {
+                scope.launch {
+                    sidebarFraction.animateTo(
+                        0f,
+                        spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 430f)
+                    )
+                }
+            }
+
+            if (cancelled || drag == null || targetKey == null) return
+            val itemsToMove = uiState.mediaItems.filter { it.id in drag.draggedIds }
+            if (itemsToMove.isEmpty()) return
+
+            when (targetKey) {
+                topDropZoneParentKey -> {
+                    val parent = latestParentLocalFolder
+                    if (parent != null) {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        startLocalPhotoMove(
+                            items = itemsToMove,
+                            targetName = parent.displayName,
+                            useDcimParent = parent.useDcimParent,
+                            targetRelPath = parent.relativePath
+                        )
+                    }
+                }
+                topDropZoneOtherKey -> {
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    moveSheetOverrideItems = itemsToMove
+                    moveSheetInitialMoveMode = true
+                    showMoveCopySheet = true
+                }
+                else -> {
+                    val dest = sidebarAlbumDropTargets[targetKey]?.folder ?: return
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    val inDcim = dest.relativePath?.startsWith("DCIM", ignoreCase = true) == true
+                    val exactPath = dest.relativePath?.takeIf { it.isNotBlank() }
+                    startLocalPhotoMove(
+                        items = itemsToMove,
+                        targetName = dest.name,
+                        useDcimParent = inDcim,
+                        targetRelPath = exactPath
+                    )
+                }
+            }
+        }
+
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-        ) {
-            Row(modifier = Modifier.fillMaxSize()) {
-                // Samsung One UI Left Album & Album Group Quick-Switch Sidebar Rail!
-                AnimatedVisibility(
-                    visible = effectiveShowSidebar,
-                    enter = expandHorizontally(tween(260, easing = SidebarEasing)) + fadeIn(tween(200)),
-                    exit = shrinkHorizontally(tween(220, easing = SidebarEasing)) + fadeOut(tween(150))
-                ) {
-                    SamsungAlbumSidebarRail(
-                        nodes = uiState.sidebarNodes,
-                        activeFolderId = uiState.folderId,
-                        isUnmeteredWifi = uiState.isUnmeteredWifi,
-                        onSelectAlbum = { id, name ->
-                            val performSwitch: () -> Unit = {
-                                if (id != uiState.folderId) {
-                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                }
-                                val cached = if (LocalMediaRepository.isLocalFolderId(id)) {
-                                    appContainer.localMediaRepository.getCachedAlbumMedia(id)
-                                } else {
-                                    appContainer.galleryRepository.getCachedFolderMedia(id).orEmpty()
-                                }
-                                if (cached.isNotEmpty()) {
-                                    prefetchAlbumThumbnails(
-                                        context = context.applicationContext,
-                                        imageLoader = imageLoader,
-                                        items = cached,
-                                        isUnmeteredWifi = uiState.isUnmeteredWifi
-                                    )
-                                }
-                                viewModel.switchToAlbum(id, name)
+                .onGloballyPositioned { coords ->
+                    rootBoxOriginInRoot = coords.positionInRoot()
+                }
+                // Samsung One UI horizontal swipe left/right anywhere in an album to hide/show the album sidebar!
+                .pointerInput(Unit) {
+                    val touchSlop = viewConfiguration.touchSlop
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Main)
+                        if (!latestCanHaveSidebar || latestIsPhotoDragActive) return@awaitEachGesture
+                        val startFraction = sidebarFraction.value
+                        var totalDx = 0f
+                        var totalDy = 0f
+                        var horizontalLocked = false
+                        var aborted = false
+                        val velocityTracker = VelocityTracker()
+                        velocityTracker.addPosition(down.uptimeMillis, down.position)
+
+                        do {
+                            val event = awaitPointerEvent(pass = PointerEventPass.Main)
+                            val pressedCount = event.changes.count { it.pressed }
+                            if (pressedCount >= 2 || latestIsPhotoDragActive) {
+                                aborted = true
+                                break
                             }
-                            if (id != uiState.folderId && id in uiState.lockedAlbumIds) {
-                                BiometricLockHelper.authenticate(
-                                    context = context,
-                                    title = "Unlock \"$name\"",
-                                    subtitle = "Verify your identity to open locked album",
-                                    onSuccess = performSwitch,
-                                    onFailure = { err -> viewModel.showMessage(err) }
+                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                            if (!change.pressed) break
+                            if (change.isConsumed) {
+                                // A child gesture (e.g., drag-select, move-drag, or horizontal chip row) claimed this drag
+                                aborted = true
+                                break
+                            }
+                            val delta = change.position - change.previousPosition
+                            totalDx += delta.x
+                            totalDy += delta.y
+                            velocityTracker.addPosition(change.uptimeMillis, change.position)
+
+                            if (!horizontalLocked) {
+                                val absX = abs(totalDx)
+                                val absY = abs(totalDy)
+                                if (absY > touchSlop * 1.15f && absY > absX) {
+                                    // Vertical scroll won — step aside cleanly
+                                    aborted = true
+                                    break
+                                }
+                                if (absX > touchSlop * 1.3f && absX > absY * 1.45f) {
+                                    // Lock only when swiping in a valid reveal/hide direction
+                                    val swipingToHide = startFraction > 0.5f && totalDx < 0f
+                                    val swipingToShow = startFraction <= 0.5f && totalDx > 0f
+                                    if (swipingToHide || swipingToShow) {
+                                        horizontalLocked = true
+                                    } else {
+                                        aborted = true
+                                        break
+                                    }
+                                }
+                            }
+                            if (horizontalLocked) {
+                                change.consume()
+                                val targetFrac = (startFraction + totalDx / latestSidebarWidthPx.coerceAtLeast(1f))
+                                    .coerceIn(0f, 1f)
+                                scope.launch { sidebarFraction.snapTo(targetFrac) }
+                            }
+                        } while (true)
+
+                        if (horizontalLocked) {
+                            val vx = runCatching { velocityTracker.calculateVelocity().x }.getOrDefault(0f)
+                            val curFrac = sidebarFraction.value
+                            val shouldOpen = when {
+                                vx > 340f -> true
+                                vx < -340f -> false
+                                else -> curFrac > 0.44f
+                            }
+                            if (shouldOpen != latestEffectiveShowSidebar) {
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                viewModel.setSidebarVisible(shouldOpen)
+                            }
+                            scope.launch {
+                                sidebarFraction.animateTo(
+                                    targetValue = if (shouldOpen) 1f else 0f,
+                                    animationSpec = spring(
+                                        dampingRatio = Spring.DampingRatioNoBouncy,
+                                        stiffness = 430f
+                                    )
                                 )
-                            } else {
-                                performSwitch()
+                            }
+                        } else if (aborted && abs(sidebarFraction.value - (if (latestEffectiveShowSidebar) 1f else 0f)) > 0.01f) {
+                            scope.launch {
+                                sidebarFraction.animateTo(
+                                    targetValue = if (latestEffectiveShowSidebar) 1f else 0f,
+                                    animationSpec = spring(
+                                        dampingRatio = Spring.DampingRatioNoBouncy,
+                                        stiffness = 430f
+                                    )
+                                )
                             }
                         }
-                    )
+                    }
+                }
+        ) {
+            Row(modifier = Modifier.fillMaxSize()) {
+                // Redesigned, clean, swipeable Samsung One UI Left Album & Group Quick-Switch Rail
+                val curSidebarFrac = sidebarFraction.value.coerceIn(0f, 1f)
+                if (canHaveSidebar && curSidebarFrac > 0.005f) {
+                    Box(
+                        modifier = Modifier
+                            .width(sidebarMaxWidthDp * curSidebarFrac)
+                            .fillMaxHeight()
+                            .clipToBounds()
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .width(sidebarMaxWidthDp)
+                                .fillMaxHeight()
+                                .graphicsLayer {
+                                    alpha = curSidebarFrac
+                                    translationX = -(1f - curSidebarFrac) * (sidebarMaxWidthPx * 0.25f)
+                                }
+                        ) {
+                            SamsungAlbumSidebarRail(
+                                nodes = uiState.sidebarNodes,
+                                activeFolderId = uiState.folderId,
+                                isUnmeteredWifi = uiState.isUnmeteredWifi,
+                                isPhotoDragActive = activePhotoDrag != null,
+                                hoveredDropFolderId = hoveredPhotoDropTargetKey,
+                                externalExpandGroupId = springLoadedExpandGroupId,
+                                onRegisterAlbumDropTarget = { folder, rect ->
+                                    if (folder.isLocal && !folder.isLocked) {
+                                        sidebarAlbumDropTargets[folder.id] = SidebarDropTarget(folder, rect)
+                                    }
+                                },
+                                onClearAlbumDropTarget = { folderId ->
+                                    sidebarAlbumDropTargets.remove(folderId)
+                                },
+                                onRegisterCollapsedGroup = { groupId, rect ->
+                                    sidebarCollapsedGroupRects[groupId] = rect
+                                },
+                                onClearCollapsedGroup = { groupId ->
+                                    sidebarCollapsedGroupRects.remove(groupId)
+                                },
+                                onCollapseSidebar = {
+                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    viewModel.setSidebarVisible(false)
+                                },
+                                onSelectAlbum = { id, name ->
+                                    val performSwitch: () -> Unit = {
+                                        if (id != uiState.folderId) {
+                                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                        }
+                                        val cached = if (LocalMediaRepository.isLocalFolderId(id)) {
+                                            appContainer.localMediaRepository.getCachedAlbumMedia(id)
+                                        } else {
+                                            appContainer.galleryRepository.getCachedFolderMedia(id).orEmpty()
+                                        }
+                                        if (cached.isNotEmpty()) {
+                                            prefetchAlbumThumbnails(
+                                                context = context.applicationContext,
+                                                imageLoader = imageLoader,
+                                                items = cached,
+                                                isUnmeteredWifi = uiState.isUnmeteredWifi
+                                            )
+                                        }
+                                        viewModel.switchToAlbum(id, name)
+                                    }
+                                    if (id != uiState.folderId && id in uiState.lockedAlbumIds) {
+                                        BiometricLockHelper.authenticate(
+                                            context = context,
+                                            title = "Unlock \"$name\"",
+                                            subtitle = "Verify your identity to open locked album",
+                                            onSuccess = performSwitch,
+                                            onFailure = { err -> viewModel.showMessage(err) }
+                                        )
+                                    } else {
+                                        performSwitch()
+                                    }
+                                }
+                            )
+                        }
+                    }
                 }
 
                 // Right Side: Active Album Filter Pill + Media Grid
@@ -766,9 +1171,37 @@ fun FolderScreen(
                                 }
 
                                 else -> {
+                                    val pinchCurrentCols = if (isFolderContainerOnly) {
+                                        uiState.albumGridColumns
+                                    } else {
+                                        effectiveColumns
+                                    }
+                                    val pinchMinCols = if (isFolderContainerOnly) 2 else 1
+                                    val pinchMaxCols = when {
+                                        isFolderContainerOnly -> 5
+                                        effectiveShowSidebar -> 5
+                                        else -> 6
+                                    }
                                     PinchZoomGridContainer(
-                                        currentColumns = uiState.gridColumns,
-                                        onColumnsChange = viewModel::setGridColumns,
+                                        currentColumns = pinchCurrentCols,
+                                        onColumnsChange = { newCols ->
+                                            if (isFolderContainerOnly) {
+                                                viewModel.setAlbumGridColumns(newCols)
+                                            } else {
+                                                val persistedCols = if (effectiveShowSidebar) {
+                                                    (newCols + 1).coerceIn(1, 6)
+                                                } else {
+                                                    newCols.coerceIn(1, 6)
+                                                }
+                                                viewModel.setGridColumns(persistedCols)
+                                            }
+                                        },
+                                        minColumns = pinchMinCols,
+                                        maxColumns = pinchMaxCols,
+                                        columnLabel = { cols ->
+                                            if (isFolderContainerOnly) "$cols albums / row"
+                                            else if (cols == 1) "1 column" else "$cols columns"
+                                        },
                                         modifier = Modifier.fillMaxSize()
                                     ) {
                                         val orderedFolderMediaIds = remember(uiState.mediaItems) {
@@ -778,7 +1211,7 @@ fun FolderScreen(
                                             columns = GridCells.Fixed(effectiveColumns),
                                             state = branchGridState,
                                             contentPadding = PaddingValues(
-                                                start = if (effectiveShowSidebar) 2.dp else 8.dp,
+                                                start = if (effectiveShowSidebar) 4.dp else 8.dp,
                                                 end = 8.dp,
                                                 top = 2.dp,
                                                 bottom = if (uiState.isSelectionMode) 112.dp else 28.dp
@@ -787,6 +1220,9 @@ fun FolderScreen(
                                             verticalArrangement = Arrangement.spacedBy(1.5.dp),
                                             modifier = Modifier
                                                 .fillMaxSize()
+                                                .onGloballyPositioned { coords ->
+                                                    gridOriginInRoot = coords.positionInRoot()
+                                                }
                                                 .photoGridDragSelect(
                                                     gridState = branchGridState,
                                                     orderedItemIds = orderedFolderMediaIds,
@@ -795,7 +1231,27 @@ fun FolderScreen(
                                                     },
                                                     selectedIds = uiState.selectedIds,
                                                     onSetItemSelected = viewModel::setItemSelected,
-                                                    onSetRangeSelected = viewModel::setItemsSelectedRange
+                                                    onSetRangeSelected = viewModel::setItemsSelectedRange,
+                                                    moveDragEnabled = canDragMovePhotos,
+                                                    onMoveDragStart = { draggedIds, anchorItemId, localOffset ->
+                                                        val anchor = uiState.mediaItems.firstOrNull { it.id == anchorItemId }
+                                                            ?: uiState.mediaItems.firstOrNull { it.id in draggedIds }
+                                                        if (anchor != null) {
+                                                            val pointerInBox = (gridOriginInRoot + localOffset) - rootBoxOriginInRoot
+                                                            activePhotoDrag = ActivePhotoDragState(
+                                                                draggedIds = draggedIds,
+                                                                leadItem = anchor,
+                                                                pointerInBox = pointerInBox
+                                                            )
+                                                            updatePhotoDragHover(localOffset)
+                                                        }
+                                                    },
+                                                    onMoveDragMove = { localOffset ->
+                                                        updatePhotoDragHover(localOffset)
+                                                    },
+                                                    onMoveDragEnd = { cancelled ->
+                                                        finishPhotoDrag(cancelled)
+                                                    }
                                                 )
                                         ) {
                                             items(
@@ -810,7 +1266,7 @@ fun FolderScreen(
                                                 contentType = { entry ->
                                                     when (entry) {
                                                         is FolderGridEntry.SubfoldersHeading -> "subfolders_heading"
-                                                        is FolderGridEntry.SubfolderTripleRow -> "subfolder_row"
+                                                        is FolderGridEntry.SubfolderRow -> "subfolder_row"
                                                         is FolderGridEntry.SectionHeader -> "section_header"
                                                         is FolderGridEntry.MediaCell -> "media_cell"
                                                     }
@@ -840,41 +1296,29 @@ fun FolderScreen(
                                                         }
                                                     }
 
-                                                    is FolderGridEntry.SubfolderTripleRow -> {
+                                                    is FolderGridEntry.SubfolderRow -> {
+                                                        val compactRow = entry.rowColumns >= 4
+                                                        val rowGap = if (compactRow) 8.dp else 10.dp
                                                         Row(
                                                             modifier = Modifier
                                                                 .fillMaxWidth()
                                                                 .padding(horizontal = 4.dp, vertical = 6.dp),
-                                                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                                            horizontalArrangement = Arrangement.spacedBy(rowGap)
                                                         ) {
-                                                            FolderCard(
-                                                                folder = entry.first,
-                                                                isUnmeteredWifi = uiState.isUnmeteredWifi,
-                                                                showDriveBadge = uiState.showCloudBadges && !entry.first.isLocal,
-                                                                onClick = { onOpenSubfolder(entry.first.id, entry.first.name) },
-                                                                modifier = Modifier.weight(1f)
-                                                            )
-                                                            if (entry.second != null) {
-                                                                FolderCard(
-                                                                    folder = entry.second,
-                                                                    isUnmeteredWifi = uiState.isUnmeteredWifi,
-                                                                    showDriveBadge = uiState.showCloudBadges && !entry.second.isLocal,
-                                                                    onClick = { onOpenSubfolder(entry.second.id, entry.second.name) },
-                                                                    modifier = Modifier.weight(1f)
-                                                                )
-                                                            } else {
-                                                                Spacer(Modifier.weight(1f))
-                                                            }
-                                                            if (entry.third != null) {
-                                                                FolderCard(
-                                                                    folder = entry.third,
-                                                                    isUnmeteredWifi = uiState.isUnmeteredWifi,
-                                                                    showDriveBadge = uiState.showCloudBadges && !entry.third.isLocal,
-                                                                    onClick = { onOpenSubfolder(entry.third.id, entry.third.name) },
-                                                                    modifier = Modifier.weight(1f)
-                                                                )
-                                                            } else {
-                                                                Spacer(Modifier.weight(1f))
+                                                            for (col in 0 until entry.rowColumns) {
+                                                                val folder = entry.folders.getOrNull(col)
+                                                                if (folder != null) {
+                                                                    FolderCard(
+                                                                        folder = folder,
+                                                                        isUnmeteredWifi = uiState.isUnmeteredWifi,
+                                                                        showDriveBadge = uiState.showCloudBadges && !folder.isLocal,
+                                                                        compact = compactRow,
+                                                                        onClick = { onOpenSubfolder(folder.id, folder.name) },
+                                                                        modifier = Modifier.weight(1f)
+                                                                    )
+                                                                } else {
+                                                                    Spacer(Modifier.weight(1f))
+                                                                }
                                                             }
                                                         }
                                                     }
@@ -956,6 +1400,105 @@ fun FolderScreen(
                 }
             }
 
+            // Subtle left-edge handle pill when sidebar is hidden (swipe right OR tap to reveal)
+            AnimatedVisibility(
+                visible = canHaveSidebar && !effectiveShowSidebar && sidebarFraction.value < 0.05f && activePhotoDrag == null,
+                enter = fadeIn(tween(180)),
+                exit = fadeOut(tween(120)),
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .width(18.dp)
+                        .height(64.dp)
+                        .clickable {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            viewModel.setSidebarVisible(true)
+                        },
+                    contentAlignment = Alignment.CenterStart
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .padding(start = 3.dp)
+                            .width(3.5.dp)
+                            .height(34.dp)
+                            .clip(RoundedCornerShape(50))
+                            .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.34f))
+                    )
+                }
+            }
+
+            // Floating Top Parent-Folder ("Moeder Folder") Drop Bar when dragging photo(s) out!
+            AnimatedVisibility(
+                visible = activePhotoDrag != null,
+                enter = slideInVertically { -it } + fadeIn(tween(160)),
+                exit = slideOutVertically { -it } + fadeOut(tween(120)),
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val parent = parentLocalFolder
+                    if (parent != null) {
+                        PhotoMoveDropPill(
+                            icon = Icons.Rounded.MoveUp,
+                            label = "Move to ${parent.displayName}",
+                            isHovered = hoveredPhotoDropTargetKey == topDropZoneParentKey,
+                            onBoundsChanged = { topDropZoneRects[topDropZoneParentKey] = it },
+                            onDisposeBounds = { topDropZoneRects.remove(topDropZoneParentKey) },
+                            modifier = Modifier.weight(1.2f)
+                        )
+                    }
+                    PhotoMoveDropPill(
+                        icon = Icons.Rounded.DriveFileMove,
+                        label = if (parent != null) "Other album…" else "Drop to choose album…",
+                        isHovered = hoveredPhotoDropTargetKey == topDropZoneOtherKey,
+                        onBoundsChanged = { topDropZoneRects[topDropZoneOtherKey] = it },
+                        onDisposeBounds = { topDropZoneRects.remove(topDropZoneOtherKey) },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+
+            // Floating 120Hz Dragged Photo Stack Overlay under the user's finger
+            val currentDrag = activePhotoDrag
+            if (currentDrag != null) {
+                val dragCount = currentDrag.draggedIds.size.coerceAtLeast(1)
+                val isOverTarget = hoveredPhotoDropTargetKey != null
+                val stackScale by animateFloatAsState(
+                    targetValue = if (isOverTarget) 0.84f else 1.04f,
+                    animationSpec = spring(
+                        dampingRatio = Spring.DampingRatioNoBouncy,
+                        stiffness = Spring.StiffnessMedium
+                    ),
+                    label = "photoDragStackScale"
+                )
+                val halfSizePx = with(density) { 34.dp.toPx() }
+                FloatingPhotoDragStack(
+                    leadItem = currentDrag.leadItem,
+                    count = dragCount,
+                    isUnmeteredWifi = uiState.isUnmeteredWifi,
+                    modifier = Modifier
+                        .offset {
+                            IntOffset(
+                                x = (currentDrag.pointerInBox.x - halfSizePx).roundToInt(),
+                                y = (currentDrag.pointerInBox.y - halfSizePx * 1.45f).roundToInt()
+                            )
+                        }
+                        .graphicsLayer {
+                            scaleX = stackScale
+                            scaleY = stackScale
+                            alpha = 0.94f
+                        }
+                )
+            }
+
             val selectedMediaItems = remember(uiState.mediaItems, uiState.selectedIds) {
                 uiState.mediaItems.filter { it.id in uiState.selectedIds }
             }
@@ -964,7 +1507,7 @@ fun FolderScreen(
             }
 
             MultiSelectActionBar(
-                visible = uiState.isSelectionMode,
+                visible = uiState.isSelectionMode && activePhotoDrag == null,
                 selectedCount = uiState.selectedIds.size,
                 isExporting = uiState.isExporting,
                 exportProgressText = uiState.exportProgressText,
@@ -980,7 +1523,11 @@ fun FolderScreen(
                     }
                 } else null,
                 onMoveCopyLocal = if (uiState.isLocalAlbum && selectedMediaItems.isNotEmpty()) {
-                    { showMoveCopySheet = true }
+                    {
+                        moveSheetOverrideItems = null
+                        moveSheetInitialMoveMode = false
+                        showMoveCopySheet = true
+                    }
                 } else null,
                 onCreateCollagePdf = if (comparableIds.isNotEmpty()) {
                     { showCollagePdfSheet = true }
@@ -993,15 +1540,22 @@ fun FolderScreen(
     }
 
     if (showMoveCopySheet && uiState.isLocalAlbum) {
-        val selectedForMove = remember(uiState.mediaItems, uiState.selectedIds) {
+        val selectedForMove = moveSheetOverrideItems ?: remember(uiState.mediaItems, uiState.selectedIds) {
             uiState.mediaItems.filter { it.id in uiState.selectedIds }
         }
         if (selectedForMove.isNotEmpty()) {
             MoveCopyToAlbumSheet(
                 items = selectedForMove,
-                onDismiss = { showMoveCopySheet = false },
+                initialMoveMode = moveSheetInitialMoveMode,
+                onDismiss = {
+                    showMoveCopySheet = false
+                    moveSheetOverrideItems = null
+                    moveSheetInitialMoveMode = false
+                },
                 onCompleted = { msg ->
                     showMoveCopySheet = false
+                    moveSheetOverrideItems = null
+                    moveSheetInitialMoveMode = false
                     viewModel.clearSelection()
                     viewModel.showMessage(msg)
                 }
@@ -1216,19 +1770,217 @@ fun FolderScreen(
     }
 }
 
+private data class ActivePhotoDragState(
+    val draggedIds: Set<String>,
+    val leadItem: MediaItem,
+    val pointerInBox: Offset
+)
+
+private data class SidebarDropTarget(
+    val folder: DriveFolder,
+    val boundsInRoot: Rect
+)
+
+private data class PendingPhotoMoveRequest(
+    val items: List<MediaItem>,
+    val targetName: String,
+    val useDcimParent: Boolean,
+    val targetRelativePath: String?
+)
+
+@Composable
+private fun PhotoMoveDropPill(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    isHovered: Boolean,
+    onBoundsChanged: (Rect) -> Unit,
+    onDisposeBounds: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    DisposableEffect(Unit) {
+        onDispose { onDisposeBounds() }
+    }
+    val bgColor by animateColorAsState(
+        targetValue = if (isHovered) {
+            MaterialTheme.colorScheme.primaryContainer
+        } else {
+            MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.96f)
+        },
+        label = "photoDropBg"
+    )
+    val scale by animateFloatAsState(
+        targetValue = if (isHovered) 1.03f else 1f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioNoBouncy,
+            stiffness = Spring.StiffnessMedium
+        ),
+        label = "photoDropScale"
+    )
+    Surface(
+        shape = RoundedCornerShape(18.dp),
+        color = bgColor,
+        shadowElevation = if (isHovered) 10.dp else 4.dp,
+        modifier = modifier
+            .height(48.dp)
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+            .onGloballyPositioned { coords ->
+                onBoundsChanged(coords.boundsInRoot())
+            }
+            .border(
+                width = if (isHovered) 2.dp else 1.dp,
+                color = if (isHovered) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)
+                },
+                shape = RoundedCornerShape(18.dp)
+            )
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(7.dp, Alignment.CenterHorizontally)
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = if (isHovered) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.size(17.dp)
+            )
+            Text(
+                text = label,
+                fontSize = 12.5.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = if (isHovered) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
+private fun FloatingPhotoDragStack(
+    leadItem: MediaItem,
+    count: Int,
+    isUnmeteredWifi: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val imageLoader = LocalGalleryImageLoader.current
+    val request = remember(leadItem, isUnmeteredWifi) {
+        if (leadItem.isLocal && !leadItem.localContentUri.isNullOrBlank()) {
+            ImageRequest.Builder(context)
+                .data(LocalThumbnailRequest(leadItem.localContentUri, leadItem.isVideo))
+                .size(256)
+                .precision(Precision.INEXACT)
+                .allowRgb565(true)
+                .memoryCacheKey(DriveConstants.stableThumbMemoryKey(leadItem.id))
+                .crossfade(false)
+                .build()
+        } else {
+            val url = DriveConstants.buildThumbnailUrl(
+                thumbnailLink = leadItem.thumbnailLink,
+                fileId = leadItem.id,
+                isUnmeteredWifi = isUnmeteredWifi,
+                isVideo = leadItem.isVideo,
+                sizeBytes = leadItem.sizeBytes
+            ) ?: return@remember null
+            ImageRequest.Builder(context)
+                .data(url)
+                .size(256)
+                .precision(Precision.INEXACT)
+                .allowRgb565(true)
+                .memoryCacheKey(DriveConstants.stableThumbMemoryKey(leadItem.id))
+                .crossfade(false)
+                .build()
+        }
+    }
+
+    Box(modifier = modifier.size(72.dp)) {
+        if (count > 1) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .size(62.dp)
+                    .graphicsLayer {
+                        rotationZ = -7f
+                        translationX = -4f
+                        translationY = 4f
+                    }
+                    .clip(RoundedCornerShape(15.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+                    .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(15.dp))
+            )
+        }
+        Box(
+            modifier = Modifier
+                .align(Alignment.Center)
+                .size(64.dp)
+                .shadow(16.dp, RoundedCornerShape(16.dp))
+                .clip(RoundedCornerShape(16.dp))
+                .background(MaterialTheme.colorScheme.surfaceContainer)
+                .border(1.5.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(16.dp))
+        ) {
+            if (request != null) {
+                AsyncImage(
+                    model = request,
+                    imageLoader = imageLoader,
+                    contentDescription = leadItem.name,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+        }
+        if (count > 1) {
+            Surface(
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.primary,
+                shadowElevation = 4.dp,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .size(24.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Text(
+                        text = if (count > 99) "99+" else count.toString(),
+                        fontSize = 10.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onPrimary,
+                        maxLines = 1
+                    )
+                }
+            }
+        }
+    }
+}
+
 /**
- * Ultra-minimal Samsung One UI Gallery left Album & Album Group quick-switch rail:
- *  - Supports local albums, local Collections, AND nested Google Drive folders seamlessly.
- *  - Zero expand/collapse chevron clutter!
- *  - Collapsed group: sleek dark rounded outline wrapping its collage cover, name & count.
- *  - Expanded group: smoothly replaces its collapsed cover with a clean tall rounded outline
- *    containing ONLY its child albums directly inside (matching Samsung One UI Gallery!).
+ * Clean, consistent Samsung One UI–inspired left Album & Group Quick-Switch Sidebar Rail:
+ *  - Calm tonal rail surface with hairline edge divider & compact top header + 1-tap collapse.
+ *  - Uniform centered 64.dp rounded-square covers across every top-level album and collapsed group.
+ *  - Clean active indicator pill + crisp ring without overflow jitter.
+ *  - Expanded groups display a clear tappable header (to collapse back) and evenly aligned child albums.
+ *  - Acts as a live drag-and-drop destination (with spring-loaded group expansion) when dragging photos.
  */
 @Composable
 private fun SamsungAlbumSidebarRail(
     nodes: List<SidebarAlbumNode>,
     activeFolderId: String,
     isUnmeteredWifi: Boolean,
+    isPhotoDragActive: Boolean,
+    hoveredDropFolderId: String?,
+    externalExpandGroupId: String?,
+    onRegisterAlbumDropTarget: (DriveFolder, Rect) -> Unit,
+    onClearAlbumDropTarget: (String) -> Unit,
+    onRegisterCollapsedGroup: (String, Rect) -> Unit,
+    onClearCollapsedGroup: (String) -> Unit,
+    onCollapseSidebar: () -> Unit,
     onSelectAlbum: (folderId: String, folderName: String) -> Unit
 ) {
     val railListState = rememberLazyListState()
@@ -1247,35 +1999,103 @@ private fun SamsungAlbumSidebarRail(
         }
     }
 
-    LazyColumn(
-        state = railListState,
-        contentPadding = PaddingValues(start = 6.dp, end = 8.dp, top = 4.dp, bottom = 28.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+    // Spring-loaded expand when dragging photos over a collapsed group
+    LaunchedEffect(externalExpandGroupId) {
+        val targetId = externalExpandGroupId ?: return@LaunchedEffect
+        val targetNode = findNodeById(nodes, targetId) ?: return@LaunchedEffect
+        val path = findAncestorNodeIds(nodes, targetId)
+        expandedNodeIds = expandedNodeIds + path + collectAutoExpandIds(targetNode)
+    }
+
+    Row(
         modifier = Modifier
-            .width(84.dp)
-            .fillMaxHeight()
-            .background(MaterialTheme.colorScheme.background)
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.52f))
     ) {
-        items(
-            items = nodes,
-            key = { it.gridItem.itemId }
-        ) { node ->
-            SidebarNodeView(
-                node = node,
-                depth = 0,
-                activeFolderId = activeFolderId,
-                isUnmeteredWifi = isUnmeteredWifi,
-                expandedIds = expandedNodeIds,
-                onExpandGroup = { tappedNode ->
-                    // Expand tapped group (and auto-unwrap single-child folder chains),
-                    // keeping active album's ancestors or replacing unrelated expanded top-level groups
-                    val toExpand = collectAutoExpandIds(tappedNode)
-                    val pathToTapped = findAncestorNodeIds(nodes, tappedNode.gridItem.itemId)
-                    expandedNodeIds = pathToTapped + toExpand
-                },
-                onSelectAlbum = onSelectAlbum
-            )
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxHeight()
+        ) {
+            // Minimal, clean rail header with subtle collapse button
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 10.dp, end = 6.dp, top = 4.dp, bottom = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "Albums",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 0.2.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1
+                )
+                Box(
+                    modifier = Modifier
+                        .size(22.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f))
+                        .clickable(onClick = onCollapseSidebar),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.ChevronLeft,
+                        contentDescription = "Hide album sidebar",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(15.dp)
+                    )
+                }
+            }
+
+            LazyColumn(
+                state = railListState,
+                contentPadding = PaddingValues(start = 6.dp, end = 6.dp, top = 2.dp, bottom = 28.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.fillMaxSize()
+            ) {
+                items(
+                    items = nodes,
+                    key = { it.gridItem.itemId }
+                ) { node ->
+                    SidebarNodeView(
+                        node = node,
+                        depth = 0,
+                        activeFolderId = activeFolderId,
+                        isUnmeteredWifi = isUnmeteredWifi,
+                        expandedIds = expandedNodeIds,
+                        isPhotoDragActive = isPhotoDragActive,
+                        hoveredDropFolderId = hoveredDropFolderId,
+                        onRegisterAlbumDropTarget = onRegisterAlbumDropTarget,
+                        onClearAlbumDropTarget = onClearAlbumDropTarget,
+                        onRegisterCollapsedGroup = onRegisterCollapsedGroup,
+                        onClearCollapsedGroup = onClearCollapsedGroup,
+                        onToggleGroup = { tappedNode ->
+                            val tappedId = tappedNode.gridItem.itemId
+                            if (tappedId in expandedNodeIds) {
+                                expandedNodeIds = expandedNodeIds - tappedId
+                            } else {
+                                val toExpand = collectAutoExpandIds(tappedNode)
+                                val pathToTapped = findAncestorNodeIds(nodes, tappedId)
+                                expandedNodeIds = pathToTapped + toExpand
+                            }
+                        },
+                        onSelectAlbum = onSelectAlbum
+                    )
+                }
+            }
         }
+
+        // Crisp hairline divider cleanly separating the album rail from the photo grid
+        Box(
+            modifier = Modifier
+                .width(0.5.dp)
+                .fillMaxHeight()
+                .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.32f))
+        )
     }
 }
 
@@ -1286,30 +2106,42 @@ private fun SidebarNodeView(
     activeFolderId: String,
     isUnmeteredWifi: Boolean,
     expandedIds: Set<String>,
-    onExpandGroup: (SidebarAlbumNode) -> Unit,
+    isPhotoDragActive: Boolean,
+    hoveredDropFolderId: String?,
+    onRegisterAlbumDropTarget: (DriveFolder, Rect) -> Unit,
+    onClearAlbumDropTarget: (String) -> Unit,
+    onRegisterCollapsedGroup: (String, Rect) -> Unit,
+    onClearCollapsedGroup: (String) -> Unit,
+    onToggleGroup: (SidebarAlbumNode) -> Unit,
     onSelectAlbum: (String, String) -> Unit
 ) {
     val isGroup = node.children.isNotEmpty()
     val nodeId = node.gridItem.itemId
+    val coverSizeDp = if (depth == 0) 64.dp else 54.dp
+    val coverCornerDp = if (depth == 0) 16.dp else 13.dp
 
     if (!isGroup) {
-        // Leaf Album (Local album or leaf Drive folder) with fluid Apple/HyperOS selection physics
         val entry = node.gridItem as? AlbumGridItem.AlbumEntry ?: return
         val isActive = entry.folder.id == activeFolderId
-        val activeScale by animateFloatAsState(
-            targetValue = if (isActive) 1.035f else 1.0f,
+        val isDropEligible = isPhotoDragActive && entry.folder.isLocal && !entry.folder.isLocked && !isActive
+        val isDropHovered = isDropEligible && hoveredDropFolderId == entry.folder.id
+
+        DisposableEffect(entry.folder.id) {
+            onDispose { onClearAlbumDropTarget(entry.folder.id) }
+        }
+
+        val tileScale by animateFloatAsState(
+            targetValue = if (isDropHovered) 1.07f else 1.0f,
             animationSpec = OneUiMotion.fluidSpring(),
-            label = "sidebarActiveScale"
+            label = "sidebarTileScale"
         )
-        val activeAlpha by animateFloatAsState(
-            targetValue = if (isActive) 1f else 0.78f,
-            animationSpec = tween(220, easing = OneUiMotion.FluidEasing),
-            label = "sidebarActiveAlpha"
-        )
-        val borderAlpha by animateFloatAsState(
-            targetValue = if (isActive) 1f else 0f,
-            animationSpec = tween(220, easing = OneUiMotion.FluidEasing),
-            label = "sidebarBorderAlpha"
+        val tileBgColor by animateColorAsState(
+            targetValue = when {
+                isDropHovered -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f)
+                isActive -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.30f)
+                else -> Color.Transparent
+            },
+            label = "sidebarTileBg"
         )
         val indicatorHeight by animateDpAsState(
             targetValue = if (isActive) 22.dp else 0.dp,
@@ -1320,14 +2152,32 @@ private fun SidebarNodeView(
             label = "sidebarPillHeight"
         )
 
-        Box(modifier = Modifier.fillMaxWidth()) {
-            // Subtle Apple/HyperOS active indicator bar on the left edge
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .onGloballyPositioned { coords ->
+                    onRegisterAlbumDropTarget(entry.folder, coords.boundsInRoot())
+                }
+                .clip(RoundedCornerShape(14.dp))
+                .background(tileBgColor)
+                .graphicsLayer {
+                    scaleX = tileScale
+                    scaleY = tileScale
+                }
+                .oneUiClickable(
+                    pressedScale = 0.94f,
+                    hoveredScale = 1.02f,
+                    onClick = { onSelectAlbum(entry.folder.id, entry.folder.name) }
+                )
+                .padding(vertical = 4.dp, horizontal = 3.dp)
+        ) {
+            // Crisp left-edge active indicator bar cleanly in the gutter
             val safePillHeight = indicatorHeight.coerceAtLeast(0.dp)
             if (safePillHeight > 0.5.dp) {
                 Box(
                     modifier = Modifier
-                        .align(Alignment.CenterStart)
-                        .padding(bottom = 22.dp)
+                        .align(Alignment.TopStart)
+                        .padding(top = (coverSizeDp - safePillHeight) / 2)
                         .width(3.dp)
                         .height(safePillHeight)
                         .clip(RoundedCornerShape(50))
@@ -1336,25 +2186,13 @@ private fun SidebarNodeView(
             }
 
             Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .graphicsLayer {
-                        scaleX = activeScale
-                        scaleY = activeScale
-                        alpha = activeAlpha
-                    }
-                    .oneUiClickable(
-                        pressedScale = 0.92f,
-                        hoveredScale = 1.035f,
-                        onClick = { onSelectAlbum(entry.folder.id, entry.folder.name) }
-                    )
-                    .padding(start = 5.dp, end = 2.dp, top = 2.dp, bottom = 2.dp)
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.fillMaxWidth()
             ) {
                 Box(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(1f)
-                        .clip(RoundedCornerShape(18.dp))
+                        .size(coverSizeDp)
+                        .clip(RoundedCornerShape(coverCornerDp))
                 ) {
                     FolderCoverArtwork(
                         folder = entry.folder,
@@ -1362,43 +2200,76 @@ private fun SidebarNodeView(
                         showDriveBadge = !entry.folder.isLocal,
                         modifier = Modifier.fillMaxSize()
                     )
-                    if (borderAlpha > 0.01f) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .border(
-                                    width = 2.dp,
-                                    color = MaterialTheme.colorScheme.primary.copy(alpha = borderAlpha * 0.92f),
-                                    shape = RoundedCornerShape(18.dp)
-                                )
-                        )
+                    when {
+                        isDropHovered -> {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.22f))
+                                    .border(
+                                        width = 2.5.dp,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        shape = RoundedCornerShape(coverCornerDp)
+                                    )
+                            )
+                        }
+                        isActive -> {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .border(
+                                        width = 2.dp,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        shape = RoundedCornerShape(coverCornerDp)
+                                    )
+                            )
+                        }
+                        isDropEligible -> {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .border(
+                                        width = 1.dp,
+                                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.35f),
+                                        shape = RoundedCornerShape(coverCornerDp)
+                                    )
+                            )
+                        }
                     }
                 }
-                Spacer(Modifier.height(4.dp))
+                Spacer(Modifier.height(5.dp))
                 Text(
                     text = entry.folder.name,
-                    fontSize = 11.sp,
+                    fontSize = if (depth == 0) 11.sp else 10.5.sp,
                     lineHeight = 13.sp,
-                    fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Normal,
-                    color = if (isActive) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.82f),
+                    fontWeight = if (isActive || isDropHovered) FontWeight.SemiBold else FontWeight.Medium,
+                    color = if (isActive || isDropHovered) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.90f)
+                    },
+                    textAlign = TextAlign.Center,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(horizontal = 2.dp)
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 2.dp)
                 )
                 Text(
                     text = entry.folder.mediaCount.toString(),
-                    fontSize = 10.sp,
+                    fontSize = if (depth == 0) 10.sp else 9.5.sp,
                     lineHeight = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
                     maxLines = 1,
-                    modifier = Modifier.padding(horizontal = 2.dp, vertical = 1.dp)
+                    modifier = Modifier.padding(top = 1.dp)
                 )
             }
         }
         return
     }
 
-    // Expandable Group: Local Collection OR Google Drive folder containing subfolders!
+    // Expandable Group: Local Collection OR Google Drive folder containing subfolders
     val isExpanded = nodeId in expandedIds
     val containsActive = remember(node, activeFolderId) { nodeContainsAlbum(node, activeFolderId) }
     val groupTitle = node.gridItem.displayName
@@ -1407,49 +2278,43 @@ private fun SidebarNodeView(
         is AlbumGridItem.AlbumEntry -> g.folder.mediaCount
     }
 
-    val containerModifier = if (depth == 0) {
-        Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(20.dp))
-            .background(MaterialTheme.colorScheme.surfaceContainerLow)
-            .border(
-                width = if (containsActive) 1.dp else 0.8.dp,
-                color = if (containsActive) {
-                    MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
-                } else {
-                    MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)
-                },
-                shape = RoundedCornerShape(20.dp)
-            )
-            .padding(start = 5.dp, end = 5.dp, top = 7.dp, bottom = 10.dp)
-    } else {
-        Modifier.fillMaxWidth()
-    }
-
-    Box(modifier = containerModifier) {
-        AnimatedContent(
-            targetState = isExpanded,
-            transitionSpec = {
-                (fadeIn(tween(240, easing = OneUiMotion.FluidEasing)) +
-                    expandVertically(tween(280, easing = OneUiMotion.FluidEasing)))
-                    .togetherWith(
-                        fadeOut(tween(150)) +
-                            shrinkVertically(tween(220, easing = OneUiMotion.FluidEasing))
+    AnimatedContent(
+        targetState = isExpanded,
+        transitionSpec = {
+            (fadeIn(tween(220, easing = OneUiMotion.FluidEasing)) +
+                expandVertically(tween(260, easing = OneUiMotion.FluidEasing)))
+                .togetherWith(
+                    fadeOut(tween(140)) +
+                        shrinkVertically(tween(200, easing = OneUiMotion.FluidEasing))
+                )
+        },
+        label = "sidebarGroupExpand_$nodeId",
+        modifier = Modifier.fillMaxWidth()
+    ) { expanded ->
+        if (!expanded) {
+            DisposableEffect(nodeId) {
+                onDispose { onClearCollapsedGroup(nodeId) }
+            }
+            // Collapsed Group: EXACT same clean 64.dp centered geometry as single albums + subtle child count pill
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .onGloballyPositioned { coords ->
+                        onRegisterCollapsedGroup(nodeId, coords.boundsInRoot())
+                    }
+                    .clip(RoundedCornerShape(14.dp))
+                    .oneUiClickable(
+                        pressedScale = 0.94f,
+                        hoveredScale = 1.02f,
+                        onClick = { onToggleGroup(node) }
                     )
-            },
-            label = "sidebarGroupExpand_$nodeId"
-        ) { expanded ->
-            if (!expanded) {
-                // Collapsed Group Card: clean cover + title + count (NO chevron icon!)
-                Column(
+                    .padding(vertical = 4.dp, horizontal = 3.dp)
+            ) {
+                Box(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .oneUiClickable(
-                            pressedScale = 0.92f,
-                            hoveredScale = 1.03f,
-                            onClick = { onExpandGroup(node) }
-                        )
-                        .padding(horizontal = if (depth == 0) 1.dp else 2.dp)
+                        .size(coverSizeDp)
+                        .clip(RoundedCornerShape(coverCornerDp))
                 ) {
                     when (val g = node.gridItem) {
                         is AlbumGridItem.CollectionEntry -> {
@@ -1457,9 +2322,7 @@ private fun SidebarNodeView(
                                 previewCovers = g.previewCovers,
                                 hasDriveChild = g.hasDriveChild,
                                 isUnmeteredWifi = isUnmeteredWifi,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .aspectRatio(1f)
+                                modifier = Modifier.fillMaxSize()
                             )
                         }
                         is AlbumGridItem.AlbumEntry -> {
@@ -1467,53 +2330,135 @@ private fun SidebarNodeView(
                                 folder = g.folder,
                                 isUnmeteredWifi = isUnmeteredWifi,
                                 showDriveBadge = !g.folder.isLocal,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .aspectRatio(1f)
+                                modifier = Modifier.fillMaxSize()
                             )
                         }
                     }
-                    Spacer(Modifier.height(5.dp))
-                    Text(
-                        text = groupTitle,
-                        fontSize = 10.5.sp,
-                        lineHeight = 13.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.9f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(horizontal = 2.dp)
-                    )
-                    Text(
-                        text = groupCount.toString(),
-                        fontSize = 9.5.sp,
-                        lineHeight = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        modifier = Modifier.padding(horizontal = 2.dp, vertical = 1.dp)
-                    )
-                }
-            } else {
-                // Expanded Group (Samsung One UI style!): displays ONLY its child albums cleanly inside!
-                Column(
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    node.children.forEach { child ->
-                        SidebarNodeView(
-                            node = child,
-                            depth = depth + 1,
-                            activeFolderId = activeFolderId,
-                            isUnmeteredWifi = isUnmeteredWifi,
-                            expandedIds = expandedIds,
-                            onExpandGroup = onExpandGroup,
-                            onSelectAlbum = onSelectAlbum
+                    // Subtle glass badge indicating this tile is a group containing N albums
+                    Row(
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(4.dp)
+                            .clip(RoundedCornerShape(7.dp))
+                            .background(Color.Black.copy(alpha = 0.62f))
+                            .padding(horizontal = 4.5.dp, vertical = 1.5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Folder,
+                            contentDescription = null,
+                            tint = Color.White.copy(alpha = 0.92f),
+                            modifier = Modifier.size(9.dp)
+                        )
+                        Text(
+                            text = node.children.size.toString(),
+                            fontSize = 9.sp,
+                            lineHeight = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color.White
                         )
                     }
+                }
+                Spacer(Modifier.height(5.dp))
+                Text(
+                    text = groupTitle,
+                    fontSize = if (depth == 0) 11.sp else 10.5.sp,
+                    lineHeight = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.90f),
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 2.dp)
+                )
+                Text(
+                    text = groupCount.toString(),
+                    fontSize = if (depth == 0) 10.sp else 9.5.sp,
+                    lineHeight = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    modifier = Modifier.padding(top = 1.dp)
+                )
+            }
+        } else {
+            // Expanded Group: clean rounded tonal tray with tappable collapse header & aligned child albums
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.82f))
+                    .border(
+                        width = if (containsActive) 1.dp else 0.6.dp,
+                        color = if (containsActive) {
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.38f)
+                        } else {
+                            MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.42f)
+                        },
+                        shape = RoundedCornerShape(18.dp)
+                    )
+                    .padding(horizontal = 4.dp, vertical = 6.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable { onToggleGroup(node) }
+                        .padding(horizontal = 5.dp, vertical = 3.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = groupTitle,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (containsActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Icon(
+                        imageVector = Icons.Rounded.KeyboardArrowUp,
+                        contentDescription = "Collapse group",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(14.dp)
+                    )
+                }
+
+                node.children.forEach { child ->
+                    SidebarNodeView(
+                        node = child,
+                        depth = depth + 1,
+                        activeFolderId = activeFolderId,
+                        isUnmeteredWifi = isUnmeteredWifi,
+                        expandedIds = expandedIds,
+                        isPhotoDragActive = isPhotoDragActive,
+                        hoveredDropFolderId = hoveredDropFolderId,
+                        onRegisterAlbumDropTarget = onRegisterAlbumDropTarget,
+                        onClearAlbumDropTarget = onClearAlbumDropTarget,
+                        onRegisterCollapsedGroup = onRegisterCollapsedGroup,
+                        onClearCollapsedGroup = onClearCollapsedGroup,
+                        onToggleGroup = onToggleGroup,
+                        onSelectAlbum = onSelectAlbum
+                    )
                 }
             }
         }
     }
+}
+
+private fun findNodeById(nodes: List<SidebarAlbumNode>, targetId: String): SidebarAlbumNode? {
+    for (node in nodes) {
+        if (node.gridItem.itemId == targetId) return node
+        val found = findNodeById(node.children, targetId)
+        if (found != null) return found
+    }
+    return null
 }
 
 private fun nodeContainsAlbum(node: SidebarAlbumNode, folderId: String): Boolean {

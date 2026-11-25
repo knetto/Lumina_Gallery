@@ -50,6 +50,7 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import coil3.request.allowRgb565
@@ -83,6 +84,7 @@ fun FolderCard(
     showDriveBadge: Boolean = !folder.isLocal,
     isSelectionMode: Boolean = false,
     isSelected: Boolean = false,
+    compact: Boolean = false,
     onLongClick: (() -> Unit)? = null
 ) {
     val countLabel = remember(folder.subfolderCount, folder.mediaCount) {
@@ -201,11 +203,15 @@ fun FolderCard(
             )
         }
 
-        Spacer(Modifier.height(6.dp))
+        Spacer(Modifier.height(if (compact) 4.dp else 6.dp))
 
         Text(
             text = folder.name,
-            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Medium),
+            style = if (compact) {
+                MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium, fontSize = 11.5.sp)
+            } else {
+                MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Medium)
+            },
             color = MaterialTheme.colorScheme.onSurface,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -214,7 +220,11 @@ fun FolderCard(
 
         Text(
             text = countLabel,
-            style = MaterialTheme.typography.bodySmall,
+            style = if (compact) {
+                MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp)
+            } else {
+                MaterialTheme.typography.bodySmall
+            },
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,

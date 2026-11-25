@@ -98,6 +98,7 @@ import com.luminagallery.drive.domain.model.MediaItem
 import com.luminagallery.drive.domain.model.MediaType
 import com.luminagallery.drive.domain.model.SpecialGalleryFilter
 import com.luminagallery.drive.ui.components.FastScrollThumb
+import com.luminagallery.drive.ui.components.PinchZoomGridContainer
 import com.luminagallery.drive.ui.components.FormatUtils
 import com.luminagallery.drive.ui.components.HyperOsTrashConfirmSheet
 import com.luminagallery.drive.ui.components.LuminaSnackbarHost
@@ -327,7 +328,15 @@ fun SpecialCollectionScreen(
                         }
                     }
 
-                    Box(modifier = Modifier.weight(1f)) {
+                    PinchZoomGridContainer(
+                        currentColumns = prefs.gridColumns,
+                        onColumnsChange = { cols ->
+                            scope.launch { container.preferencesManager.setGridColumns(cols) }
+                        },
+                        minColumns = 1,
+                        maxColumns = 6,
+                        modifier = Modifier.weight(1f)
+                    ) {
                         LazyVerticalGrid(
                             columns = GridCells.Fixed(prefs.gridColumns),
                             state = gridState,

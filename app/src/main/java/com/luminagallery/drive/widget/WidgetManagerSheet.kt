@@ -158,7 +158,11 @@ internal fun WidgetManagerSheetContent(
                                     overflow = TextOverflow.Ellipsis
                                 )
                                 Text(
-                                    text = "${sourceLabel(item.settings.source)} · ${intervalLabel(item.settings.shuffleInterval)}",
+                                    text = if (item.kind == PhotoWidgetKind.COLLAGE) {
+                                        "${collageLayoutLabel(item.settings.collageLayout)} · ${sourceLabel(item.settings.source)} · ${intervalLabel(item.settings.shuffleInterval)}"
+                                    } else {
+                                        "${sourceLabel(item.settings.source)} · ${intervalLabel(item.settings.shuffleInterval)}"
+                                    },
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     maxLines = 1,
@@ -260,11 +264,6 @@ internal fun WidgetManagerSheetContent(
 }
 
 private fun widgetPinSubtitle(kind: PhotoWidgetKind): String = when (kind) {
-    PhotoWidgetKind.FRAME -> "2×2 resizable · Pick photos or album(s) to shuffle"
-    PhotoWidgetKind.RANDOM_SHUFFLE -> "2×2 resizable · Shuffles random photos from your phone"
-    PhotoWidgetKind.COLLAGE -> "4×2 adaptive · Grouped location, day, album or batch collage"
-    PhotoWidgetKind.MEMORIES -> "4×2 adaptive · On This Day, trips & photo days"
-    PhotoWidgetKind.STRIP -> "4×1 adaptive · Horizontal or vertical glass photo strip"
-    PhotoWidgetKind.FAVORITES -> "2×2 resizable · Dedicated ♥ Favorites glass frame"
-    PhotoWidgetKind.PHOTO_DATE -> "2×2 resizable · Live HyperOS glass date + photo frame"
+    PhotoWidgetKind.FRAME -> "2×2 resizable · Single photo, album, favorites, memories or random shuffle"
+    PhotoWidgetKind.COLLAGE -> "4×2 resizable · Smart collage, photo strip, grids, bento, memories or albums"
 }
