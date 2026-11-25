@@ -99,11 +99,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlin.math.abs
 
 /**
- * Shared reactive controller linking the active `VideoPlayerPage`'s ExoPlayer to Samsung's
- * floating pill controls + inline filmstrip scrubber in `ViewerScreen`.
+ * Connects the active video player to the playback controls and filmstrip.
  */
 @Stable
 class ActiveVideoController {
@@ -135,19 +133,15 @@ class ActiveVideoController {
     fun skipBy(deltaMs: Long) {
         seekTo(currentPositionMs + deltaMs)
     }
-    fun cyclePlaybackSpeed() {
-        val speeds = listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f)
-        val idx = speeds.indexOfFirst { kotlin.math.abs(it - playbackSpeed) < 0.05f }
-        val next = speeds[(idx + 1) % speeds.size]
-        playbackSpeed = next
-        onSetSpeed?.invoke(next)
+    fun changePlaybackSpeed(speed: Float) {
+        playbackSpeed = speed
+        onSetSpeed?.invoke(speed)
     }
     fun captureFrame() = onCaptureFrame?.invoke()
 }
 
 /**
- * Streams local or Google Drive videos via Media3 ExoPlayer with zero UI clutter over the video
- * itself — controls live cleanly in Samsung's floating pill & bottom filmstrip scrubber.
+ * Streams local or Google Drive videos via Media3 ExoPlayer.
  *
  * Power optimization: ExoPlayer is created ONLY when `isActivePage == true` and is
  * immediately stopped & released via `DisposableEffect` the moment the user swipes away.
@@ -237,9 +231,11 @@ fun VideoPlayerPage(
             .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
             .build()
         val renderersFactory = VideoFormatSupport.buildRenderersFactory(context)
-        val isMp2p = VideoFormatSupport.isMp2pVideo(item.name, item.mimeType)
+        val isMp2p = VideoFormatSupport.isMp2pVideo(item.name, item.mimeType) ||
+            item.localContentUri?.let { VideoFormatSupport.isMp2pVideo(it, item.mimeType) } == true
         val extractorsFactory = VideoFormatSupport.buildExtractorsFactory(preferProgramStream = isMp2p)
         val hintedMime = VideoFormatSupport.resolveExoPlayerMimeType(item.name, item.mimeType)
+            ?: item.localContentUri?.let { VideoFormatSupport.resolveExoPlayerMimeType(it, item.mimeType) }
 
         fun buildMedia3Item(uri: android.net.Uri): Media3Item =
             Media3Item.Builder()
@@ -299,6 +295,7 @@ fun VideoPlayerPage(
         videoController.playbackSpeed = 1f
         videoController.isPlaying = playerInstance.isPlaying
         videoController.isEnded = false
+        videoController.isScrubbing = false
 
         videoController.onTogglePlayPause = {
             when {
@@ -391,6 +388,7 @@ fun VideoPlayerPage(
             if (exoPlayer === playerInstance) exoPlayer = null
             firstFrameRendered = false
             if (videoController.activeItemId == item.id) {
+                videoController.activeItemId = null
                 videoController.onTogglePlayPause = null
                 videoController.onPause = null
                 videoController.onPlay = null
@@ -399,6 +397,7 @@ fun VideoPlayerPage(
                 videoController.onSetSpeed = null
                 videoController.onCaptureFrame = null
                 videoController.isPlaying = false
+                videoController.isScrubbing = false
             }
         }
     }

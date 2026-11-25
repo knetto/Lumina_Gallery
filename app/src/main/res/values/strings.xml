@@ -1,7 +1,30 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Lumina Gallery</string>
-    <string name="widget_description">Rounded photo frame displaying your favorites and recent memories</string>
+    <string name="widget_photo_frame">Photo Frame</string>
+    <string name="widget_photo_strip">Photo Strip</string>
+    <string name="widget_photo_collage">Photo Collage</string>
+    <string name="widget_photo_shuffle">Photo Shuffle</string>
+    <string name="widget_memories">Memories Collage</string>
+    <string name="widget_description">A resizable photo frame for favorite and recent photos</string>
+    <string name="widget_strip_description">A wide row of photos you can open from your home screen</string>
+    <string name="widget_collage_description">A large photo with smaller photos alongside it</string>
+    <string name="widget_shuffle_description">Random photos that change while the widget is visible</string>
+    <string name="widget_memories_description">Collages of photo days and trips from your library</string>
+    <string name="widget_settings">Widget settings</string>
+    <string name="widget_shuffle_interval">Seconds between photos</string>
+    <string name="widget_shuffle_interval_range">Enter 1–3,600 seconds.</string>
+    <string name="widget_shuffle_visible">Photos change while the widget is visible.</string>
+    <string name="widget_memory_days">Days</string>
+    <string name="widget_memory_trips">Trips</string>
+    <string name="widget_memory_both">Days and trips</string>
+    <string name="widget_empty_trips">Trip collages need photos with known locations.</string>
+    <string name="widget_empty_memories">Collages appear when a day has at least two photos.</string>
+    <string name="widget_save">Save</string>
+    <string name="widget_save_failed">Could not update the widget. Try again.</string>
+    <string name="widget_open_gallery">Open Lumina Gallery</string>
+    <string name="widget_next_photos">Show next photos</string>
+    <string name="widget_photo_details">%1$s, %2$s</string>
     <string name="shortcut_camera_short">Camera</string>
     <string name="shortcut_camera_long">Open Camera</string>
     <string name="shortcut_search_short">Search</string>

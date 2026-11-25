@@ -143,18 +143,70 @@
                 android:resource="@xml/shortcuts" />
         </activity>
 
-        <!-- Home Screen Photo Widget -->
+        <!-- Home screen photo widgets -->
+        <activity
+            android:name=".widget.PhotoWidgetSettingsActivity"
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_CONFIGURE" />
+            </intent-filter>
+        </activity>
+
         <receiver
             android:name=".widget.LuminaPhotoWidgetProvider"
-            android:exported="true"
-            android:label="@string/app_name">
+            android:exported="false"
+            android:label="@string/widget_photo_frame">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
-                <action android:name="com.luminagallery.drive.widget.ACTION_NEXT_PHOTO" />
             </intent-filter>
             <meta-data
                 android:name="android.appwidget.provider"
                 android:resource="@xml/lumina_photo_widget_info" />
+        </receiver>
+        <receiver
+            android:name=".widget.LuminaPhotoStripWidgetProvider"
+            android:exported="false"
+            android:label="@string/widget_photo_strip">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/lumina_photo_strip_widget_info" />
+        </receiver>
+        <receiver
+            android:name=".widget.LuminaPhotoCollageWidgetProvider"
+            android:exported="false"
+            android:label="@string/widget_photo_collage">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/lumina_photo_collage_widget_info" />
+        </receiver>
+        <receiver
+            android:name=".widget.LuminaPhotoShuffleWidgetProvider"
+            android:exported="false"
+            android:label="@string/widget_photo_shuffle">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/lumina_photo_shuffle_widget_info" />
+        </receiver>
+        <receiver
+            android:name=".widget.LuminaMemoriesWidgetProvider"
+            android:exported="false"
+            android:label="@string/widget_memories">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/lumina_memories_widget_info" />
         </receiver>
 
         <!-- FileProvider for temporary on-demand Android Share Sheet exports -->

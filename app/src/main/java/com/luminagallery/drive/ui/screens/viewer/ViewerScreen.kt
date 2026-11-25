@@ -68,8 +68,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
-import androidx.compose.material.icons.automirrored.rounded.VolumeOff
-import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Edit
@@ -77,16 +75,13 @@ import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.rounded.ContentCopy
-import androidx.compose.material.icons.rounded.ContentCut
 import androidx.compose.material.icons.rounded.CropFree
 import androidx.compose.material.icons.rounded.DocumentScanner
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.MotionPhotosOn
 import androidx.compose.material.icons.rounded.OfflinePin
-import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
-import androidx.compose.material.icons.rounded.Replay
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -100,7 +95,6 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RangeSlider
 import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
@@ -135,7 +129,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
@@ -190,7 +183,6 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
 import java.io.File
-import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -473,7 +465,7 @@ fun ViewerScreen(
     // Hiding the controls during a drag must leave the media's layout and scale pivot in place.
     val bottomDockClearance by animateDpAsState(
         targetValue = when {
-            !chromeVisible -> 0.dp
+            !chromeVisible || currentItem.isVideo -> 0.dp
             showFilmstrip -> 118.dp
             else -> 60.dp
         },
@@ -831,6 +823,17 @@ fun ViewerScreen(
                             )
                         } else {
                             DropdownMenuItem(
+                                text = { Text("Capture frame", color = Color.White) },
+                                leadingIcon = {
+                                    Icon(Icons.Rounded.CropFree, contentDescription = null, tint = Color.White)
+                                },
+                                enabled = activeVideoController.activeItemId == currentItem.id,
+                                onClick = {
+                                    showOverflowMenu = false
+                                    activeVideoController.captureFrame()
+                                }
+                            )
+                            DropdownMenuItem(
                                 text = { Text("Trim video", color = Color.White) },
                                 onClick = {
                                     showOverflowMenu = false
@@ -919,10 +922,7 @@ fun ViewerScreen(
             }
         }
 
-        // Authentic Samsung One UI Bottom Chrome:
-        //  1. Floating Video Controls Row (Capture Frame | || 00:01 / 00:02 | Mute) — videos only!
-        //  2. Horizontal Filmstrip Scrubber (with expanded active tile & live white video scrub playhead!)
-        //  3. Minimalist Icon-Only Action Row (Heart | Info | Share | Save or Delete)
+        // Playback, filmstrip navigation and media actions share the bottom of the viewer.
         AnimatedVisibility(
             visible = showChromeNow,
             enter = fadeIn(tween(150)),
@@ -946,24 +946,17 @@ fun ViewerScreen(
             Column(
                 modifier = Modifier.fillMaxWidth()
             ) {
-                // 1. Floating Samsung Video Pill Row + Dedicated Full-Width Seekbar
-                // Isolated state reads inside SamsungVideoControlBar prevent 20fps recomposition of
-                // the filmstrip LazyRow and action bar!
                 AnimatedVisibility(
                     visible = currentItem.isVideo,
                     enter = fadeIn(tween(180)),
-                    exit = fadeOut(tween(120))
+                    exit = fadeOut(tween(120)),
+                    modifier = Modifier.align(Alignment.CenterHorizontally)
                 ) {
-                    SamsungVideoControlBar(
-                        videoController = activeVideoController,
+                    VideoPlaybackControls(
+                        controller = activeVideoController,
+                        itemId = currentItem.id,
                         fallbackDurationMs = currentItem.durationMillis ?: 0L,
-                        onOpenTrim = {
-                            activeVideoController.pause()
-                            showTrimSheet = true
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 8.dp)
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
                     )
                 }
 
@@ -971,7 +964,7 @@ fun ViewerScreen(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .background(Color.Black)
+                        .background(if (currentItem.isVideo) Color(0xED0C1119) else Color.Black)
                         .navigationBarsPadding()
                 ) {
                     // 2. Samsung Filmstrip Thumbnail Scrubber
@@ -1101,7 +1094,12 @@ fun ViewerScreen(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .navigationBarsPadding()
-                .padding(bottom = 132.dp)
+                .padding(
+                    bottom = when {
+                        currentItem.isVideo && showChromeNow -> if (showFilmstrip) 228.dp else 170.dp
+                        else -> 132.dp
+                    }
+                )
         )
     }
 
@@ -1492,188 +1490,6 @@ fun ViewerScreen(
                     }
                 }
             }
-        }
-    }
-}
-
-/**
- * Samsung One UI floating video controls row + full-width seekbar sitting above the bottom dock.
- * Reads `videoController` state inside this leaf composable so 20fps playhead ticks never
- * recompose the surrounding ViewerScreen or filmstrip LazyRow!
- */
-@Composable
-private fun SamsungVideoControlBar(
-    videoController: ActiveVideoController,
-    fallbackDurationMs: Long,
-    onOpenTrim: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val isPlaying = videoController.isPlaying
-    val isEnded = videoController.isEnded
-    val isMuted = videoController.isMuted
-    val playbackSpeed = videoController.playbackSpeed
-    val durationMs = videoController.durationMs.takeIf { it > 0L } ?: fallbackDurationMs
-    val positionMs = videoController.currentPositionMs.coerceIn(0L, durationMs.coerceAtLeast(1L))
-
-    val pillBg = Color(0xB3141416)
-    val pillBorder = Color.White.copy(alpha = 0.16f)
-    val speedLabel = if (playbackSpeed % 1f == 0f) {
-        "${playbackSpeed.toInt()}×"
-    } else {
-        "${String.format(Locale.US, "%.2f", playbackSpeed).trimEnd('0')}×"
-    }
-
-    Column(
-        modifier = modifier,
-        verticalArrangement = Arrangement.spacedBy(4.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            // Left: Capture frame + Trim
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(pillBg)
-                        .border(0.8.dp, pillBorder, CircleShape)
-                        .clickable(onClick = videoController::captureFrame),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.CropFree,
-                        contentDescription = "Capture video frame",
-                        tint = Color.White,
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(pillBg)
-                        .border(0.8.dp, pillBorder, CircleShape)
-                        .clickable(onClick = onOpenTrim),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.ContentCut,
-                        contentDescription = "Trim video",
-                        tint = Color.White,
-                        modifier = Modifier.size(17.dp)
-                    )
-                }
-            }
-
-            // Center: Play/Pause + "00:01 / 00:02" glass capsule
-            Surface(
-                shape = RoundedCornerShape(50),
-                color = pillBg,
-                modifier = Modifier
-                    .height(36.dp)
-                    .border(0.8.dp, pillBorder, RoundedCornerShape(50))
-                    .clip(RoundedCornerShape(50))
-                    .clickable(onClick = videoController::togglePlayPause)
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(7.dp)
-                ) {
-                    Icon(
-                        imageVector = when {
-                            isEnded -> Icons.Rounded.Replay
-                            isPlaying -> Icons.Rounded.Pause
-                            else -> Icons.Rounded.PlayArrow
-                        },
-                        contentDescription = if (isPlaying) "Pause" else "Play",
-                        tint = Color.White,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Text(
-                        text = "${FormatUtils.formatDurationPadded(positionMs)} / ${FormatUtils.formatDurationPadded(durationMs)}",
-                        style = TextStyle(
-                            fontSize = 12.5.sp,
-                            fontWeight = FontWeight.Medium,
-                            fontFeatureSettings = "tnum",
-                            color = Color.White
-                        ),
-                        maxLines = 1
-                    )
-                }
-            }
-
-            // Right: Speed pill + Mute / Unmute circle
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Surface(
-                    shape = RoundedCornerShape(50),
-                    color = if (playbackSpeed != 1f) MaterialTheme.colorScheme.primary else pillBg,
-                    modifier = Modifier
-                        .height(36.dp)
-                        .border(0.8.dp, pillBorder, RoundedCornerShape(50))
-                        .clip(RoundedCornerShape(50))
-                        .clickable(onClick = videoController::cyclePlaybackSpeed)
-                ) {
-                    Box(
-                        modifier = Modifier.padding(horizontal = 10.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = speedLabel,
-                            color = Color.White,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
-                }
-
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(pillBg)
-                        .border(0.8.dp, pillBorder, CircleShape)
-                        .clickable(onClick = videoController::toggleMute),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = if (isMuted) {
-                            Icons.AutoMirrored.Rounded.VolumeOff
-                        } else {
-                            Icons.AutoMirrored.Rounded.VolumeUp
-                        },
-                        contentDescription = if (isMuted) "Unmute" else "Mute",
-                        tint = Color.White,
-                        modifier = Modifier.size(19.dp)
-                    )
-                }
-            }
-        }
-
-        // Dedicated full-width seekbar (works even when the bottom filmstrip is turned off!)
-        if (durationMs > 0L) {
-            Slider(
-                value = positionMs.toFloat(),
-                onValueChange = { newPos ->
-                    videoController.isScrubbing = true
-                    videoController.seekTo(newPos.toLong())
-                },
-                onValueChangeFinished = {
-                    videoController.isScrubbing = false
-                },
-                valueRange = 0f..durationMs.toFloat().coerceAtLeast(1f),
-                colors = SliderDefaults.colors(
-                    thumbColor = Color.White,
-                    activeTrackColor = Color.White,
-                    inactiveTrackColor = Color.White.copy(alpha = 0.28f)
-                ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(26.dp)
-            )
         }
     }
 }

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:configure="com.luminagallery.drive.widget.PhotoWidgetSettingsActivity"
+    android:description="@string/widget_shuffle_description"
+    android:initialLayout="@layout/widget_lumina_photo_shuffle"
+    android:previewLayout="@layout/widget_lumina_photo_shuffle"
+    android:minWidth="140dp"
+    android:minHeight="140dp"
+    android:minResizeWidth="48dp"
+    android:minResizeHeight="48dp"
+    android:resizeMode="horizontal|vertical"
+    android:targetCellWidth="2"
+    android:targetCellHeight="2"
+    android:updatePeriodMillis="1800000"
+    android:widgetCategory="home_screen"
+    android:widgetFeatures="reconfigurable" />

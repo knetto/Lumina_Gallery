@@ -2,10 +2,7 @@ package com.luminagallery.drive.ui.screens.viewer
 
 import android.net.Uri
 import android.provider.OpenableColumns
-import android.view.LayoutInflater
-import android.view.ViewGroup
 import androidx.activity.compose.BackHandler
-import androidx.annotation.OptIn
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -57,25 +54,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
-import androidx.media3.common.AudioAttributes
-import androidx.media3.common.C
-import androidx.media3.common.MediaItem as Media3Item
-import androidx.media3.common.util.UnstableApi
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
-import androidx.media3.ui.AspectRatioFrameLayout
-import androidx.media3.ui.PlayerView
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import coil3.request.crossfade
 import com.luminagallery.drive.LocalAppContainer
 import com.luminagallery.drive.LocalGalleryImageLoader
-import com.luminagallery.drive.R
 import com.luminagallery.drive.data.repository.VideoFormatSupport
 import com.luminagallery.drive.data.repository.WallpaperTarget
 import com.luminagallery.drive.domain.model.ExifMetadata
@@ -91,7 +75,6 @@ import kotlinx.coroutines.launch
  * Full-screen viewer used when Lumina Gallery handles an Android `ACTION_VIEW` intent
  * (e.g., tapping a photo or video in Samsung My Files, Downloads, or messaging apps).
  */
-@OptIn(UnstableApi::class)
 @kotlin.OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ExternalMediaViewerOverlay(
@@ -102,7 +85,6 @@ fun ExternalMediaViewerOverlay(
 ) {
     val context = LocalContext.current
     val view = LocalView.current
-    val lifecycleOwner = LocalLifecycleOwner.current
     val container = LocalAppContainer.current
     val imageLoader = LocalGalleryImageLoader.current
     val scope = rememberCoroutineScope()
@@ -145,6 +127,27 @@ fun ExternalMediaViewerOverlay(
         VideoFormatSupport.isVideoFile(displayName, mimeType) ||
             VideoFormatSupport.isVideoFile(uriString, mimeType)
     }
+    val externalItem = remember(uriString, displayName, mimeType, isVideo) {
+        MediaItem(
+            id = "ext_$uriString",
+            parentId = null,
+            name = displayName,
+            mimeType = mimeType,
+            mediaType = if (isVideo) MediaType.VIDEO else MediaType.PHOTO,
+            sizeBytes = 0L,
+            createdTimeEpochMs = 0L,
+            monthYearLabel = "",
+            fullDateLabel = "",
+            thumbnailLink = uriString,
+            width = null,
+            height = null,
+            rotation = null,
+            durationMillis = null,
+            exif = ExifMetadata(null, null, null, null, null, null, null, null),
+            isLocal = true,
+            localContentUri = uriString
+        )
+    }
 
     var scale by remember(uriString) { mutableFloatStateOf(1f) }
     var offset by remember(uriString) { mutableStateOf(Offset.Zero) }
@@ -165,65 +168,30 @@ fun ExternalMediaViewerOverlay(
             .onSizeChanged { containerSize = it }
     ) {
         if (isVideo) {
-            var exoPlayer by remember(uriString) { mutableStateOf<ExoPlayer?>(null) }
-            DisposableEffect(uriString, lifecycleOwner) {
-                val audioAttributes = AudioAttributes.Builder()
-                    .setUsage(C.USAGE_MEDIA)
-                    .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
-                    .build()
-                val isMp2p = VideoFormatSupport.isMp2pVideo(displayName, mimeType) ||
-                    VideoFormatSupport.isMp2pVideo(uriString, mimeType)
-                val extractorsFactory = VideoFormatSupport.buildExtractorsFactory(preferProgramStream = isMp2p)
-                val hintedMime = VideoFormatSupport.resolveExoPlayerMimeType(displayName, mimeType)
-                    ?: VideoFormatSupport.resolveExoPlayerMimeType(uriString, mimeType)
-                val mediaItem = Media3Item.Builder()
-                    .setUri(parsedUri)
-                    .apply { if (!hintedMime.isNullOrBlank()) setMimeType(hintedMime) }
-                    .build()
-                val playerInstance = ExoPlayer.Builder(
-                    context,
-                    VideoFormatSupport.buildRenderersFactory(context)
-                )
-                    .setMediaSourceFactory(DefaultMediaSourceFactory(context, extractorsFactory))
-                    .setAudioAttributes(audioAttributes, true)
-                    .setHandleAudioBecomingNoisy(true)
-                    .build()
-                    .apply {
-                        setMediaItem(mediaItem)
-                        playWhenReady = true
-                        prepare()
-                    }
-                exoPlayer = playerInstance
-                val observer = LifecycleEventObserver { _, event ->
-                    if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) {
-                        playerInstance.pause()
-                    }
-                }
-                lifecycleOwner.lifecycle.addObserver(observer)
-                onDispose {
-                    lifecycleOwner.lifecycle.removeObserver(observer)
-                    playerInstance.stop()
-                    playerInstance.release()
-                    if (exoPlayer === playerInstance) exoPlayer = null
-                }
-            }
-            val activePlayer = exoPlayer
-            if (activePlayer != null) {
-                AndroidView(
-                    factory = { ctx ->
-                        (LayoutInflater.from(ctx).inflate(R.layout.view_exo_texture_player, null) as PlayerView).apply {
-                            useController = true
-                            resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-                            layoutParams = ViewGroup.LayoutParams(
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                                ViewGroup.LayoutParams.MATCH_PARENT
-                            )
-                            player = activePlayer
-                        }
-                    },
-                    update = { pv -> if (pv.player !== activePlayer) pv.player = activePlayer },
-                    onRelease = { pv -> pv.player = null },
-                    modifier = Modifier.fillMaxSize()
+            val videoController = remember(uriString) { ActiveVideoController() }
+            VideoPlayerPage(
+                item = externalItem,
+                isActivePage = true,
+                isUnmeteredWifi = false,
+                chromeVisible = chromeVisible,
+                videoController = videoController,
+                loopVideo = false,
+                onToggleChrome = { chromeVisible = !chromeVisible },
+                onFrameCapturedMessage = { message -> scope.launch { snackbarHostState.showSnackbar(message) } },
+                onVideoAspectResolved = {},
+                modifier = Modifier.navigationBarsPadding()
+            )
+            AnimatedVisibility(
+                visible = chromeVisible,
+                enter = fadeIn(),
+                exit = fadeOut(),
+                modifier = Modifier.align(Alignment.BottomCenter)
+            ) {
+                VideoPlaybackControls(
+                    controller = videoController,
+                    itemId = externalItem.id,
+                    fallbackDurationMs = 0L,
+                    modifier = Modifier.navigationBarsPadding().padding(14.dp)
                 )
             }
         } else {
@@ -291,7 +259,7 @@ fun ExternalMediaViewerOverlay(
 
         // Top Bar
         AnimatedVisibility(
-            visible = isVideo || chromeVisible,
+            visible = chromeVisible,
             enter = fadeIn(),
             exit = fadeOut(),
             modifier = Modifier.align(Alignment.TopCenter)
@@ -368,7 +336,7 @@ fun ExternalMediaViewerOverlay(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .navigationBarsPadding()
-                .padding(bottom = 70.dp)
+                .padding(bottom = if (isVideo) 120.dp else 70.dp)
         )
     }
 
@@ -395,27 +363,8 @@ fun ExternalMediaViewerOverlay(
                             .fillMaxWidth()
                             .clickable {
                                 showWallpaperSheet = false
-                                val pseudoItem = MediaItem(
-                                    id = "ext_$uriString",
-                                    parentId = null,
-                                    name = displayName,
-                                    mimeType = mimeType,
-                                    mediaType = MediaType.PHOTO,
-                                    sizeBytes = 0L,
-                                    createdTimeEpochMs = 0L,
-                                    monthYearLabel = "",
-                                    fullDateLabel = "",
-                                    thumbnailLink = uriString,
-                                    width = null,
-                                    height = null,
-                                    rotation = null,
-                                    durationMillis = null,
-                                    exif = ExifMetadata(null, null, null, null, null, null, null, null),
-                                    isLocal = true,
-                                    localContentUri = uriString
-                                )
                                 scope.launch {
-                                    container.localFileOperationsManager.setAsWallpaper(pseudoItem, target)
+                                    container.localFileOperationsManager.setAsWallpaper(externalItem, target)
                                         .onSuccess { snackbarHostState.showSnackbar("Applied to ${target.label}") }
                                         .onFailure { err ->
                                             snackbarHostState.showSnackbar(err.localizedMessage ?: "Failed to set wallpaper")

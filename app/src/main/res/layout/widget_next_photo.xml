@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TextView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_next_btn"
+    android:layout_width="42dp"
+    android:layout_height="42dp"
+    android:layout_gravity="top|end"
+    android:layout_margin="6dp"
+    android:background="@drawable/widget_glass_button"
+    android:contentDescription="@string/widget_next_photos"
+    android:gravity="center"
+    android:includeFontPadding="false"
+    android:text="↻"
+    android:textColor="#FFFFFF"
+    android:textSize="22sp" />
