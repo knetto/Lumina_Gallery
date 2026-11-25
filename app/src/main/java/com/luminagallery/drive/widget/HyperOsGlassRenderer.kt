@@ -179,14 +179,14 @@ internal object HyperOsGlassRenderer {
                 outerRadius = outerRadius,
                 density = density,
                 extraOuterInset = if (settings.frameStyle == WidgetFrameStyle.FROSTED_FRAME) {
-                    (minEdge * 0.042f).coerceIn(5.5f * density, 10f * density)
+                    (minEdge * 0.042f).coerceIn(5.5f * density, 9.5f * density)
                 } else {
-                    (minEdge * 0.022f).coerceIn(3f * density, 5.5f * density)
+                    0f
                 }
             )
         }
 
-        // 2. Apply Xiaomi HyperOS curved refractive glass bezel & crystalline dual-arc specular rim
+        // 2. Apply exact Xiaomi HyperOS continuous-curvature squircle & razor-thin glass rim
         val output = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val outCanvas = Canvas(output)
 
@@ -195,12 +195,11 @@ internal object HyperOsGlassRenderer {
         outCanvas.clipPath(outerPath)
         outCanvas.drawBitmap(contentBitmap, 0f, 0f, null)
 
-        // Draw curved glass refraction + lighting layers
+        // Subtle inner lighting accent (zero murky grey halo)
         when (settings.frameStyle) {
             WidgetFrameStyle.HYPER_GLASS -> {
-                drawHyperOsCurvedGlassOverlay(
+                drawHyperOsSubtleInnerSheen(
                     canvas = outCanvas,
-                    source = contentBitmap,
                     bounds = bounds,
                     outerRadius = outerRadius,
                     density = density
@@ -214,14 +213,7 @@ internal object HyperOsGlassRenderer {
                     density = density
                 )
             }
-            WidgetFrameStyle.CRYSTAL_RIM -> {
-                drawCrystalRimOverlay(
-                    canvas = outCanvas,
-                    bounds = bounds,
-                    outerRadius = outerRadius,
-                    density = density
-                )
-            }
+            WidgetFrameStyle.CRYSTAL_RIM,
             WidgetFrameStyle.BORDERLESS -> Unit
         }
 
@@ -508,33 +500,39 @@ internal object HyperOsGlassRenderer {
         density: Float,
         extraOuterInset: Float
     ) {
-        val gapPx = (3.4f * density).coerceIn(2.5f * density, 5f * density)
+        val isFullBleed = extraOuterInset <= 0.5f
+        val gapPx = (if (isFullBleed) 2.4f else 3.2f) * density
 
-        // 1. Frosted glass mat derived from the primary photo so gaps glow harmoniously with the photos!
-        val mat = createBlurredGlassBitmap(
-            source = photos.first(),
-            targetW = bounds.width().roundToInt(),
-            targetH = bounds.height().roundToInt(),
-            blurRadius = 10,
-            saturation = 1.18f,
-            brightnessLift = 12f
-        )
-        canvas.drawBitmap(mat, 0f, 0f, null)
-        mat.recycle()
-
-        val matTint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            shader = LinearGradient(
-                0f, 0f, bounds.width(), bounds.height(),
-                intArrayOf(
-                    Color.argb(66, 255, 255, 255),
-                    Color.argb(40, 20, 28, 42),
-                    Color.argb(72, 12, 18, 30)
-                ),
-                floatArrayOf(0f, 0.5f, 1f),
-                Shader.TileMode.CLAMP
+        if (isFullBleed) {
+            // Clean dark frosted hairline divider backdrop — zero bulky grey outer frame
+            canvas.drawColor(Color.argb(255, 16, 20, 28))
+        } else {
+            // Frosted glass mat derived from the primary photo when Frosted Frame is chosen
+            val mat = createBlurredGlassBitmap(
+                source = photos.first(),
+                targetW = bounds.width().roundToInt(),
+                targetH = bounds.height().roundToInt(),
+                blurRadius = 10,
+                saturation = 1.15f,
+                brightnessLift = 8f
             )
+            canvas.drawBitmap(mat, 0f, 0f, null)
+            mat.recycle()
+
+            val matTint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                shader = LinearGradient(
+                    0f, 0f, bounds.width(), bounds.height(),
+                    intArrayOf(
+                        Color.argb(46, 255, 255, 255),
+                        Color.argb(40, 18, 24, 36),
+                        Color.argb(64, 10, 15, 24)
+                    ),
+                    floatArrayOf(0f, 0.5f, 1f),
+                    Shader.TileMode.CLAMP
+                )
+            }
+            canvas.drawRect(bounds, matTint)
         }
-        canvas.drawRect(bounds, matTint)
 
         val insetRect = RectF(
             bounds.left + extraOuterInset,
@@ -543,18 +541,22 @@ internal object HyperOsGlassRenderer {
             bounds.bottom - extraOuterInset
         )
         val tileRects = computeTileRects(pattern, insetRect, gapPx)
-        val innerCorner = (outerRadius - extraOuterInset * 0.78f).coerceIn(8f * density, 18f * density)
+        val innerCorner = if (isFullBleed) {
+            7f * density
+        } else {
+            (outerRadius - extraOuterInset * 0.78f).coerceIn(8f * density, 18f * density)
+        }
 
         val tileRimPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
-            strokeWidth = 0.8f * density
-            color = Color.argb(64, 255, 255, 255)
+            strokeWidth = 0.6f * density
+            color = Color.argb(if (isFullBleed) 32 else 48, 255, 255, 255)
         }
 
         tileRects.forEachIndexed { index, rect ->
             val bitmap = photos.getOrNull(index) ?: photos.last()
-            val tileRadius = min(innerCorner, min(rect.width(), rect.height()) * 0.30f)
-            val tilePath = buildContinuousSquirclePath(rect, tileRadius, smoothness = 0.55f)
+            val tileRadius = min(innerCorner, min(rect.width(), rect.height()) * 0.28f)
+            val tilePath = buildContinuousSquirclePath(rect, tileRadius, smoothness = 0.52f)
 
             val save = canvas.save()
             canvas.clipPath(tilePath)
@@ -566,118 +568,45 @@ internal object HyperOsGlassRenderer {
     }
 
     /**
-     * Signature Xiaomi HyperOS Liquid / Curved Glass edge effect:
-     * Renders a softly refracted (zoomed + blurred + luminous) perimeter ring of the photo itself,
-     * paired with a directional curved-glass specular dome highlight and subtle inner bevel crease.
+     * Exact Xiaomi HyperOS ultra-clean glass edge micro-sheen:
+     * Keeps the photo 100% razor-sharp edge-to-edge with only a ~1.5dp feather-soft specular glint
+     * catching the outer curved glass lip (zero blurry grey halo or dark inner crease).
      */
-    private fun drawHyperOsCurvedGlassOverlay(
+    private fun drawHyperOsSubtleInnerSheen(
         canvas: Canvas,
-        source: Bitmap,
         bounds: RectF,
         outerRadius: Float,
         density: Float
     ) {
-        val w = bounds.width().roundToInt()
-        val h = bounds.height().roundToInt()
-        val minEdge = min(bounds.width(), bounds.height())
-        val bevelWidth = (minEdge * 0.044f).coerceIn(5.2f * density, 9.5f * density)
-
-        // 1. Create refracted glass copy: slightly zoomed-out (1.065x) + frosted blur + subtle vibrancy lift
-        val refracted = createBlurredGlassBitmap(
-            source = source,
-            targetW = w,
-            targetH = h,
-            blurRadius = 6,
-            zoomFactor = 1.065f,
-            saturation = 1.18f,
-            brightnessLift = 16f
+        val sheenInset = 1.25f * density
+        val sheenRect = RectF(
+            bounds.left + sheenInset,
+            bounds.top + sheenInset,
+            bounds.right - sheenInset,
+            bounds.bottom - sheenInset
         )
-
-        // 2. Mask refracted copy ONLY onto the outer curved bevel perimeter with feathered inner transition
-        val layerSave = canvas.saveLayer(bounds, null)
-        canvas.drawBitmap(refracted, 0f, 0f, null)
-        refracted.recycle()
-
-        // Luminous glass glaze over the refracted bevel
-        val glazePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            shader = LinearGradient(
-                0f, 0f, bounds.width(), bounds.height(),
-                intArrayOf(
-                    Color.argb(72, 255, 255, 255),
-                    Color.argb(20, 236, 245, 255),
-                    Color.argb(12, 200, 220, 255),
-                    Color.argb(48, 255, 255, 255)
-                ),
-                floatArrayOf(0f, 0.34f, 0.72f, 1f),
-                Shader.TileMode.CLAMP
-            )
-        }
-        canvas.drawRect(bounds, glazePaint)
-
-        // Punch out the sharp center photo cleanly with feathered BlurMaskFilter so the bevel melts smoothly into the photo!
-        val innerRect = RectF(
-            bounds.left + bevelWidth,
-            bounds.top + bevelWidth,
-            bounds.right - bevelWidth,
-            bounds.bottom - bevelWidth
+        val sheenPath = buildContinuousSquirclePath(
+            sheenRect,
+            (outerRadius - sheenInset * 0.85f).coerceAtLeast(6f * density)
         )
-        val innerRadius = (outerRadius - bevelWidth * 0.76f).coerceAtLeast(6f * density)
-        val innerPath = buildContinuousSquirclePath(innerRect, innerRadius)
-        val punchPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
-            color = Color.BLACK
-            maskFilter = BlurMaskFilter((bevelWidth * 0.44f).coerceAtLeast(1.5f), BlurMaskFilter.Blur.NORMAL)
-        }
-        canvas.drawPath(innerPath, punchPaint)
-        canvas.restoreToCount(layerSave)
-
-        // 3. Soft curved inner dome specular arc (top-left bright catch, bottom-right subtle bounce)
-        val domeInset = bevelWidth * 0.56f
-        val domeRect = RectF(
-            bounds.left + domeInset,
-            bounds.top + domeInset,
-            bounds.right - domeInset,
-            bounds.bottom - domeInset
-        )
-        val domePath = buildContinuousSquirclePath(
-            domeRect,
-            (outerRadius - domeInset * 0.78f).coerceAtLeast(6f * density)
-        )
-        val domePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        val sheenPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
-            strokeWidth = (bevelWidth * 0.55f).coerceAtLeast(2.2f * density)
-            maskFilter = BlurMaskFilter((bevelWidth * 0.32f).coerceAtLeast(1f), BlurMaskFilter.Blur.NORMAL)
+            strokeWidth = 1.6f * density
+            maskFilter = BlurMaskFilter(1.1f * density, BlurMaskFilter.Blur.NORMAL)
             shader = LinearGradient(
                 0f, 0f, bounds.width(), bounds.height(),
                 intArrayOf(
-                    Color.argb(96, 255, 255, 255),
-                    Color.argb(12, 255, 255, 255),
+                    Color.argb(46, 255, 255, 255),
+                    Color.argb(12, 240, 248, 255),
                     Color.argb(0, 255, 255, 255),
-                    Color.argb(56, 255, 255, 255)
+                    Color.argb(14, 240, 248, 255),
+                    Color.argb(30, 255, 255, 255)
                 ),
-                floatArrayOf(0f, 0.32f, 0.68f, 1f),
+                floatArrayOf(0f, 0.24f, 0.50f, 0.76f, 1f),
                 Shader.TileMode.CLAMP
             )
         }
-        canvas.drawPath(domePath, domePaint)
-
-        // 4. Whisper-thin inner depth crease separating the curved glass bevel from the recessed flat pane
-        val creasePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeWidth = 1.15f * density
-            maskFilter = BlurMaskFilter(1.2f * density, BlurMaskFilter.Blur.NORMAL)
-            shader = LinearGradient(
-                0f, 0f, bounds.width(), bounds.height(),
-                intArrayOf(
-                    Color.argb(24, 0, 0, 0),
-                    Color.argb(38, 0, 0, 0),
-                    Color.argb(54, 0, 0, 0)
-                ),
-                floatArrayOf(0f, 0.5f, 1f),
-                Shader.TileMode.CLAMP
-            )
-        }
-        canvas.drawPath(innerPath, creasePaint)
+        canvas.drawPath(sheenPath, sheenPaint)
     }
 
     private fun drawFrostedFrameHighlight(
@@ -686,7 +615,7 @@ internal object HyperOsGlassRenderer {
         outerRadius: Float,
         density: Float
     ) {
-        val sheenInset = 2.5f * density
+        val sheenInset = 2.0f * density
         val sheenRect = RectF(
             bounds.left + sheenInset,
             bounds.top + sheenInset,
@@ -699,14 +628,14 @@ internal object HyperOsGlassRenderer {
         )
         val sheenPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
-            strokeWidth = 3f * density
-            maskFilter = BlurMaskFilter(2.5f * density, BlurMaskFilter.Blur.NORMAL)
+            strokeWidth = 2.2f * density
+            maskFilter = BlurMaskFilter(1.8f * density, BlurMaskFilter.Blur.NORMAL)
             shader = LinearGradient(
                 0f, 0f, bounds.width(), bounds.height(),
                 intArrayOf(
-                    Color.argb(110, 255, 255, 255),
-                    Color.argb(18, 255, 255, 255),
-                    Color.argb(72, 255, 255, 255)
+                    Color.argb(62, 255, 255, 255),
+                    Color.argb(12, 255, 255, 255),
+                    Color.argb(42, 255, 255, 255)
                 ),
                 floatArrayOf(0f, 0.5f, 1f),
                 Shader.TileMode.CLAMP
@@ -715,54 +644,10 @@ internal object HyperOsGlassRenderer {
         canvas.drawPath(sheenPath, sheenPaint)
     }
 
-    private fun drawCrystalRimOverlay(
-        canvas: Canvas,
-        bounds: RectF,
-        outerRadius: Float,
-        density: Float
-    ) {
-        // Gentle overhead glass reflection along top 14%
-        val topWash = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            shader = LinearGradient(
-                0f, 0f, 0f, bounds.height() * 0.16f,
-                Color.argb(46, 255, 255, 255),
-                Color.TRANSPARENT,
-                Shader.TileMode.CLAMP
-            )
-        }
-        canvas.drawRect(bounds.left, bounds.top, bounds.right, bounds.top + bounds.height() * 0.16f, topWash)
-
-        val innerRimRect = RectF(
-            bounds.left + 1.5f * density,
-            bounds.top + 1.5f * density,
-            bounds.right - 1.5f * density,
-            bounds.bottom - 1.5f * density
-        )
-        val innerRimPath = buildContinuousSquirclePath(
-            innerRimRect,
-            (outerRadius - 1.2f * density).coerceAtLeast(6f * density)
-        )
-        val innerGlow = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeWidth = 1.6f * density
-            maskFilter = BlurMaskFilter(1.4f * density, BlurMaskFilter.Blur.NORMAL)
-            shader = LinearGradient(
-                0f, 0f, bounds.width(), bounds.height(),
-                intArrayOf(
-                    Color.argb(85, 255, 255, 255),
-                    Color.argb(10, 255, 255, 255),
-                    Color.argb(46, 255, 255, 255)
-                ),
-                floatArrayOf(0f, 0.52f, 1f),
-                Shader.TileMode.CLAMP
-            )
-        }
-        canvas.drawPath(innerRimPath, innerGlow)
-    }
-
     /**
-     * Razor-sharp outer crystalline dual-arc specular stroke + subtle contrast outline
-     * so the curved glass rim catches light identically on dark and bright wallpapers.
+     * Pixel-matched Xiaomi HyperOS crystalline translucent glass rim:
+     * Razor-thin ~1.15dp specular edge catching light softly at top-left (~48% white),
+     * whisper-translucent along neutral mid-edges (~14%), and delicate opposing bounce at bottom-right (~36%).
      */
     private fun drawDualArcSpecularBorder(
         canvas: Canvas,
@@ -771,8 +656,8 @@ internal object HyperOsGlassRenderer {
         density: Float,
         strong: Boolean
     ) {
-        // Hair-thin dark contrast silhouette (keeps white glass rim crisp on bright white wallpapers)
-        val contrastStroke = 0.65f * density
+        // Ultra-subtle outer contrast silhouette for white wallpapers (virtually invisible on dark)
+        val contrastStroke = 0.45f * density
         val outerStrokeRect = RectF(
             bounds.left + contrastStroke * 0.5f,
             bounds.top + contrastStroke * 0.5f,
@@ -786,13 +671,13 @@ internal object HyperOsGlassRenderer {
         val contrastPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
             strokeWidth = contrastStroke
-            color = Color.argb(44, 0, 0, 0)
+            color = Color.argb(26, 0, 0, 0)
         }
         canvas.drawPath(contrastPath, contrastPaint)
 
-        // Primary crystalline dual-arc specular stroke
-        val rimWidth = (if (strong) 1.45f else 1.2f) * density
-        val rimInset = rimWidth * 0.5f + contrastStroke * 0.45f
+        // Exact Xiaomi HyperOS razor-thin translucent specular glass rim
+        val rimWidth = (if (strong) 1.15f else 0.85f) * density
+        val rimInset = rimWidth * 0.5f + contrastStroke * 0.35f
         val rimRect = RectF(
             bounds.left + rimInset,
             bounds.top + rimInset,
@@ -801,7 +686,7 @@ internal object HyperOsGlassRenderer {
         )
         val rimPath = buildContinuousSquirclePath(
             rimRect,
-            (outerRadius - rimInset * 0.82f).coerceAtLeast(4f * density)
+            (outerRadius - rimInset * 0.86f).coerceAtLeast(4f * density)
         )
         val rimPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
@@ -809,13 +694,13 @@ internal object HyperOsGlassRenderer {
             shader = LinearGradient(
                 bounds.left, bounds.top, bounds.right, bounds.bottom,
                 intArrayOf(
-                    Color.argb(if (strong) 235 else 205, 255, 255, 255),
-                    Color.argb(if (strong) 128 else 96, 240, 248, 255),
-                    Color.argb(if (strong) 38 else 28, 255, 255, 255),
-                    Color.argb(if (strong) 84 else 62, 232, 244, 255),
-                    Color.argb(if (strong) 192 else 156, 255, 255, 255)
+                    Color.argb(if (strong) 128 else 78, 255, 255, 255),
+                    Color.argb(if (strong) 72 else 42, 240, 248, 255),
+                    Color.argb(if (strong) 34 else 20, 255, 255, 255),
+                    Color.argb(if (strong) 64 else 38, 236, 246, 255),
+                    Color.argb(if (strong) 96 else 60, 255, 255, 255)
                 ),
-                floatArrayOf(0f, 0.22f, 0.50f, 0.78f, 1f),
+                floatArrayOf(0f, 0.24f, 0.50f, 0.78f, 1f),
                 Shader.TileMode.CLAMP
             )
         }
@@ -1045,16 +930,16 @@ internal object HyperOsGlassRenderer {
         canvas.drawRect(rect, fillPaint)
         canvas.restoreToCount(save)
 
-        // Delicate specular border on the frosted capsule
+        // Delicate translucent specular border on the frosted capsule
         val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
-            strokeWidth = 0.9f * density
+            strokeWidth = 0.75f * density
             shader = LinearGradient(
                 rect.left, rect.top, rect.right, rect.bottom,
                 intArrayOf(
-                    Color.argb(145, 255, 255, 255),
-                    Color.argb(40, 255, 255, 255),
-                    Color.argb(95, 255, 255, 255)
+                    Color.argb(76, 255, 255, 255),
+                    Color.argb(22, 255, 255, 255),
+                    Color.argb(52, 255, 255, 255)
                 ),
                 floatArrayOf(0f, 0.5f, 1f),
                 Shader.TileMode.CLAMP

@@ -117,8 +117,8 @@ internal enum class WidgetFrameStyle {
 
 @Serializable
 internal enum class WidgetCornerStyle(val radiusDp: Float) {
-    HYPER_OS(24f),
-    SOFT(18f),
+    HYPER_OS(26f),
+    SOFT(20f),
     COMPACT(12f)
 }
 

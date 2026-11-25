@@ -519,8 +519,8 @@ private fun WidgetSettingsRoot(
                     selected = settings.cornerStyle,
                     labelOf = {
                         when (it) {
-                            WidgetCornerStyle.HYPER_OS -> "HyperOS (24dp)"
-                            WidgetCornerStyle.SOFT -> "Soft (18dp)"
+                            WidgetCornerStyle.HYPER_OS -> "HyperOS (26dp)"
+                            WidgetCornerStyle.SOFT -> "Soft (20dp)"
                             WidgetCornerStyle.COMPACT -> "Compact (12dp)"
                         }
                     },
@@ -771,17 +771,17 @@ private fun LiveWidgetPreviewStage(
                     modifier = Modifier
                         .align(Alignment.TopStart)
                         .padding(10.dp)
-                        .size(30.dp)
+                        .size(28.dp)
                         .clip(CircleShape)
-                        .background(Color(0x70142032))
-                        .border(0.9.dp, Color(0x80FFFFFF), CircleShape),
+                        .background(Color(0x66121A26))
+                        .border(0.8.dp, Color(0x4AFFFFFF), CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         Icons.Rounded.Settings,
                         contentDescription = null,
                         tint = Color.White,
-                        modifier = Modifier.size(16.dp)
+                        modifier = Modifier.size(15.dp)
                     )
                 }
             }
@@ -790,17 +790,17 @@ private fun LiveWidgetPreviewStage(
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
                         .padding(10.dp)
-                        .size(30.dp)
+                        .size(28.dp)
                         .clip(CircleShape)
-                        .background(Color(0x70142032))
-                        .border(0.9.dp, Color(0x80FFFFFF), CircleShape),
+                        .background(Color(0x66121A26))
+                        .border(0.8.dp, Color(0x4AFFFFFF), CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         Icons.Rounded.Shuffle,
                         contentDescription = null,
                         tint = Color.White,
-                        modifier = Modifier.size(16.dp)
+                        modifier = Modifier.size(15.dp)
                     )
                 }
             }

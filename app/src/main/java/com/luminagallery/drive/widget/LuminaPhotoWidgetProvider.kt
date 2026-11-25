@@ -505,12 +505,8 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
     }
 
     private fun resolveSystemHyperCornerDp(context: Context, settings: PhotoWidgetSettings): Float? {
-        if (settings.cornerStyle != WidgetCornerStyle.HYPER_OS) return null
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return null
-        return runCatching {
-            val px = context.resources.getDimension(android.R.dimen.system_app_widget_background_radius)
-            (px / context.resources.displayMetrics.density).coerceIn(20f, 28f)
-        }.getOrNull()
+        // Use exact HyperOS continuous squircle radius (26dp) rather than AOSP's sharper 20dp dimen
+        return null
     }
 
     private fun hitOverlayLayoutFor(pattern: ResolvedTilePattern): Int? = when (pattern) {

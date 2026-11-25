@@ -4,19 +4,19 @@
     android:layout_height="match_parent"
     android:background="@drawable/widget_bg_rounded"
     android:clipToOutline="true"
-    android:foreground="@drawable/widget_glass_edge"
-    android:padding="5dp">
+    android:foreground="@drawable/widget_glass_edge">
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="match_parent"
+        android:background="#10141C"
         android:orientation="horizontal">
 
         <FrameLayout
             android:layout_width="0dp"
             android:layout_height="match_parent"
-            android:layout_marginEnd="4dp"
-            android:layout_weight="60"
+            android:layout_marginEnd="2.5dp"
+            android:layout_weight="58"
             android:background="@drawable/widget_tile_clip_bg"
             android:clipToOutline="true">
 
@@ -31,13 +31,13 @@
         <LinearLayout
             android:layout_width="0dp"
             android:layout_height="match_parent"
-            android:layout_weight="40"
+            android:layout_weight="42"
             android:orientation="vertical">
 
             <FrameLayout
                 android:layout_width="match_parent"
                 android:layout_height="0dp"
-                android:layout_marginBottom="4dp"
+                android:layout_marginBottom="2.5dp"
                 android:layout_weight="1"
                 android:background="@drawable/widget_tile_clip_bg"
                 android:clipToOutline="true">
@@ -71,7 +71,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom|start"
-        android:layout_margin="7dp"
+        android:layout_margin="10dp"
         android:background="@drawable/widget_glass_pill"
         android:orientation="vertical"
         android:paddingHorizontal="10dp"

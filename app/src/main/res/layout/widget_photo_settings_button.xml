@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <ImageView xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/widget_settings_btn"
-    android:layout_width="32dp"
-    android:layout_height="32dp"
+    android:layout_width="28dp"
+    android:layout_height="28dp"
     android:layout_gravity="top|start"
     android:layout_margin="10dp"
     android:background="@drawable/widget_glass_button"
     android:contentDescription="@string/widget_settings"
-    android:padding="7dp"
+    android:padding="6.5dp"
     android:scaleType="fitCenter"
     android:src="@drawable/ic_widget_settings"
     android:visibility="gone" />
