@@ -162,6 +162,14 @@ internal object HyperOsGlassRenderer {
         val contentBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val contentCanvas = Canvas(contentBitmap)
 
+        val multiOuterInset = if (pattern != ResolvedTilePattern.SINGLE && photos.size > 1 &&
+            settings.frameStyle == WidgetFrameStyle.FROSTED_FRAME
+        ) {
+            (minEdge * 0.042f).coerceIn(5.5f * density, 9.5f * density)
+        } else {
+            0f
+        }
+
         if (photos.isEmpty()) {
             drawEmptyHyperOsBackdrop(contentCanvas, bounds)
         } else if (pattern == ResolvedTilePattern.SINGLE || photos.size == 1) {
@@ -178,11 +186,7 @@ internal object HyperOsGlassRenderer {
                 pattern = pattern,
                 outerRadius = outerRadius,
                 density = density,
-                extraOuterInset = if (settings.frameStyle == WidgetFrameStyle.FROSTED_FRAME) {
-                    (minEdge * 0.042f).coerceIn(5.5f * density, 9.5f * density)
-                } else {
-                    0f
-                }
+                extraOuterInset = multiOuterInset
             )
         }
 
@@ -194,6 +198,25 @@ internal object HyperOsGlassRenderer {
         val clipSave = outCanvas.save()
         outCanvas.clipPath(outerPath)
         outCanvas.drawBitmap(contentBitmap, 0f, 0f, null)
+
+        // Draw interior collage dividers with the EXACT same razor-thin clear glass rim as the outside border
+        if (pattern != ResolvedTilePattern.SINGLE && photos.size > 1) {
+            val tileBounds = RectF(
+                bounds.left + multiOuterInset,
+                bounds.top + multiOuterInset,
+                bounds.right - multiOuterInset,
+                bounds.bottom - multiOuterInset
+            )
+            drawCollageGlassDividers(
+                canvas = outCanvas,
+                bounds = bounds,
+                tileBounds = tileBounds,
+                pattern = pattern,
+                outerRadius = outerRadius,
+                density = density,
+                frameStyle = settings.frameStyle
+            )
+        }
 
         // Subtle inner lighting accent (zero murky grey halo)
         when (settings.frameStyle) {
@@ -501,24 +524,8 @@ internal object HyperOsGlassRenderer {
         extraOuterInset: Float
     ) {
         val isFullBleed = extraOuterInset <= 0.5f
-        val gapPx = (if (isFullBleed) 2.2f else 2.6f) * density
 
-        if (isFullBleed) {
-            // Transparent clear-glass seam letting the home screen wallpaper show gently through
-            val clearGlassTint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                shader = LinearGradient(
-                    0f, 0f, bounds.width(), bounds.height(),
-                    intArrayOf(
-                        Color.argb(56, 255, 255, 255),
-                        Color.argb(26, 236, 246, 255),
-                        Color.argb(46, 255, 255, 255)
-                    ),
-                    floatArrayOf(0f, 0.5f, 1f),
-                    Shader.TileMode.CLAMP
-                )
-            }
-            canvas.drawRect(bounds, clearGlassTint)
-        } else {
+        if (!isFullBleed) {
             // Frosted glass outer frame derived from the primary photo when Frosted Frame is chosen
             val mat = createBlurredGlassBitmap(
                 source = photos.first(),
@@ -552,33 +559,14 @@ internal object HyperOsGlassRenderer {
             bounds.right - extraOuterInset,
             bounds.bottom - extraOuterInset
         )
-        val tileRects = computeTileRects(pattern, insetRect, gapPx)
+        // Photos meet edge-to-edge with zero bulky gap; the unified 1.15dp clear glass divider is stroked cleanly on top
+        val tileRects = computeTileRects(pattern, insetRect, gapPx = 0f)
 
-        // Draw tiles with crisp 90-degree interior corners (outer corners are clipped cleanly by the 26dp HyperOS squircle)
         val compositeSave = canvas.save()
         if (!isFullBleed) {
             val innerFrameRadius = (outerRadius - extraOuterInset * 0.78f).coerceAtLeast(8f * density)
             canvas.clipPath(buildContinuousSquirclePath(insetRect, innerFrameRadius))
         }
-
-        // Translucent clear-glass specular edge stroke matching the outer Xiaomi glass rim
-        val innerGlassEdgePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeWidth = 0.95f * density
-            shader = LinearGradient(
-                bounds.left, bounds.top, bounds.right, bounds.bottom,
-                intArrayOf(
-                    Color.argb(118, 255, 255, 255),
-                    Color.argb(62, 240, 248, 255),
-                    Color.argb(38, 255, 255, 255),
-                    Color.argb(62, 236, 246, 255),
-                    Color.argb(92, 255, 255, 255)
-                ),
-                floatArrayOf(0f, 0.25f, 0.50f, 0.75f, 1f),
-                Shader.TileMode.CLAMP
-            )
-        }
-        val halfStroke = innerGlassEdgePaint.strokeWidth * 0.5f
 
         tileRects.forEachIndexed { index, rect ->
             val bitmap = photos.getOrNull(index) ?: photos.last()
@@ -586,23 +574,139 @@ internal object HyperOsGlassRenderer {
             canvas.clipRect(rect)
             drawCenterCropBitmap(canvas, bitmap, rect)
             canvas.restoreToCount(save)
-
-            // Draw clear glass specular edge ONLY along interior divider sides (never doubling the outer rim)
-            if (rect.left > insetRect.left + 1f) {
-                canvas.drawLine(rect.left + halfStroke, rect.top, rect.left + halfStroke, rect.bottom, innerGlassEdgePaint)
-            }
-            if (rect.top > insetRect.top + 1f) {
-                canvas.drawLine(rect.left, rect.top + halfStroke, rect.right, rect.top + halfStroke, innerGlassEdgePaint)
-            }
-            if (rect.right < insetRect.right - 1f) {
-                canvas.drawLine(rect.right - halfStroke, rect.top, rect.right - halfStroke, rect.bottom, innerGlassEdgePaint)
-            }
-            if (rect.bottom < insetRect.bottom - 1f) {
-                canvas.drawLine(rect.left, rect.bottom - halfStroke, rect.right, rect.bottom - halfStroke, innerGlassEdgePaint)
-            }
         }
         canvas.restoreToCount(compositeSave)
     }
+
+    /**
+     * Draws interior collage dividers using the EXACT same thickness (1.15dp) and translucent
+     * specular glass gradient as the outer widget rim, clipped neatly inside the outer rim
+     * so T-junctions merge seamlessly with zero double-bright overlap.
+     */
+    private fun drawCollageGlassDividers(
+        canvas: Canvas,
+        bounds: RectF,
+        tileBounds: RectF,
+        pattern: ResolvedTilePattern,
+        outerRadius: Float,
+        density: Float,
+        frameStyle: WidgetFrameStyle
+    ) {
+        val seams = computeInteriorSeamLines(pattern, tileBounds)
+        if (seams.isEmpty()) return
+
+        val strong = frameStyle == WidgetFrameStyle.HYPER_GLASS || frameStyle == WidgetFrameStyle.FROSTED_FRAME
+        val rimWidth = when (frameStyle) {
+            WidgetFrameStyle.HYPER_GLASS, WidgetFrameStyle.FROSTED_FRAME -> 1.15f * density
+            WidgetFrameStyle.CRYSTAL_RIM, WidgetFrameStyle.BORDERLESS -> 0.85f * density
+        }
+
+        // Clip strictly inside the outer border stroke so dividers butt cleanly into the outer glass rim
+        val innerClipInset = if (frameStyle == WidgetFrameStyle.BORDERLESS) 0f else rimWidth + 0.35f * density
+        val innerClipRect = RectF(
+            bounds.left + innerClipInset,
+            bounds.top + innerClipInset,
+            bounds.right - innerClipInset,
+            bounds.bottom - innerClipInset
+        )
+        val innerClipPath = buildContinuousSquirclePath(
+            innerClipRect,
+            (outerRadius - innerClipInset * 0.86f).coerceAtLeast(4f * density)
+        )
+
+        val dividerPaint = createGlassRimPaint(bounds, rimWidth, strong = strong)
+        val seamPath = Path().apply {
+            for (line in seams) {
+                moveTo(line[0], line[1])
+                lineTo(line[2], line[3])
+            }
+        }
+        val save = canvas.save()
+        canvas.clipPath(innerClipPath)
+        canvas.drawPath(seamPath, dividerPaint)
+        canvas.restoreToCount(save)
+    }
+
+    private fun computeInteriorSeamLines(pattern: ResolvedTilePattern, rect: RectF): List<FloatArray> {
+        val l = rect.left
+        val t = rect.top
+        val r = rect.right
+        val b = rect.bottom
+        val w = rect.width()
+        val h = rect.height()
+        return when (pattern) {
+            ResolvedTilePattern.SINGLE -> emptyList()
+            ResolvedTilePattern.HERO_LEFT_2_RIGHT -> {
+                val splitX = l + w * 0.58f
+                val midY = t + h * 0.5f
+                listOf(
+                    floatArrayOf(splitX, t, splitX, b),
+                    floatArrayOf(splitX, midY, r, midY)
+                )
+            }
+            ResolvedTilePattern.HERO_TOP_2_BOTTOM -> {
+                val splitY = t + h * 0.58f
+                val midX = l + w * 0.5f
+                listOf(
+                    floatArrayOf(l, splitY, r, splitY),
+                    floatArrayOf(midX, splitY, midX, b)
+                )
+            }
+            ResolvedTilePattern.GRID_2X2 -> {
+                val midX = l + w * 0.5f
+                val midY = t + h * 0.5f
+                listOf(
+                    floatArrayOf(midX, t, midX, b),
+                    floatArrayOf(l, midY, r, midY)
+                )
+            }
+            ResolvedTilePattern.BENTO_4_WIDE -> {
+                val splitX = l + w * 0.52f
+                val splitY = t + h * 0.52f
+                val rightMidX = splitX + (r - splitX) * 0.5f
+                listOf(
+                    floatArrayOf(splitX, t, splitX, b),
+                    floatArrayOf(splitX, splitY, r, splitY),
+                    floatArrayOf(rightMidX, splitY, rightMidX, b)
+                )
+            }
+            ResolvedTilePattern.STRIP_HORIZONTAL_2 -> verticalSplits(rect, 2)
+            ResolvedTilePattern.STRIP_HORIZONTAL_3 -> verticalSplits(rect, 3)
+            ResolvedTilePattern.STRIP_HORIZONTAL_4 -> verticalSplits(rect, 4)
+            ResolvedTilePattern.STRIP_VERTICAL_2 -> horizontalSplits(rect, 2)
+            ResolvedTilePattern.STRIP_VERTICAL_3 -> horizontalSplits(rect, 3)
+        }
+    }
+
+    private fun verticalSplits(rect: RectF, count: Int): List<FloatArray> =
+        (1 until count).map { i ->
+            val x = rect.left + rect.width() * (i.toFloat() / count)
+            floatArrayOf(x, rect.top, x, rect.bottom)
+        }
+
+    private fun horizontalSplits(rect: RectF, count: Int): List<FloatArray> =
+        (1 until count).map { i ->
+            val y = rect.top + rect.height() * (i.toFloat() / count)
+            floatArrayOf(rect.left, y, rect.right, y)
+        }
+
+    private fun createGlassRimPaint(bounds: RectF, strokeWidthPx: Float, strong: Boolean): Paint =
+        Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = strokeWidthPx
+            shader = LinearGradient(
+                bounds.left, bounds.top, bounds.right, bounds.bottom,
+                intArrayOf(
+                    Color.argb(if (strong) 128 else 78, 255, 255, 255),
+                    Color.argb(if (strong) 78 else 46, 240, 248, 255),
+                    Color.argb(if (strong) 48 else 28, 255, 255, 255),
+                    Color.argb(if (strong) 72 else 44, 236, 246, 255),
+                    Color.argb(if (strong) 104 else 64, 255, 255, 255)
+                ),
+                floatArrayOf(0f, 0.24f, 0.50f, 0.78f, 1f),
+                Shader.TileMode.CLAMP
+            )
+        }
 
     /**
      * Exact Xiaomi HyperOS ultra-clean glass edge micro-sheen:
@@ -712,7 +816,7 @@ internal object HyperOsGlassRenderer {
         }
         canvas.drawPath(contrastPath, contrastPaint)
 
-        // Exact Xiaomi HyperOS razor-thin translucent specular glass rim
+        // Exact Xiaomi HyperOS razor-thin translucent specular glass rim (shared with interior dividers!)
         val rimWidth = (if (strong) 1.15f else 0.85f) * density
         val rimInset = rimWidth * 0.5f + contrastStroke * 0.35f
         val rimRect = RectF(
@@ -725,22 +829,7 @@ internal object HyperOsGlassRenderer {
             rimRect,
             (outerRadius - rimInset * 0.86f).coerceAtLeast(4f * density)
         )
-        val rimPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeWidth = rimWidth
-            shader = LinearGradient(
-                bounds.left, bounds.top, bounds.right, bounds.bottom,
-                intArrayOf(
-                    Color.argb(if (strong) 128 else 78, 255, 255, 255),
-                    Color.argb(if (strong) 72 else 42, 240, 248, 255),
-                    Color.argb(if (strong) 34 else 20, 255, 255, 255),
-                    Color.argb(if (strong) 64 else 38, 236, 246, 255),
-                    Color.argb(if (strong) 96 else 60, 255, 255, 255)
-                ),
-                floatArrayOf(0f, 0.24f, 0.50f, 0.78f, 1f),
-                Shader.TileMode.CLAMP
-            )
-        }
+        val rimPaint = createGlassRimPaint(bounds, rimWidth, strong = strong)
         canvas.drawPath(rimPath, rimPaint)
     }
 
