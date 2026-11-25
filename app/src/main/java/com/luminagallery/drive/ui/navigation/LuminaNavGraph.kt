@@ -754,8 +754,8 @@ fun LuminaNavGraph(
                         midFlightCornerBump = 8.dp,
                         hideSourceWhileMorphing = true,
                         useAlbumCoverCrossfade = false,
-                        sourceRectProvider = { originTracker.viewerContentRect },
-                        backdropAlphaProvider = { originTracker.viewerBackdropAlpha }
+                        sourceRectProvider = { originTracker.viewerContentRectProvider?.invoke() },
+                        backdropAlphaProvider = { originTracker.viewerBackdropAlphaProvider?.invoke() ?: 1f }
                     ) { isRectMorphing ->
                         ViewerScreen(
                             viewModel = viewerViewModel,

@@ -8,6 +8,7 @@ import com.luminagallery.drive.data.local.HiddenLockedFolderManager
 import com.luminagallery.drive.data.local.LocalMediaRepository
 import com.luminagallery.drive.data.remote.DriveScopes
 import com.luminagallery.drive.data.remote.auth.GoogleAuthHelper
+import com.luminagallery.drive.data.remote.dto.DriveFileCapabilitiesDto
 import com.luminagallery.drive.data.remote.dto.DriveFileDto
 import com.luminagallery.drive.data.repository.CloudAlbumCollection
 import com.luminagallery.drive.data.repository.CloudAlbumLayout
@@ -37,6 +38,7 @@ import com.luminagallery.drive.ui.components.AlbumTransitionOriginTracker
 import com.luminagallery.drive.ui.components.FormatUtils
 import com.luminagallery.drive.ui.components.SecureWindowCounter
 import com.luminagallery.drive.ui.screens.editor.computeStraightenFillScale
+import com.luminagallery.drive.ui.screens.viewer.shouldDismissViewer
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -53,6 +55,41 @@ import java.nio.file.Files
 import java.security.MessageDigest
 
 class GalleryCoreLogicTest {
+
+    @Test
+    fun viewerDismissDistinguishesShortDragsFlingsAndReversals() {
+        assertFalse(shouldDismissViewer(50f, 0f, 700f))
+        assertTrue(shouldDismissViewer(120f, 0f, 700f))
+        assertTrue(shouldDismissViewer(35f, 1_000f, 700f))
+        assertFalse(shouldDismissViewer(12f, 1_000f, 700f))
+        assertFalse(shouldDismissViewer(120f, -1_000f, 700f))
+    }
+
+    @Test
+    fun driveMapper_identifiesComputerRootsFromFolderMetadata() {
+        val computer = Json.decodeFromString<DriveFileDto>(
+            """
+            {
+              "id": "computer-id",
+              "name": "Laptop",
+              "mimeType": "application/vnd.google-apps.folder",
+              "capabilities": {"canShare": false}
+            }
+            """.trimIndent()
+        )
+        val myDriveRootId = "my-drive-id"
+
+        assertTrue(DriveMapper.isComputerRoot(computer, myDriveRootId))
+        assertFalse(DriveMapper.isComputerRoot(computer.copy(id = myDriveRootId), myDriveRootId))
+        assertFalse(DriveMapper.isComputerRoot(computer.copy(parents = listOf(myDriveRootId)), myDriveRootId))
+        assertFalse(DriveMapper.isComputerRoot(computer.copy(capabilities = null), myDriveRootId))
+        assertFalse(
+            DriveMapper.isComputerRoot(
+                computer.copy(capabilities = DriveFileCapabilitiesDto(canShare = true)),
+                myDriveRootId
+            )
+        )
+    }
 
     @Test
     fun albumTransitionOriginTracker_clampsExtremesSafely() {

@@ -5,6 +5,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.util.Log
 import android.view.LayoutInflater
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -44,12 +45,10 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -111,8 +110,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -122,6 +121,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
@@ -224,7 +224,6 @@ fun ViewerScreen(
 
     var chromeVisible by remember { mutableStateOf(true) }
     var isCurrentPageZoomed by remember { mutableStateOf(false) }
-    var dismissDragFraction by remember { mutableFloatStateOf(0f) }
     val activeVideoController = remember { ActiveVideoController() }
 
     // Viewer Power Action States (Motion Photo, Wallpaper, Rename, Move/Copy, Trim, Overflow Menu)
@@ -451,128 +450,131 @@ fun ViewerScreen(
         }
     }
 
-    // Sync chrome & inner black box with the Xiaomi HyperOS rect-to-rect morph:
-    // while morphing, HyperOsRectMorphFrame draws the full-screen backdrop behind the flying photo,
-    // so the inner black box steps aside (no letterbox bars around landscape photos).
-    // Recomposes only when the morph starts / ends (boolean), never per animation frame.
-    val backgroundAlpha = if (isRectMorphing) 0f else (1f - dismissDragFraction * 0.6f).coerceIn(0f, 1f)
-    val showChromeNow = chromeVisible && dismissDragFraction < 0.05f && !isRectMorphing
+    val dismissDrag = remember(currentItem.id) { ViewerDismissDrag() }
+    val isMediaDragged by remember(dismissDrag) { derivedStateOf { dismissDrag.offsetPx > 1f } }
+    val showChromeNow = chromeVisible && !isMediaDragged && !isRectMorphing
     val isViewerClosing = animatedVisibilityScope.transition.targetState == EnterExitState.PostExit
+    val allowVerticalGestures by rememberUpdatedState(!isRectMorphing && !isViewerClosing)
+    val allowSwipeDismiss by rememberUpdatedState(prefs.swipeDownToDismiss && !isViewerClosing)
+    val latestOnDismiss by rememberUpdatedState(onDismiss)
+    val latestVisibleItem by rememberUpdatedState(currentItem)
+    val haptic = LocalHapticFeedback.current
     val originTracker = LocalAlbumTransitionOrigin.current
-    val viewerDensity = LocalDensity.current
-    var viewerRootSize by remember { mutableStateOf(IntSize.Zero) }
+    var viewportSize by remember { mutableStateOf(IntSize.Zero) }
 
     DisposableEffect(originTracker) {
         onDispose {
-            originTracker.viewerContentRect = null
-            originTracker.viewerBackdropAlpha = 1f
+            originTracker.viewerContentRectProvider = null
+            originTracker.viewerBackdropAlphaProvider = null
         }
+    }
+
+    val showFilmstrip = prefs.showViewerFilmstrip
+    // Hiding the controls during a drag must leave the media's layout and scale pivot in place.
+    val bottomDockClearance by animateDpAsState(
+        targetValue = when {
+            !chromeVisible -> 0.dp
+            showFilmstrip -> 118.dp
+            else -> 60.dp
+        },
+        animationSpec = tween(durationMillis = 220, easing = OneUiMotion.PageSlideEasing),
+        label = "mediaBottomClearance"
+    )
+    val viewportWidth = viewportSize.width.toFloat()
+    val viewportHeight = viewportSize.height.toFloat()
+    var decodedAspectForActive by remember(currentItem.id) { mutableStateOf<Float?>(null) }
+
+    SideEffect {
+        originTracker.viewerBackdropAlphaProvider = { dismissDrag.backdropAlpha(viewportHeight) }
+        val fittedRect = fittedViewerContentRect(currentItem, viewportWidth, viewportHeight, decodedAspectForActive)
+            ?: Rect(0f, 0f, viewportWidth, viewportHeight)
+        val viewportCenter = Offset(viewportWidth * 0.5f, viewportHeight * 0.5f)
+        originTracker.viewerContentRectProvider = { dismissDrag.transform(fittedRect, viewportCenter) }
     }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .onSizeChanged { viewerRootSize = it }
-            .background(Color.Black.copy(alpha = backgroundAlpha))
+            .drawBehind {
+                if (!isRectMorphing) {
+                    drawRect(Color.Black, alpha = dismissDrag.backdropAlpha(viewportHeight))
+                }
+            }
     ) {
-        // Media Pager (sits neatly above the pure-black Samsung bottom dock when chrome is visible
-        // so bright screenshots never clash with bottom icons, and goes full-bleed when immersive!)
-        val showFilmstrip = prefs.showViewerFilmstrip
-        // Layout is frozen during the open/close morph so the photo never shifts mid-flight.
-        val dockChromeVisible = chromeVisible && dismissDragFraction < 0.05f
-        val bottomDockClearance by animateDpAsState(
-            targetValue = when {
-                !dockChromeVisible -> 0.dp
-                showFilmstrip -> 118.dp
-                else -> 60.dp
-            },
-            animationSpec = tween(durationMillis = 220, easing = OneUiMotion.PageSlideEasing),
-            label = "mediaBottomClearance"
-        )
-
-        // Publish the exact on-screen rect of the current photo so the open & close morphs fly the
-        // real picture (not the full screen) straight out of & home into its grid tile.
-        val navBarBottomPx = WindowInsets.navigationBars.getBottom(viewerDensity)
-        val activeContentItem = items.getOrNull(pagerState.currentPage)
-        val clearancePx = with(viewerDensity) { bottomDockClearance.coerceAtLeast(0.dp).toPx() }
-        var decodedAspectForActive by remember(activeContentItem?.id) { mutableStateOf<Float?>(null) }
-        SideEffect {
-            originTracker.viewerBackdropAlpha = (1f - dismissDragFraction * 0.6f).coerceIn(0f, 1f)
-            val rootW = if (viewerRootSize.width > 0) viewerRootSize.width.toFloat() else view.width.toFloat()
-            val rootH = if (viewerRootSize.height > 0) viewerRootSize.height.toFloat() else view.height.toFloat()
-            originTracker.viewerContentRect = fittedViewerContentRect(
-                item = activeContentItem,
-                areaWidth = rootW,
-                areaHeight = rootH - navBarBottomPx - clearancePx,
-                fallbackAspectRatio = decodedAspectForActive
-            )
-        }
-
-        HorizontalPager(
-            state = pagerState,
-            key = { index -> items.getOrNull(index)?.id ?: "page_$index" },
-            userScrollEnabled = !isCurrentPageZoomed,
-            beyondViewportPageCount = 1,
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .navigationBarsPadding()
                 .padding(bottom = bottomDockClearance.coerceAtLeast(0.dp))
-        ) { page ->
-            val pageItem = items.getOrNull(page) ?: return@HorizontalPager
-            val isActivePage = page == pagerState.currentPage
+                .onSizeChanged { viewportSize = it }
+                .viewerVerticalGestures(
+                    drag = dismissDrag,
+                    scope = coroutineScope,
+                    canStart = { allowVerticalGestures && !isCurrentPageZoomed && !pagerState.isScrollInProgress },
+                    canDismiss = { allowSwipeDismiss },
+                    onDismiss = { latestOnDismiss() },
+                    onDetails = {
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        viewModel.openExifSheet(latestVisibleItem)
+                    }
+                )
+        ) {
+            HorizontalPager(
+                state = pagerState,
+                key = { index -> items.getOrNull(index)?.id ?: "page_$index" },
+                userScrollEnabled = !isCurrentPageZoomed && !isMediaDragged,
+                beyondViewportPageCount = 1,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        val scale = dismissDrag.scale(size.height)
+                        scaleX = scale
+                        scaleY = scale
+                        translationY = dismissDrag.offsetPx
+                    }
+            ) { page ->
+                val pageItem = items.getOrNull(page) ?: return@HorizontalPager
+                val isActivePage = page == pagerState.currentPage
 
-            if (pageItem.isVideo) {
-                VideoPlayerPage(
-                    item = pageItem,
-                    isActivePage = isActivePage,
-                    isUnmeteredWifi = uiState.isUnmeteredWifi,
-                    chromeVisible = showChromeNow,
-                    videoController = activeVideoController,
-                    autoPlay = prefs.autoPlayVideos,
-                    startMuted = prefs.startVideosMuted,
-                    loopVideo = prefs.loopVideos,
-                    swipeDownToDismiss = prefs.swipeDownToDismiss,
-                    isClosing = isViewerClosing && isActivePage,
-                    onToggleChrome = { chromeVisible = !chromeVisible },
-                    onVerticalDismissProgress = { fraction ->
-                        if (isActivePage) dismissDragFraction = fraction
-                    },
-                    onSwipeUpForDetails = {
-                        if (isActivePage) viewModel.openExifSheet(pageItem)
-                    },
-                    onFrameCapturedMessage = viewModel::showMessage,
-                    onZoomStateChanged = { zoomed ->
-                        if (isActivePage) isCurrentPageZoomed = zoomed
-                    },
-                    onDismiss = onDismiss
-                )
-            } else {
-                ZoomablePhotoPage(
-                    item = pageItem,
-                    isUnmeteredWifi = uiState.isUnmeteredWifi,
-                    swipeDownToDismiss = prefs.swipeDownToDismiss,
-                    startMuted = prefs.startVideosMuted,
-                    isClosing = isViewerClosing && isActivePage,
-                    motionPhotoInfo = if (isActivePage) currentMotionInfo else null,
-                    isPlayingMotion = isActivePage && isPlayingMotionPhoto,
-                    onMotionPlayStateChanged = { playing ->
-                        if (isActivePage) isPlayingMotionPhoto = playing
-                    },
-                    onTap = { chromeVisible = !chromeVisible },
-                    onZoomStateChanged = { zoomed ->
-                        if (isActivePage) isCurrentPageZoomed = zoomed
-                    },
-                    onVerticalDismissProgress = { fraction ->
-                        if (isActivePage) dismissDragFraction = fraction
-                    },
-                    onSwipeUpForDetails = {
-                        if (isActivePage) viewModel.openExifSheet(pageItem)
-                    },
-                    onImageAspectResolved = { aspect ->
-                        if (isActivePage) decodedAspectForActive = aspect
-                    },
-                    onDismiss = onDismiss
-                )
+                if (pageItem.isVideo) {
+                    VideoPlayerPage(
+                        item = pageItem,
+                        isActivePage = isActivePage,
+                        isUnmeteredWifi = uiState.isUnmeteredWifi,
+                        chromeVisible = showChromeNow,
+                        videoController = activeVideoController,
+                        autoPlay = prefs.autoPlayVideos,
+                        startMuted = prefs.startVideosMuted,
+                        loopVideo = prefs.loopVideos,
+                        onToggleChrome = { chromeVisible = !chromeVisible },
+                        onFrameCapturedMessage = viewModel::showMessage,
+                        onZoomStateChanged = { zoomed ->
+                            if (isActivePage) isCurrentPageZoomed = zoomed
+                        },
+                        onVideoAspectResolved = { aspect ->
+                            if (isActivePage) decodedAspectForActive = aspect
+                        }
+                    )
+                } else {
+                    ZoomablePhotoPage(
+                        item = pageItem,
+                        isUnmeteredWifi = uiState.isUnmeteredWifi,
+                        startMuted = prefs.startVideosMuted,
+                        isClosing = isViewerClosing && isActivePage,
+                        motionPhotoInfo = if (isActivePage) currentMotionInfo else null,
+                        isPlayingMotion = isActivePage && isPlayingMotionPhoto,
+                        onMotionPlayStateChanged = { playing ->
+                            if (isActivePage) isPlayingMotionPhoto = playing
+                        },
+                        onTap = { chromeVisible = !chromeVisible },
+                        onZoomStateChanged = { zoomed ->
+                            if (isActivePage) isCurrentPageZoomed = zoomed
+                        },
+                        onImageAspectResolved = { aspect ->
+                            if (isActivePage) decodedAspectForActive = aspect
+                        }
+                    )
+                }
             }
         }
 
@@ -665,18 +667,25 @@ fun ViewerScreen(
                             val target = currentItem
                             coroutineScope.launch {
                                 isApplyingQuickAction = true
-                                appContainer.ocrIndexerManager.extractTextForViewer(target)
-                                    .onSuccess { extracted ->
-                                        if (extracted.fullText.isBlank()) {
-                                            viewModel.showMessage("No text detected in this photo")
-                                        } else {
-                                            extractedTextResult = extracted
+                                try {
+                                    appContainer.ocrIndexerManager.extractTextForViewer(target)
+                                        .onSuccess { extracted ->
+                                            if (latestVisibleItem.id != target.id) return@onSuccess
+                                            if (extracted.fullText.isBlank()) {
+                                                viewModel.showMessage("No text detected in this photo")
+                                            } else {
+                                                extractedTextResult = extracted
+                                            }
                                         }
-                                    }
-                                    .onFailure { err ->
-                                        viewModel.showMessage(err.localizedMessage ?: "Text scan failed")
-                                    }
-                                isApplyingQuickAction = false
+                                        .onFailure { error ->
+                                            Log.w("ViewerScreen", "Photo text recognition failed", error)
+                                            if (latestVisibleItem.id == target.id) {
+                                                viewModel.showMessage("Could not read text in this photo")
+                                            }
+                                        }
+                                } finally {
+                                    isApplyingQuickAction = false
+                                }
                             }
                         }
                     ) {
@@ -1908,14 +1917,12 @@ private fun FilmstripPlayheadNeedle(
  *    while streaming the full-resolution image (`?alt=media`) strictly into memory.
  *  - Double-tap to zoom with spring physics anchored around the tap point.
  *  - Pinch-to-zoom (`1f..5f`) with strict pan boundary clamping.
- *  - Vertical swipe-to-dismiss with dynamic scale and background opacity fade.
  */
 @MediaOptIn(UnstableApi::class)
 @Composable
 private fun ZoomablePhotoPage(
     item: MediaItem,
     isUnmeteredWifi: Boolean,
-    swipeDownToDismiss: Boolean = true,
     startMuted: Boolean = false,
     isClosing: Boolean = false,
     motionPhotoInfo: MotionPhotoInfo? = null,
@@ -1923,35 +1930,26 @@ private fun ZoomablePhotoPage(
     onMotionPlayStateChanged: (Boolean) -> Unit = {},
     onTap: () -> Unit,
     onZoomStateChanged: (Boolean) -> Unit,
-    onVerticalDismissProgress: (Float) -> Unit,
-    onSwipeUpForDetails: () -> Unit,
     onImageAspectResolved: (Float) -> Unit = {},
-    onDismiss: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    val density = LocalDensity.current
     val appContainer = LocalAppContainer.current
     val imageLoader = LocalGalleryImageLoader.current
-    val haptic = LocalHapticFeedback.current
     val coroutineScope = rememberCoroutineScope()
 
     val scaleAnim = remember(item.id) { Animatable(1f) }
     val offsetXAnim = remember(item.id) { Animatable(0f) }
     val offsetYAnim = remember(item.id) { Animatable(0f) }
-    val dismissOffsetY = remember(item.id) { Animatable(0f) }
 
-    // Fly-home hand-off: while the close morph shrinks the whole viewer into the grid tile, glide any
-    // drag offset / pinch zoom back to neutral in perfect sync, so the photo departs from exactly
-    // where the finger left it and still lands pixel-perfect on its thumbnail.
+    // Return pinch zoom to neutral while closing into the thumbnail.
     LaunchedEffect(isClosing, item.id) {
         if (!isClosing) return@LaunchedEffect
         val closeSpec = tween<Float>(
             durationMillis = OneUiMotion.MORPH_CLOSE_MS,
             easing = OneUiMotion.MorphCloseEasing
         )
-        launch { dismissOffsetY.animateTo(0f, closeSpec) }
         launch { scaleAnim.animateTo(1f, closeSpec) }
         launch { offsetXAnim.animateTo(0f, closeSpec) }
         launch { offsetYAnim.animateTo(0f, closeSpec) }
@@ -2073,7 +2071,6 @@ private fun ZoomablePhotoPage(
     }
 
     val latestMotionInfo by rememberUpdatedState(motionPhotoInfo)
-    val latestSwipeDown by rememberUpdatedState(swipeDownToDismiss)
 
     // Clamp pan strictly to the actual fitted image bounds (never allowing panning into black letterbox voids)
     fun clampOffset(x: Float, y: Float, scale: Float): Offset {
@@ -2086,10 +2083,6 @@ private fun ZoomablePhotoPage(
         val maxY = ((contentH * scale - ch) / 2f).coerceAtLeast(0f)
         return Offset(x.coerceIn(-maxX, maxX), y.coerceIn(-maxY, maxY))
     }
-
-    val dismissRangePx = with(density) { 160.dp.toPx() }.coerceAtLeast(1f)
-    val dismissFraction = (dismissOffsetY.value / dismissRangePx).coerceIn(0f, 1f)
-    val dismissScale = 1f - (dismissFraction * 0.22f)
 
     Box(
         modifier = Modifier
@@ -2135,14 +2128,9 @@ private fun ZoomablePhotoPage(
             .pointerInput(item.id) {
                 awaitEachGesture {
                     awaitFirstDown(requireUnconsumed = false)
-                    var verticalDragMode = 0 // 0 = undecided, 1 = swipe down dismiss, -1 = swipe up details
-                    var swipeUpAccumulatedPx = 0f
-                    var detailsTriggered = false
                     var curScale = scaleAnim.value
                     var curOffX = offsetXAnim.value
                     var curOffY = offsetYAnim.value
-                    var curDismissY = dismissOffsetY.value
-                    var gestureStartedZoomed = curScale > 1.02f
                     var mutatedTransform = false
 
                     do {
@@ -2150,7 +2138,6 @@ private fun ZoomablePhotoPage(
                         val pressedPointers = event.changes.count { it.pressed }
 
                         if (pressedPointers >= 2) {
-                            verticalDragMode = 0
                             val zoomChange = event.calculateZoom()
                             val panChange = event.calculatePan()
                             val centroid = event.calculateCentroid()
@@ -2179,90 +2166,33 @@ private fun ZoomablePhotoPage(
                                 offsetYAnim.snapTo(curOffY)
                             }
                             onZoomStateChanged(nextScale > 1.02f)
-                            gestureStartedZoomed = nextScale > 1.02f
                             event.changes.forEach { if (it.positionChanged()) it.consume() }
-                        } else if (pressedPointers == 1) {
+                        } else if (pressedPointers == 1 && curScale > 1.02f) {
                             val pan = event.calculatePan()
+                            val nextClamped = clampOffset(
+                                x = curOffX + pan.x,
+                                y = curOffY + pan.y,
+                                scale = curScale
+                            )
+                            val atHorizontalEdge =
+                                abs(nextClamped.x - curOffX) < 0.5f && abs(pan.x) > abs(pan.y) * 1.4f
+                            curOffX = nextClamped.x
+                            curOffY = nextClamped.y
+                            mutatedTransform = true
 
-                            if (curScale > 1.02f) {
-                                val nextClamped = clampOffset(
-                                    x = curOffX + pan.x,
-                                    y = curOffY + pan.y,
-                                    scale = curScale
-                                )
-                                val atHorizontalEdge =
-                                    abs(nextClamped.x - curOffX) < 0.5f &&
-                                        abs(pan.x) > abs(pan.y) * 1.4f
-                                curOffX = nextClamped.x
-                                curOffY = nextClamped.y
-                                mutatedTransform = true
-
-                                coroutineScope.launch {
-                                    offsetXAnim.snapTo(curOffX)
-                                    offsetYAnim.snapTo(curOffY)
-                                }
-                                if (atHorizontalEdge) {
-                                    onZoomStateChanged(false)
-                                } else {
-                                    event.changes.forEach { if (it.positionChanged()) it.consume() }
-                                }
-                            } else if (!gestureStartedZoomed) {
-                                if (verticalDragMode == 0 &&
-                                    abs(pan.y) > 8f &&
-                                    abs(pan.y) > abs(pan.x) * 1.35f
-                                ) {
-                                    verticalDragMode = if (pan.y > 0f) 1 else -1
-                                }
-                                when (verticalDragMode) {
-                                    1 -> {
-                                        curDismissY = if (latestSwipeDown) {
-                                            (curDismissY + pan.y).coerceAtLeast(0f)
-                                        } else {
-                                            0f
-                                        }
-                                        coroutineScope.launch {
-                                            dismissOffsetY.snapTo(curDismissY)
-                                        }
-                                        onVerticalDismissProgress((curDismissY / dismissRangePx).coerceIn(0f, 1f))
-                                        event.changes.forEach { if (it.positionChanged()) it.consume() }
-                                    }
-                                    -1 -> {
-                                        swipeUpAccumulatedPx += -pan.y
-                                        if (!detailsTriggered && swipeUpAccumulatedPx > 95f) {
-                                            detailsTriggered = true
-                                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                            onSwipeUpForDetails()
-                                        }
-                                        event.changes.forEach { if (it.positionChanged()) it.consume() }
-                                    }
-                                }
+                            coroutineScope.launch {
+                                offsetXAnim.snapTo(curOffX)
+                                offsetYAnim.snapTo(curOffY)
+                            }
+                            if (atHorizontalEdge) {
+                                onZoomStateChanged(false)
+                            } else {
+                                event.changes.forEach { if (it.positionChanged()) it.consume() }
                             }
                         }
                     } while (event.changes.any { it.pressed })
 
-                    if (verticalDragMode == 1) {
-                        val dismissThresholdPx = (containerSize.height * 0.16f)
-                            .coerceAtLeast(with(density) { 84.dp.toPx() })
-                        if (latestSwipeDown && curDismissY > dismissThresholdPx) {
-                            onDismiss()
-                        } else {
-                            coroutineScope.launch {
-                                dismissOffsetY.animateTo(
-                                    0f,
-                                    spring(
-                                        dampingRatio = Spring.DampingRatioNoBouncy,
-                                        stiffness = Spring.StiffnessMedium
-                                    )
-                                )
-                                onVerticalDismissProgress(0f)
-                            }
-                        }
-                    } else if (verticalDragMode == -1) {
-                        if (!detailsTriggered && swipeUpAccumulatedPx > 55f) {
-                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                            onSwipeUpForDetails()
-                        }
-                    } else if (mutatedTransform && curScale < 1.05f) {
+                    if (mutatedTransform && curScale < 1.05f) {
                         onZoomStateChanged(false)
                         coroutineScope.launch {
                             launch { scaleAnim.animateTo(1f, spring()) }
@@ -2294,11 +2224,10 @@ private fun ZoomablePhotoPage(
             modifier = modifier
                 .fillMaxSize()
                 .graphicsLayer {
-                    val effectiveScale = scaleAnim.value * dismissScale
-                    scaleX = effectiveScale
-                    scaleY = effectiveScale
+                    scaleX = scaleAnim.value
+                    scaleY = scaleAnim.value
                     translationX = offsetXAnim.value
-                    translationY = offsetYAnim.value + dismissOffsetY.value
+                    translationY = offsetYAnim.value
                 }
         )
 
@@ -2326,11 +2255,10 @@ private fun ZoomablePhotoPage(
                 modifier = Modifier
                     .fillMaxSize()
                     .graphicsLayer {
-                        val effectiveScale = scaleAnim.value * dismissScale
-                        scaleX = effectiveScale
-                        scaleY = effectiveScale
+                        scaleX = scaleAnim.value
+                        scaleY = scaleAnim.value
                         translationX = offsetXAnim.value
-                        translationY = offsetYAnim.value + dismissOffsetY.value
+                        translationY = offsetYAnim.value
                         alpha = if (motionFirstFrameReady) 1f else 0f
                     }
             )
@@ -2354,8 +2282,8 @@ private fun fittedViewerContentRect(
     val iw = item.effectiveWidth
     val ih = item.effectiveHeight
     val imageAspect = when {
+        fallbackAspectRatio != null && fallbackAspectRatio.isFinite() && fallbackAspectRatio > 0.05f -> fallbackAspectRatio
         iw != null && ih != null && iw > 0 && ih > 0 -> iw.toFloat() / ih.toFloat()
-        fallbackAspectRatio != null && fallbackAspectRatio > 0.05f -> fallbackAspectRatio
         else -> return null
     }
     val areaAspect = areaWidth / areaHeight

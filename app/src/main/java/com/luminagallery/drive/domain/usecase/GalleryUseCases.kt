@@ -31,6 +31,9 @@ class ManageRootsUseCase(
     suspend fun discoverSharedFolders(): Result<List<DriveFolder>> =
         repository.discoverSharedRootFolders()
 
+    suspend fun browseComputerFolders(parentId: String?): Result<List<DriveFolder>> =
+        repository.browseComputerFolders(parentId)
+
     suspend fun togglePin(folder: DriveFolder): Boolean =
         repository.togglePinFolder(folder)
 

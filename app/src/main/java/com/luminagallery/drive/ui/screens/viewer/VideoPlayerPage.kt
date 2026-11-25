@@ -16,10 +16,6 @@ import android.view.TextureView
 import android.view.ViewGroup
 import com.luminagallery.drive.R
 import androidx.annotation.OptIn
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -30,7 +26,6 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -64,14 +59,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -86,6 +78,7 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem as Media3Item
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
@@ -102,7 +95,6 @@ import com.luminagallery.drive.data.repository.LocalThumbnailRequest
 import com.luminagallery.drive.data.repository.VideoFormatSupport
 import com.luminagallery.drive.domain.model.MediaItem
 import com.luminagallery.drive.ui.components.GlassSurface
-import com.luminagallery.drive.ui.components.OneUiMotion
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -171,33 +163,17 @@ fun VideoPlayerPage(
     autoPlay: Boolean = true,
     startMuted: Boolean = false,
     loopVideo: Boolean = false,
-    swipeDownToDismiss: Boolean = true,
-    isClosing: Boolean = false,
     onToggleChrome: () -> Unit,
-    onVerticalDismissProgress: (Float) -> Unit,
-    onSwipeUpForDetails: () -> Unit,
     onFrameCapturedMessage: (String) -> Unit,
     onZoomStateChanged: (Boolean) -> Unit = {},
-    onDismiss: () -> Unit,
+    onVideoAspectResolved: (Float) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val appContainer = LocalAppContainer.current
     val imageLoader = LocalGalleryImageLoader.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    val haptic = LocalHapticFeedback.current
     val coroutineScope = rememberCoroutineScope()
-    val dismissOffsetY = remember(item.id) { Animatable(0f) }
-
-    // Glide any drag-to-dismiss offset back in sync with the fly-home morph
-    LaunchedEffect(isClosing, item.id) {
-        if (isClosing && dismissOffsetY.value != 0f) {
-            dismissOffsetY.animateTo(
-                0f,
-                tween(durationMillis = OneUiMotion.MORPH_CLOSE_MS, easing = OneUiMotion.MorphCloseEasing)
-            )
-        }
-    }
 
     val thumbnailRequest = remember(item.isLocal, item.localContentUri, item.id, item.thumbnailLink, isUnmeteredWifi) {
         if (item.isLocal && !item.localContentUri.isNullOrBlank()) {
@@ -385,6 +361,12 @@ fun VideoPlayerPage(
                 isBuffering = false
             }
 
+            override fun onVideoSizeChanged(videoSize: VideoSize) {
+                if (videoSize.width > 0 && videoSize.height > 0) {
+                    onVideoAspectResolved(videoSize.width * videoSize.pixelWidthHeightRatio / videoSize.height)
+                }
+            }
+
             override fun onPlayerError(error: PlaybackException) {
                 isBuffering = false
                 playbackError = error.localizedMessage ?: "Video playback error"
@@ -449,12 +431,6 @@ fun VideoPlayerPage(
         }
     }
 
-    val density = LocalDensity.current
-    val dismissThresholdPx = with(density) { 84.dp.toPx() }
-    val dismissRangePx = with(density) { 160.dp.toPx() }.coerceAtLeast(1f)
-    val dismissFraction = (dismissOffsetY.value / dismissRangePx).coerceIn(0f, 1f)
-    val dismissScale = 1f - (dismissFraction * 0.22f)
-
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -516,68 +492,11 @@ fun VideoPlayerPage(
                     } while (event.changes.any { it.pressed })
                 }
             }
-            .pointerInput(item.id, swipeDownToDismiss, videoZoom > 1.02f) {
-                if (videoZoom > 1.02f) return@pointerInput
-                var swipeUpAccumulated = 0f
-                var detailsFired = false
-                detectVerticalDragGestures(
-                    onDragStart = {
-                        swipeUpAccumulated = 0f
-                        detailsFired = false
-                    },
-                    onDragEnd = {
-                        when {
-                            swipeDownToDismiss && dismissOffsetY.value > dismissThresholdPx -> {
-                                onDismiss()
-                            }
-                            !detailsFired && swipeUpAccumulated > 55f -> {
-                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                onSwipeUpForDetails()
-                            }
-                            dismissOffsetY.value > 0f -> {
-                                coroutineScope.launch {
-                                    dismissOffsetY.animateTo(
-                                        0f,
-                                        spring(
-                                            dampingRatio = Spring.DampingRatioNoBouncy,
-                                            stiffness = Spring.StiffnessMedium
-                                        )
-                                    )
-                                    onVerticalDismissProgress(0f)
-                                }
-                            }
-                        }
-                    },
-                    onDragCancel = {
-                        if (dismissOffsetY.value > 0f) {
-                            coroutineScope.launch {
-                                dismissOffsetY.animateTo(0f, spring(dampingRatio = Spring.DampingRatioNoBouncy))
-                                onVerticalDismissProgress(0f)
-                            }
-                        }
-                    },
-                    onVerticalDrag = { change, dragAmount ->
-                        change.consume()
-                        if (dragAmount < 0f && dismissOffsetY.value <= 0f) {
-                            swipeUpAccumulated += -dragAmount
-                            if (!detailsFired && swipeUpAccumulated > 95f) {
-                                detailsFired = true
-                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                onSwipeUpForDetails()
-                            }
-                        } else if (swipeDownToDismiss) {
-                            val updated = (dismissOffsetY.value + dragAmount).coerceAtLeast(0f)
-                            coroutineScope.launch { dismissOffsetY.snapTo(updated) }
-                            onVerticalDismissProgress((updated / dismissRangePx).coerceIn(0f, 1f))
-                        }
-                    }
-                )
-            }
             .graphicsLayer {
-                scaleX = dismissScale * videoZoom
-                scaleY = dismissScale * videoZoom
+                scaleX = videoZoom
+                scaleY = videoZoom
                 translationX = videoPan.x
-                translationY = dismissOffsetY.value + videoPan.y
+                translationY = videoPan.y
             },
         contentAlignment = Alignment.Center
     ) {

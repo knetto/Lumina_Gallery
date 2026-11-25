@@ -32,6 +32,7 @@ import com.luminagallery.drive.domain.usecase.ExportMediaUseCase
 import com.luminagallery.drive.domain.usecase.ManageRootsUseCase
 import com.luminagallery.drive.domain.usecase.SyncGalleryUseCase
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -70,15 +71,30 @@ sealed interface PicturesTimelineEntry {
     }
 }
 
+enum class RootPickerTab(val label: String) {
+    MY_DRIVE("My Drive"),
+    COMPUTERS("Computers"),
+    PASTE_LINK("Paste link")
+}
+
+@Immutable
+data class ComputerFolderBrowser(
+    val path: List<DriveFolder>,
+    val isLoading: Boolean = true,
+    val folders: List<DriveFolder> = emptyList(),
+    val errorMessage: String? = null
+)
+
 @Immutable
 data class RootPickerUiState(
     val isOpen: Boolean = false,
-    val selectedTab: Int = 1, // 0 = Paste URL/ID, 1 = Browse Drive Folders
+    val selectedTab: RootPickerTab = RootPickerTab.MY_DRIVE,
     val urlOrIdInput: String = "",
     val customNameInput: String = "",
     val isPinningByUrl: Boolean = false,
     val isLoadingSharedFolders: Boolean = false,
     val sharedFolders: List<DriveFolder> = emptyList(),
+    val computerBrowser: ComputerFolderBrowser? = null,
     val errorMessage: String? = null
 )
 
@@ -160,6 +176,7 @@ class HomeViewModel(
     private val setupErrorFlow = MutableStateFlow<String?>(null)
     private val snackbarFlow = MutableStateFlow<String?>(null)
     private val rootPickerFlow = MutableStateFlow(RootPickerUiState())
+    private var computerFoldersJob: Job? = null
     private val isDriveSheetOpenFlow = MutableStateFlow(false)
     private val locationsFlow = MutableStateFlow<List<LocationPhotoGroup>>(emptyList())
     private val dayLocationsFlow = MutableStateFlow<Map<String, String>>(emptyMap())
@@ -325,6 +342,11 @@ class HomeViewModel(
         val updatedShared = misc.rootPicker.sharedFolders.map { folder ->
             folder.copy(isPinned = folder.id in pinnedIdSet)
         }
+        val updatedComputers = misc.rootPicker.computerBrowser?.let { browser ->
+            browser.copy(folders = browser.folders.map { folder ->
+                folder.copy(isPinned = folder.id in pinnedIdSet)
+            })
+        }
         val filteredAlbumsGrid = when (misc.albumsFilter) {
             AlbumsTabFilter.ALL -> local.unifiedGridItems
             AlbumsTabFilter.ON_DEVICE -> local.unifiedGridItems.filter {
@@ -370,7 +392,10 @@ class HomeViewModel(
             pendingTrashIntentSender = selection.pendingTrashSender,
             setupError = misc.setupError,
             snackbarMessage = misc.snackbarMessage,
-            rootPicker = misc.rootPicker.copy(sharedFolders = updatedShared),
+            rootPicker = misc.rootPicker.copy(
+                sharedFolders = updatedShared,
+                computerBrowser = updatedComputers
+            ),
             isDriveSheetOpen = drive.isSheetOpen
         )
     }.stateIn(
@@ -711,7 +736,7 @@ class HomeViewModel(
 
             if (!hasPinnedRootsNow) {
                 isDriveSheetOpenFlow.value = false
-                openRootPicker(initialTab = 1)
+                openRootPicker()
             } else {
                 isDriveSheetOpenFlow.value = false
                 triggerSmartSync(waitIfBusy = true)
@@ -751,28 +776,75 @@ class HomeViewModel(
         }
     }
 
-    fun openRootPicker(initialTab: Int = 1) {
+    fun openRootPicker(initialTab: RootPickerTab = RootPickerTab.MY_DRIVE) {
         isDriveSheetOpenFlow.value = false
+        computerFoldersJob?.cancel()
         rootPickerFlow.update {
             it.copy(
                 isOpen = true,
                 selectedTab = initialTab,
+                computerBrowser = null,
                 errorMessage = null
             )
         }
-        if (initialTab == 1) {
-            loadSharedFolders()
+        when (initialTab) {
+            RootPickerTab.MY_DRIVE -> loadSharedFolders()
+            RootPickerTab.COMPUTERS -> loadComputerFolders()
+            RootPickerTab.PASTE_LINK -> Unit
         }
     }
 
     fun closeRootPicker() {
-        rootPickerFlow.update { it.copy(isOpen = false, errorMessage = null) }
+        computerFoldersJob?.cancel()
+        rootPickerFlow.update { it.copy(isOpen = false, computerBrowser = null, errorMessage = null) }
     }
 
-    fun selectRootPickerTab(tabIndex: Int) {
-        rootPickerFlow.update { it.copy(selectedTab = tabIndex, errorMessage = null) }
-        if (tabIndex == 1 && rootPickerFlow.value.sharedFolders.isEmpty()) {
-            loadSharedFolders()
+    fun selectRootPickerTab(tab: RootPickerTab) {
+        val current = rootPickerFlow.value
+        rootPickerFlow.update { it.copy(selectedTab = tab, errorMessage = null) }
+        when (tab) {
+            RootPickerTab.MY_DRIVE -> {
+                if (current.sharedFolders.isEmpty() && !current.isLoadingSharedFolders) loadSharedFolders()
+            }
+            RootPickerTab.COMPUTERS -> {
+                if (current.computerBrowser == null) loadComputerFolders()
+            }
+            RootPickerTab.PASTE_LINK -> Unit
+        }
+    }
+
+    fun refreshComputerFolders() {
+        loadComputerFolders(rootPickerFlow.value.computerBrowser?.path.orEmpty())
+    }
+
+    fun openComputerFolder(folder: DriveFolder) {
+        val browser = rootPickerFlow.value.computerBrowser ?: return
+        if (browser.folders.none { it.id == folder.id }) return
+        loadComputerFolders(browser.path + folder)
+    }
+
+    fun goUpFromComputerFolder() {
+        val path = rootPickerFlow.value.computerBrowser?.path.orEmpty()
+        if (path.isNotEmpty()) loadComputerFolders(path.dropLast(1))
+    }
+
+    private fun loadComputerFolders(path: List<DriveFolder> = emptyList()) {
+        computerFoldersJob?.cancel()
+        rootPickerFlow.update { it.copy(computerBrowser = ComputerFolderBrowser(path)) }
+        computerFoldersJob = viewModelScope.launch {
+            val result = manageRootsUseCase.browseComputerFolders(path.lastOrNull()?.id)
+            rootPickerFlow.update {
+                it.copy(
+                    computerBrowser = ComputerFolderBrowser(
+                        path = path,
+                        isLoading = false,
+                        folders = result.getOrDefault(emptyList()),
+                        errorMessage = result.exceptionOrNull()?.let { error ->
+                            error.message ?: "Could not load computer folders."
+                        }
+                    )
+                )
+            }
         }
     }
 
@@ -794,9 +866,9 @@ class HomeViewModel(
                 urlOrId = current.urlOrIdInput,
                 alias = current.customNameInput
             ).onSuccess { pinnedFolder ->
+                closeRootPicker()
                 rootPickerFlow.update {
                     it.copy(
-                        isOpen = false,
                         urlOrIdInput = "",
                         customNameInput = "",
                         isPinningByUrl = false,

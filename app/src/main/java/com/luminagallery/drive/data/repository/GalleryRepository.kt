@@ -554,30 +554,57 @@ class GalleryRepository(
                     }.ifEmpty { allFolders }
                 }
 
-                val pinnedIds = pinnedRootDao.getAll().mapTo(HashSet()) { it.folderId }
-
-                // Persist discovered folders into Room so breadcrumbs & stats resolve immediately
-                val entities = topLevel.map { DriveMapper.dtoToEntity(it) }
-                if (entities.isNotEmpty()) {
-                    itemDao.upsertAll(entities)
-                }
-
-                topLevel.map { dto ->
-                    val entity = DriveMapper.dtoToEntity(dto)
-                    DriveFolder(
-                        id = entity.id,
-                        parentId = entity.parentId,
-                        name = entity.name,
-                        subfolderCount = 0,
-                        mediaCount = 0,
-                        coverThumbnailLink = entity.thumbnailLink,
-                        coverItemId = null,
-                        modifiedTimeEpochMs = entity.modifiedTimeEpochMs,
-                        isPinned = entity.id in pinnedIds
-                    )
-                }.sortedBy { it.name.lowercase() }
+                persistPickerFolders(topLevel)
             }
         }
+
+    suspend fun browseComputerFolders(parentId: String?): Result<List<DriveFolder>> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val foldersOnly = "mimeType = '${DriveConstants.FOLDER_MIME_TYPE}' and trashed = false"
+                val folders = if (parentId == null) {
+                    val myDriveRootId = driveApi.getFile(fileId = "root", fields = "id").id
+                    fetchAllPages(
+                        query = "'me' in owners and $foldersOnly",
+                        orderBy = "name",
+                        fields = "nextPageToken,files(id,name,mimeType,parents,createdTime,modifiedTime," +
+                            "thumbnailLink,trashed,capabilities(canShare))"
+                    ).filter { DriveMapper.isComputerRoot(it, myDriveRootId) }
+                } else {
+                    val escapedId = parentId.replace("\\", "\\\\").replace("'", "\\'")
+                    fetchAllPages(
+                        query = "'$escapedId' in parents and $foldersOnly",
+                        orderBy = "name"
+                    )
+                }
+                persistPickerFolders(folders, fallbackParentId = parentId)
+            }
+        }
+
+    private suspend fun persistPickerFolders(
+        folders: List<DriveFileDto>,
+        fallbackParentId: String? = null
+    ): List<DriveFolder> {
+        if (folders.isEmpty()) return emptyList()
+        val pinnedIds = pinnedRootDao.getAll().mapTo(HashSet()) { it.folderId }
+        val entities = folders.distinctBy { it.id }.map {
+            DriveMapper.dtoToEntity(it, fallbackParentId)
+        }
+        itemDao.upsertAll(entities)
+        return entities.map { entity ->
+            DriveFolder(
+                id = entity.id,
+                parentId = entity.parentId,
+                name = entity.name,
+                subfolderCount = 0,
+                mediaCount = 0,
+                coverThumbnailLink = entity.thumbnailLink,
+                coverItemId = null,
+                modifiedTimeEpochMs = entity.modifiedTimeEpochMs,
+                isPinned = entity.id in pinnedIds
+            )
+        }.sortedBy { it.name.lowercase() }
+    }
 
     /**
      * Validates a pasted Google Drive Folder URL or raw ID via `files.get`,
@@ -866,13 +893,15 @@ class GalleryRepository(
      */
     private suspend fun fetchAllPages(
         query: String,
-        orderBy: String?
+        orderBy: String?,
+        fields: String = DriveConstants.FILES_LIST_FIELDS
     ): List<DriveFileDto> {
         val results = mutableListOf<DriveFileDto>()
         var nextPageToken: String? = null
         do {
             val response = driveApi.listFiles(
                 query = query,
+                fields = fields,
                 pageSize = DriveConstants.DEFAULT_PAGE_SIZE,
                 pageToken = nextPageToken,
                 orderBy = orderBy

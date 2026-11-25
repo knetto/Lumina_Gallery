@@ -371,14 +371,13 @@ class AlbumTransitionOriginTracker {
         private set
 
     /**
-     * Exact on-screen rect (root coordinates, un-transformed) of the photo/video currently shown
-     * in the Viewer. Lets the open & close morphs use the real picture bounds instead of the full
-     * screen, so landscape / portrait shots expand & fly home with zero black bars or size jumps.
+     * Current fitted media bounds in root coordinates, including any swipe displacement.
+     * Evaluated in the layer so the close morph can start at the dragged position.
      */
-    var viewerContentRect: Rect? = null
+    var viewerContentRectProvider: (() -> Rect?)? = null
 
     /** Current Viewer background opacity (drops while dragging the photo down to dismiss). */
-    var viewerBackdropAlpha: Float = 1f
+    var viewerBackdropAlphaProvider: (() -> Float)? = null
 
     fun notePush(dimBackground: Boolean) {
         lastNavWasPop = false
@@ -624,8 +623,9 @@ fun AnimatedVisibilityScope.HyperOsRectMorphFrame(
                     if (w <= 1f || h <= 1f) return@graphicsLayer
 
                     val providedSource = sourceRectProvider?.invoke()?.takeIf {
+                        // A dragged viewer can extend beyond the viewport at the start of its close.
                         it.width > 8f && it.height > 8f &&
-                            it.left >= -1f && it.top >= -1f && it.right <= w + 1f && it.bottom <= h + 1f
+                            it.left.isFinite() && it.top.isFinite() && it.right.isFinite() && it.bottom.isFinite()
                     }
                     val src = providedSource ?: Rect(0f, 0f, w, h)
                     val cropBias = if (providedSource != null) 0.5f else verticalCropBias.coerceIn(0f, 1f)

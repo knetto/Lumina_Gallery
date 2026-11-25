@@ -20,7 +20,13 @@ data class DriveFileDto(
     val thumbnailLink: String? = null,
     val trashed: Boolean = false,
     val imageMediaMetadata: ImageMediaMetadataDto? = null,
-    val videoMediaMetadata: VideoMediaMetadataDto? = null
+    val videoMediaMetadata: VideoMediaMetadataDto? = null,
+    val capabilities: DriveFileCapabilitiesDto? = null
+)
+
+@Serializable
+data class DriveFileCapabilitiesDto(
+    val canShare: Boolean? = null
 )
 
 @Serializable

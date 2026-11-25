@@ -52,6 +52,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.DriveFileMove
 import androidx.compose.material.icons.automirrored.rounded.Sort
 import androidx.compose.material.icons.outlined.FavoriteBorder
@@ -59,9 +60,11 @@ import androidx.compose.material.icons.outlined.FilterAlt
 import androidx.compose.material.icons.outlined.LocationOn
 import androidx.compose.material.icons.outlined.PhotoCamera
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.CloudDone
+import androidx.compose.material.icons.rounded.Computer
 import androidx.compose.material.icons.rounded.CreateNewFolder
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Folder
@@ -103,6 +106,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -116,6 +120,7 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -459,7 +464,7 @@ fun HomeScreen(
                     onAddDriveFolderClick = {
                         showAddMenu = false
                         if (isDriveConnected) {
-                            viewModel.openRootPicker(initialTab = 1)
+                            viewModel.openRootPicker()
                         } else {
                             viewModel.openDriveManagerSheet()
                         }
@@ -1014,8 +1019,8 @@ fun HomeScreen(
                 credentialsPickerLauncher.launch(arrayOf("application/json", "*/*"))
             },
             onSyncNow = { viewModel.triggerSmartSync(false) },
-            onBrowseDrive = { viewModel.openRootPicker(initialTab = 1) },
-            onPasteUrl = { viewModel.openRootPicker(initialTab = 0) },
+            onBrowseDrive = { viewModel.openRootPicker() },
+            onPasteUrl = { viewModel.openRootPicker(RootPickerTab.PASTE_LINK) },
             onOpenFolder = { folder ->
                 viewModel.closeDriveManagerSheet()
                 onOpenFolder(folder.id, folder.name)
@@ -1188,7 +1193,10 @@ fun HomeScreen(
             onCustomNameChanged = viewModel::onCustomNameInputChanged,
             onPinByUrl = viewModel::pinFolderByUrlOrId,
             onRefreshShared = viewModel::loadSharedFolders,
-            onTogglePinShared = viewModel::togglePinSharedFolder
+            onTogglePinFolder = viewModel::togglePinSharedFolder,
+            onRefreshComputers = viewModel::refreshComputerFolders,
+            onOpenComputerFolder = viewModel::openComputerFolder,
+            onGoUpComputerFolder = viewModel::goUpFromComputerFolder
         )
     }
 
@@ -1998,14 +2006,21 @@ private fun EmptyPicturesState() {
 private fun RootFolderPickerBottomSheet(
     state: RootPickerUiState,
     onDismiss: () -> Unit,
-    onTabSelected: (Int) -> Unit,
+    onTabSelected: (RootPickerTab) -> Unit,
     onUrlChanged: (String) -> Unit,
     onCustomNameChanged: (String) -> Unit,
     onPinByUrl: () -> Unit,
     onRefreshShared: () -> Unit,
-    onTogglePinShared: (DriveFolder) -> Unit
+    onTogglePinFolder: (DriveFolder) -> Unit,
+    onRefreshComputers: () -> Unit,
+    onOpenComputerFolder: (DriveFolder) -> Unit,
+    onGoUpComputerFolder: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val showComputers = state.selectedTab == RootPickerTab.COMPUTERS
+    val computerBrowser = state.computerBrowser
+    val currentComputerFolder = computerBrowser?.path?.lastOrNull()
+    val errorMessage = if (showComputers) computerBrowser?.errorMessage else state.errorMessage
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -2027,31 +2042,25 @@ private fun RootFolderPickerBottomSheet(
             )
 
             SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                SegmentedButton(
-                    selected = state.selectedTab == 1,
-                    onClick = { onTabSelected(1) },
-                    shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
-                    icon = { Icon(Icons.Rounded.FolderShared, contentDescription = null, modifier = Modifier.size(16.dp)) }
-                ) {
-                    Text("My Drive")
-                }
-                SegmentedButton(
-                    selected = state.selectedTab == 0,
-                    onClick = { onTabSelected(0) },
-                    shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
-                    icon = { Icon(Icons.Rounded.Link, contentDescription = null, modifier = Modifier.size(16.dp)) }
-                ) {
-                    Text("Paste Link / ID")
+                RootPickerTab.entries.forEachIndexed { index, tab ->
+                    SegmentedButton(
+                        selected = state.selectedTab == tab,
+                        onClick = { onTabSelected(tab) },
+                        shape = SegmentedButtonDefaults.itemShape(index, RootPickerTab.entries.size),
+                        icon = {}
+                    ) {
+                        Text(tab.label, textAlign = TextAlign.Center)
+                    }
                 }
             }
 
-            if (!state.errorMessage.isNullOrBlank()) {
+            if (!errorMessage.isNullOrBlank()) {
                 Surface(
                     shape = RoundedCornerShape(12.dp),
                     color = MaterialTheme.colorScheme.errorContainer
                 ) {
                     Text(
-                        text = state.errorMessage,
+                        text = errorMessage,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onErrorContainer,
                         modifier = Modifier.padding(12.dp)
@@ -2059,7 +2068,7 @@ private fun RootFolderPickerBottomSheet(
                 }
             }
 
-            if (state.selectedTab == 0) {
+            if (state.selectedTab == RootPickerTab.PASTE_LINK) {
                 OutlinedTextField(
                     value = state.urlOrIdInput,
                     onValueChange = onUrlChanged,
@@ -2098,22 +2107,37 @@ private fun RootFolderPickerBottomSheet(
                     }
                 }
             } else {
+                val showComputerRoots = showComputers && currentComputerFolder == null
+                val folders = if (showComputers) computerBrowser?.folders.orEmpty() else state.sharedFolders
+                val isLoading = if (showComputers) computerBrowser?.isLoading != false else state.isLoadingSharedFolders
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
+                    if (showComputers && currentComputerFolder != null) {
+                        IconButton(onClick = onGoUpComputerFolder) {
+                            Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Parent folder")
+                        }
+                    }
                     Text(
-                        text = "Tap any folder to pin it as a gallery album",
+                        text = when {
+                            showComputerRoots -> "Open a computer to browse its synced folders"
+                            showComputers -> currentComputerFolder?.name.orEmpty()
+                            else -> "Tap any folder to pin it as a gallery album"
+                        },
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f)
                     )
-                    IconButton(onClick = onRefreshShared, enabled = !state.isLoadingSharedFolders) {
+                    IconButton(
+                        onClick = if (showComputers) onRefreshComputers else onRefreshShared,
+                        enabled = !isLoading
+                    ) {
                         Icon(Icons.Rounded.Refresh, contentDescription = "Refresh")
                     }
                 }
 
-                if (state.isLoadingSharedFolders) {
+                if (isLoading) {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -2122,55 +2146,28 @@ private fun RootFolderPickerBottomSheet(
                     ) {
                         CircularProgressIndicator()
                     }
+                } else if (showComputers && folders.isEmpty() && errorMessage == null) {
+                    Text(
+                        text = if (showComputerRoots) {
+                            "No synced computers found. You can paste a folder link from Google Drive’s Computers section."
+                        } else {
+                            "No subfolders"
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 } else {
-                    LazyColumn(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 340.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        items(
-                            items = state.sharedFolders,
-                            key = { it.id }
-                        ) { folder ->
-                            Surface(
-                                shape = RoundedCornerShape(16.dp),
-                                color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { onTogglePinShared(folder) }
-                            ) {
-                                ListItem(
-                                    headlineContent = {
-                                        Text(
-                                            text = folder.name,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                    },
-                                    leadingContent = {
-                                        Icon(
-                                            imageVector = Icons.Rounded.Folder,
-                                            contentDescription = null,
-                                            tint = MaterialTheme.colorScheme.primary
-                                        )
-                                    },
-                                    trailingContent = {
-                                        if (folder.isPinned) {
-                                            Icon(
-                                                imageVector = Icons.Rounded.CheckCircle,
-                                                contentDescription = "Pinned",
-                                                tint = MaterialTheme.colorScheme.primary
-                                            )
-                                        } else {
-                                            Icon(
-                                                imageVector = Icons.Rounded.Add,
-                                                contentDescription = "Pin",
-                                                tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                            )
-                                        }
-                                    },
-                                    colors = ListItemDefaults.colors(containerColor = Color.Transparent)
+                    key(state.selectedTab, currentComputerFolder?.id) {
+                        LazyColumn(
+                            modifier = Modifier.fillMaxWidth().heightIn(max = 340.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            items(folders, key = { it.id }) { folder ->
+                                RootPickerFolderRow(
+                                    folder = folder,
+                                    isComputerRoot = showComputerRoots,
+                                    onOpen = if (showComputers) onOpenComputerFolder else null,
+                                    onTogglePin = onTogglePinFolder
                                 )
                             }
                         }
@@ -2178,5 +2175,53 @@ private fun RootFolderPickerBottomSheet(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun RootPickerFolderRow(
+    folder: DriveFolder,
+    isComputerRoot: Boolean,
+    onOpen: ((DriveFolder) -> Unit)?,
+    onTogglePin: (DriveFolder) -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        modifier = Modifier.fillMaxWidth().clickable { (onOpen ?: onTogglePin)(folder) }
+    ) {
+        ListItem(
+            headlineContent = {
+                Text(folder.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            },
+            leadingContent = {
+                Icon(
+                    imageVector = if (isComputerRoot) Icons.Rounded.Computer else Icons.Rounded.Folder,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            },
+            trailingContent = {
+                if (isComputerRoot) {
+                    Icon(Icons.Rounded.ChevronRight, contentDescription = null)
+                } else {
+                    val pinIcon = if (folder.isPinned) Icons.Rounded.CheckCircle else Icons.Rounded.Add
+                    val pinTint = if (folder.isPinned) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+                    if (onOpen != null) {
+                        val pinAction = if (folder.isPinned) "Unpin ${folder.name}" else "Pin ${folder.name}"
+                        IconButton(onClick = { onTogglePin(folder) }) {
+                            Icon(pinIcon, contentDescription = pinAction, tint = pinTint)
+                        }
+                    } else {
+                        Icon(pinIcon, contentDescription = if (folder.isPinned) "Pinned" else "Pin", tint = pinTint)
+                    }
+                }
+            },
+            colors = ListItemDefaults.colors(containerColor = Color.Transparent)
+        )
     }
 }

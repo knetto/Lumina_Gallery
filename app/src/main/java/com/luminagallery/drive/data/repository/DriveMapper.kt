@@ -33,6 +33,15 @@ object DriveMapper {
 
     private const val TYPE_FOLDER = "FOLDER"
 
+    // Computer roots appear as parentless, non-shareable folders in the owner's listing.
+    // See https://issuetracker.google.com/issues/172775993
+    internal fun isComputerRoot(folder: DriveFileDto, myDriveRootId: String): Boolean =
+        folder.mimeType == DriveConstants.FOLDER_MIME_TYPE &&
+            !folder.trashed &&
+            folder.id != myDriveRootId &&
+            folder.parents.isEmpty() &&
+            folder.capabilities?.canShare == false
+
     fun isSupportedGalleryDto(dto: DriveFileDto): Boolean {
         if (dto.mimeType == DriveConstants.FOLDER_MIME_TYPE) return true
         if (dto.mimeType.startsWith("image/", ignoreCase = true)) return true
