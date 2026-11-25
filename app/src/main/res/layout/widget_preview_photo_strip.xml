@@ -9,71 +9,43 @@
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:background="#10141C"
+        android:background="#33FFFFFF"
         android:orientation="horizontal">
 
-        <FrameLayout
+        <ImageView
             android:layout_width="0dp"
             android:layout_height="match_parent"
-            android:layout_marginEnd="2.5dp"
+            android:layout_marginEnd="2dp"
             android:layout_weight="1"
-            android:background="@drawable/widget_tile_clip_bg"
-            android:clipToOutline="true">
+            android:contentDescription="@string/widget_photo_strip"
+            android:scaleType="centerCrop"
+            android:src="@drawable/widget_art_sunset_peaks" />
 
-            <ImageView
-                android:layout_width="match_parent"
-                android:layout_height="match_parent"
-                android:contentDescription="@string/widget_photo_strip"
-                android:scaleType="centerCrop"
-                android:src="@drawable/widget_art_sunset_peaks" />
-        </FrameLayout>
-
-        <FrameLayout
+        <ImageView
             android:layout_width="0dp"
             android:layout_height="match_parent"
-            android:layout_marginEnd="2.5dp"
+            android:layout_marginEnd="2dp"
             android:layout_weight="1"
-            android:background="@drawable/widget_tile_clip_bg"
-            android:clipToOutline="true">
+            android:contentDescription="@string/widget_photo_strip"
+            android:scaleType="centerCrop"
+            android:src="@drawable/widget_art_ocean_waves" />
 
-            <ImageView
-                android:layout_width="match_parent"
-                android:layout_height="match_parent"
-                android:contentDescription="@string/widget_photo_strip"
-                android:scaleType="centerCrop"
-                android:src="@drawable/widget_art_ocean_waves" />
-        </FrameLayout>
-
-        <FrameLayout
+        <ImageView
             android:layout_width="0dp"
             android:layout_height="match_parent"
-            android:layout_marginEnd="2.5dp"
+            android:layout_marginEnd="2dp"
             android:layout_weight="1"
-            android:background="@drawable/widget_tile_clip_bg"
-            android:clipToOutline="true">
+            android:contentDescription="@string/widget_photo_strip"
+            android:scaleType="centerCrop"
+            android:src="@drawable/widget_art_golden_meadow" />
 
-            <ImageView
-                android:layout_width="match_parent"
-                android:layout_height="match_parent"
-                android:contentDescription="@string/widget_photo_strip"
-                android:scaleType="centerCrop"
-                android:src="@drawable/widget_art_golden_meadow" />
-        </FrameLayout>
-
-        <FrameLayout
+        <ImageView
             android:layout_width="0dp"
             android:layout_height="match_parent"
             android:layout_weight="1"
-            android:background="@drawable/widget_tile_clip_bg"
-            android:clipToOutline="true">
-
-            <ImageView
-                android:layout_width="match_parent"
-                android:layout_height="match_parent"
-                android:contentDescription="@string/widget_photo_strip"
-                android:scaleType="centerCrop"
-                android:src="@drawable/widget_art_aurora_pine" />
-        </FrameLayout>
+            android:contentDescription="@string/widget_photo_strip"
+            android:scaleType="centerCrop"
+            android:src="@drawable/widget_art_aurora_pine" />
     </LinearLayout>
 
 </FrameLayout>

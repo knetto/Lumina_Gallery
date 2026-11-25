@@ -69,7 +69,7 @@ internal enum class PhotoWidgetKind(
         defaultSource = WidgetPhotoSource.ALL_PHONE_RANDOM,
         defaultInterval = WidgetShuffleInterval.HOUR_1,
         defaultShowCaption = false,
-        defaultShowDateBadge = true,
+        defaultShowDateBadge = false,
         defaultShowShuffleButton = false,
         defaultShowSettingsButton = false
     );

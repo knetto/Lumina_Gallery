@@ -138,7 +138,9 @@ class WidgetMemoriesTest {
         assertEquals(WidgetPhotoSource.ALL_PHONE_RANDOM, PhotoWidgetSettings.defaultsFor(PhotoWidgetKind.RANDOM_SHUFFLE).source)
         assertEquals(WidgetPhotoSource.SMART_GROUPS, PhotoWidgetSettings.defaultsFor(PhotoWidgetKind.COLLAGE).source)
         assertEquals(WidgetPhotoSource.FAVORITES_ONLY, PhotoWidgetSettings.defaultsFor(PhotoWidgetKind.FAVORITES).source)
-        assertTrue(PhotoWidgetSettings.defaultsFor(PhotoWidgetKind.PHOTO_DATE).showDateBadge)
+        for (kind in PhotoWidgetKind.entries) {
+            assertFalse("Live date badge must be OFF by default for $kind", PhotoWidgetSettings.defaultsFor(kind).showDateBadge)
+        }
     }
 
     @Test
