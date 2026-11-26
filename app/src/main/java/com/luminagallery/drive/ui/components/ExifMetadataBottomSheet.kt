@@ -55,8 +55,17 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.People
+import androidx.compose.material.icons.rounded.PersonRemove
+import androidx.compose.material.icons.rounded.SwapHoriz
+import androidx.compose.ui.text.style.TextAlign
 import com.luminagallery.drive.data.repository.ai.SmartObjectVocabulary
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -98,7 +107,8 @@ fun ExifMetadataBottomSheet(
     item: MediaItem,
     driveFolderPath: String,
     onDismiss: () -> Unit,
-    onCopiedMessage: (String) -> Unit = {}
+    onCopiedMessage: (String) -> Unit = {},
+    onOpenPerson: ((personId: String) -> Unit)? = null
 ) {
     val context = LocalContext.current
     val container = LocalAppContainer.current
@@ -118,8 +128,10 @@ fun ExifMetadataBottomSheet(
     val smartIndex by remember(item.id) {
         container.smartRecognitionManager.observeSmartIndexForPhoto(item.id)
     }.collectAsStateWithLifecycle(initialValue = null)
+    var actionTargetFace by remember { mutableStateOf<Triple<String, String, String>?>(null) } // (faceId, personId, name)
     var quickRenamePersonId by remember { mutableStateOf<String?>(null) }
     var quickRenameInitial by remember { mutableStateOf("") }
+    var moveFaceIdAndCurrentPerson by remember { mutableStateOf<Pair<String, String>?>(null) }
 
     var tags by remember(item.id) { mutableStateOf<List<String>>(emptyList()) }
     var noteDraft by remember(item.id) { mutableStateOf("") }
@@ -507,7 +519,7 @@ fun ExifMetadataBottomSheet(
                 detectedFaces.mapNotNull { face ->
                     val pid = face.personId ?: return@mapNotNull null
                     val person = byId[pid] ?: return@mapNotNull null
-                    if (person.isHidden) null else (person to (face.cropPath ?: person.coverCropPath))
+                    if (person.isHidden) null else Triple(person, face.faceId, face.cropPath ?: person.coverCropPath)
                 }.distinctBy { it.first.personId }
             }
             val detectedLabels = remember(smartIndex) {
@@ -548,14 +560,13 @@ fun ExifMetadataBottomSheet(
                                 )
                             }
                             LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                items(photoPersons, key = { it.first.personId }) { (person, crop) ->
+                                items(photoPersons, key = { it.first.personId }) { (person, faceId, crop) ->
                                     Column(
                                         horizontalAlignment = Alignment.CenterHorizontally,
                                         modifier = Modifier
                                             .clip(RoundedCornerShape(14.dp))
                                             .clickable {
-                                                quickRenamePersonId = person.personId
-                                                quickRenameInitial = person.name
+                                                actionTargetFace = Triple(faceId, person.personId, person.name)
                                             }
                                             .padding(4.dp)
                                     ) {
@@ -815,6 +826,151 @@ fun ExifMetadataBottomSheet(
                 }
             }
         }
+    }
+
+    // Rich Person Quick-Action Dialog (View all photos, Rename, Move to another person, Remove)
+    actionTargetFace?.let { (faceId, personId, currentName) ->
+        val displayTitle = currentName.ifBlank { "Unnamed person" }
+        val otherPeople = remember(allPersons, personId) {
+            allPersons.filter { it.personId != personId && !it.isHidden }
+        }
+        AlertDialog(
+            onDismissRequest = { actionTargetFace = null },
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            shape = RoundedCornerShape(26.dp),
+            title = { Text(displayTitle, fontWeight = FontWeight.SemiBold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (onOpenPerson != null) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable {
+                                    actionTargetFace = null
+                                    onOpenPerson(personId)
+                                }
+                                .padding(horizontal = 8.dp, vertical = 10.dp)
+                        ) {
+                            Icon(Icons.Rounded.People, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                            Text("View all photos", style = MaterialTheme.typography.bodyLarge)
+                        }
+                    }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable {
+                                actionTargetFace = null
+                                quickRenamePersonId = personId
+                                quickRenameInitial = currentName
+                            }
+                            .padding(horizontal = 8.dp, vertical = 10.dp)
+                    ) {
+                        Icon(Icons.Rounded.Edit, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface)
+                        Text(if (currentName.isNotBlank()) "Rename" else "Add name", style = MaterialTheme.typography.bodyLarge)
+                    }
+                    if (otherPeople.isNotEmpty()) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable {
+                                    actionTargetFace = null
+                                    moveFaceIdAndCurrentPerson = faceId to personId
+                                }
+                                .padding(horizontal = 8.dp, vertical = 10.dp)
+                        ) {
+                            Icon(Icons.Rounded.SwapHoriz, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface)
+                            Text("Move to another person…", style = MaterialTheme.typography.bodyLarge)
+                        }
+                    }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable {
+                                actionTargetFace = null
+                                scope.launch {
+                                    container.smartRecognitionManager.removePhotosFromPerson(personId, listOf(item.id))
+                                    onCopiedMessage("Removed from $displayTitle")
+                                }
+                            }
+                            .padding(horizontal = 8.dp, vertical = 10.dp)
+                    ) {
+                        Icon(Icons.Rounded.PersonRemove, contentDescription = null, tint = MaterialTheme.colorScheme.error)
+                        Text("Not this person", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { actionTargetFace = null }) { Text("Close") }
+            }
+        )
+    }
+
+    // Move Face to Another Person Picker
+    moveFaceIdAndCurrentPerson?.let { (faceId, currentPersonId) ->
+        val candidates = remember(allPersons, currentPersonId) {
+            allPersons.filter { it.personId != currentPersonId && !it.isHidden }
+        }
+        AlertDialog(
+            onDismissRequest = { moveFaceIdAndCurrentPerson = null },
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            shape = RoundedCornerShape(26.dp),
+            title = { Text("Move face to person", fontWeight = FontWeight.SemiBold) },
+            text = {
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(3),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 300.dp)
+                ) {
+                    gridItems(candidates, key = { it.personId }) { dest ->
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(14.dp))
+                                .clickable {
+                                    moveFaceIdAndCurrentPerson = null
+                                    scope.launch {
+                                        container.smartRecognitionManager.reassignFaceToPerson(faceId, dest.personId)
+                                        onCopiedMessage("Moved to ${dest.name.ifBlank { "person" }}")
+                                    }
+                                }
+                                .padding(4.dp)
+                        ) {
+                            PersonAvatar(
+                                cropPath = dest.coverCropPath,
+                                contentDescription = dest.name.ifBlank { "Unnamed" },
+                                size = 56.dp
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                text = dest.name.ifBlank { "Unnamed" },
+                                style = MaterialTheme.typography.labelSmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { moveFaceIdAndCurrentPerson = null }) { Text("Cancel") }
+            }
+        )
     }
 
     quickRenamePersonId?.let { targetPid ->

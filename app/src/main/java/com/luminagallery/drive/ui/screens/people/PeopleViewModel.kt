@@ -12,6 +12,8 @@ import com.luminagallery.drive.data.local.entity.DetectedFaceEntity
 import com.luminagallery.drive.data.remote.NetworkMonitor
 import com.luminagallery.drive.data.repository.GalleryExtrasRepository
 import com.luminagallery.drive.data.repository.GalleryRepository
+import com.luminagallery.drive.data.repository.ai.FaceClusteringEngine
+import com.luminagallery.drive.data.repository.ai.PersonMergeSuggestionUi
 import com.luminagallery.drive.data.repository.ai.PersonSummary
 import com.luminagallery.drive.data.repository.ai.SmartIndexProgress
 import com.luminagallery.drive.data.repository.ai.SmartRecognitionManager
@@ -32,6 +34,7 @@ import kotlinx.coroutines.launch
 data class PeopleUiState(
     val visiblePersons: List<PersonSummary> = emptyList(),
     val hiddenPersons: List<PersonSummary> = emptyList(),
+    val mergeSuggestions: List<PersonMergeSuggestionUi> = emptyList(),
     val showHiddenSection: Boolean = false,
     val selectedPersonIds: Set<String> = emptySet(),
     val isSelectionMode: Boolean = false,
@@ -68,18 +71,52 @@ class PeopleViewModel(
         includeHidden = true
     )
 
-    val uiState: StateFlow<PeopleUiState> = combine(
+    private val mergeSuggestionsFlow = combine(
         allPersonsWithHiddenFlow,
+        smartRecognitionManager.allPersonsFlow,
+        smartRecognitionManager.rejectedMergePairsFlow
+    ) { summaries, rawEntities, rejectedPairs ->
+        val visible = summaries.filterNot { it.isHidden }
+        if (visible.size < 2) return@combine emptyList()
+        val summaryById = visible.associateBy { it.personId }
+        val centroidById = rawEntities.associate {
+            it.personId to FaceClusteringEngine.decodeEmbedding(it.centroidBlob)
+        }
+        val candidates = visible.mapNotNull { s ->
+            val centroid = centroidById[s.personId] ?: return@mapNotNull null
+            if (centroid.isEmpty()) return@mapNotNull null
+            FaceClusteringEngine.ClusterCandidate(
+                personId = s.personId,
+                centroid = centroid,
+                sampleCount = s.photoCount,
+                isNamed = s.isNamed,
+                photoIds = s.photoIds
+            )
+        }
+        FaceClusteringEngine.findInteractiveMergeSuggestions(
+            clusters = candidates,
+            rejectedPairs = rejectedPairs,
+            maxSuggestions = 8
+        ).mapNotNull { m ->
+            val target = summaryById[m.targetPersonId] ?: return@mapNotNull null
+            val source = summaryById[m.sourcePersonId] ?: return@mapNotNull null
+            PersonMergeSuggestionUi(target = target, source = source, similarity = m.similarity)
+        }
+    }.flowOn(Dispatchers.Default)
+
+    val uiState: StateFlow<PeopleUiState> = combine(
+        combine(allPersonsWithHiddenFlow, mergeSuggestionsFlow) { persons, suggs -> persons to suggs },
         showHiddenFlow,
         combine(selectedIdsFlow, selectionModeActiveFlow) { ids, active -> ids to active },
         smartRecognitionManager.progress,
         snackbarFlow
-    ) { allPersons, showHidden, (selectedIds, modeActive), progress, snackbar ->
+    ) { (allPersons, suggestions), showHidden, (selectedIds, modeActive), progress, snackbar ->
         val visible = allPersons.filterNot { it.isHidden }
         val hidden = allPersons.filter { it.isHidden }
         PeopleUiState(
             visiblePersons = visible,
             hiddenPersons = hidden,
+            mergeSuggestions = suggestions,
             showHiddenSection = showHidden,
             selectedPersonIds = selectedIds,
             isSelectionMode = modeActive || selectedIds.isNotEmpty(),
@@ -100,7 +137,18 @@ class PeopleViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             smartRecognitionManager.syncSmartIndex(
                 maxNewItemsPerRun = maxNewItems,
-                includeDrive = true
+                includeDrive = true,
+                respectWifiOnlyForDrive = true
+            )
+        }
+    }
+
+    fun scanEntireLibrary() {
+        viewModelScope.launch(Dispatchers.IO) {
+            smartRecognitionManager.syncSmartIndex(
+                maxNewItemsPerRun = Int.MAX_VALUE,
+                includeDrive = true,
+                respectWifiOnlyForDrive = true
             )
         }
     }
@@ -112,10 +160,32 @@ class PeopleViewModel(
     fun rebuildAllSmartIndex() {
         viewModelScope.launch(Dispatchers.IO) {
             clearSelection()
-            snackbarFlow.value = "Rebuilding People & Objects index…"
-            smartRecognitionManager.resetAllIndexData()
-            smartRecognitionManager.syncSmartIndex(maxNewItemsPerRun = 400, includeDrive = true)
+            snackbarFlow.value = "Rebuilding People & Objects (keeping saved names)…"
+            smartRecognitionManager.resetAllIndexData(preserveNames = true)
+            smartRecognitionManager.syncSmartIndex(
+                maxNewItemsPerRun = Int.MAX_VALUE,
+                includeDrive = true,
+                respectWifiOnlyForDrive = true
+            )
         }
+    }
+
+    fun acceptMergeSuggestion(suggestion: PersonMergeSuggestionUi) {
+        viewModelScope.launch {
+            smartRecognitionManager.mergePersons(
+                targetPersonId = suggestion.target.personId,
+                sourcePersonIds = listOf(suggestion.source.personId)
+            )
+            val label = suggestion.target.name.ifBlank { suggestion.source.name }.ifBlank { "1 person" }
+            snackbarFlow.value = "Combined into $label"
+        }
+    }
+
+    fun dismissMergeSuggestion(suggestion: PersonMergeSuggestionUi) {
+        smartRecognitionManager.dismissMergeSuggestion(
+            suggestion.target.personId,
+            suggestion.source.personId
+        )
     }
 
     fun toggleShowHidden() {
@@ -223,6 +293,8 @@ data class PersonDetailUiState(
     val photos: List<MediaItem> = emptyList(),
     val personFaces: List<DetectedFaceEntity> = emptyList(),
     val otherPersons: List<PersonSummary> = emptyList(),
+    val frequentCompanions: List<PersonSummary> = emptyList(),
+    val selectedCompanion: PersonSummary? = null,
     val gridColumns: Int = 4,
     val isUnmeteredWifi: Boolean = true,
     val selectedIds: Set<String> = emptySet(),
@@ -249,6 +321,7 @@ class PersonDetailViewModel(
 ) : ViewModel() {
 
     private val selectedIdsFlow = MutableStateFlow<Set<String>>(emptySet())
+    private val selectedCompanionIdFlow = MutableStateFlow<String?>(null)
     private val isExportingFlow = MutableStateFlow(false)
     private val exportProgressFlow = MutableStateFlow<String?>(null)
     private val infoSheetFlow = MutableStateFlow<Pair<MediaItem, String>?>(null)
@@ -279,14 +352,27 @@ class PersonDetailViewModel(
     private val personContentFlow = combine(
         allVisiblePersonsFlow,
         visibleMediaFlow,
-        smartRecognitionManager.observeFacesForPerson(personId)
-    ) { allPersons, allMedia, faces ->
+        smartRecognitionManager.observeFacesForPerson(personId),
+        selectedCompanionIdFlow
+    ) { allPersons, allMedia, faces, companionId ->
         val current = allPersons.firstOrNull { it.personId == personId }
         val others = allPersons.filter { it.personId != personId && !it.isHidden }
         val visibleIds = allMedia.mapTo(HashSet(allMedia.size)) { it.id }
         val safeFaces = faces.filter { it.itemId in visibleIds && !it.cropPath.isNullOrBlank() }
+
+        val companions = if (current != null) {
+            others.mapNotNull { other ->
+                val shared = current.photoIds.intersect(other.photoIds)
+                if (shared.isEmpty()) null else other.copy(photoCount = shared.size, photoIds = shared)
+            }.sortedByDescending { it.photoCount }.take(12)
+        } else {
+            emptyList()
+        }
+        val activeCompanion = companionId?.let { cid -> companions.firstOrNull { it.personId == cid } }
+
         val personPhotos = if (current != null) {
-            allMedia.filter { it.id in current.photoIds }
+            val targetIds = if (activeCompanion != null) activeCompanion.photoIds else current.photoIds
+            allMedia.filter { it.id in targetIds }
         } else {
             emptyList()
         }
@@ -294,7 +380,9 @@ class PersonDetailViewModel(
             person = current,
             photos = personPhotos,
             faces = safeFaces,
-            otherPersons = others
+            otherPersons = others,
+            frequentCompanions = companions,
+            selectedCompanion = activeCompanion
         )
     }.flowOn(Dispatchers.Default)
 
@@ -321,6 +409,8 @@ class PersonDetailViewModel(
             photos = content.photos,
             personFaces = content.faces,
             otherPersons = content.otherPersons,
+            frequentCompanions = content.frequentCompanions,
+            selectedCompanion = content.selectedCompanion,
             gridColumns = prefs.gridColumns,
             isUnmeteredWifi = net.isUnmeteredWifi || !prefs.wifiOnlyHighRes,
             selectedIds = inter.selectedIds,
@@ -340,6 +430,15 @@ class PersonDetailViewModel(
 
     fun setGridColumns(columns: Int) {
         viewModelScope.launch { preferencesManager.setGridColumns(columns) }
+    }
+
+    fun toggleCompanionFilter(companionId: String) {
+        selectedCompanionIdFlow.update { cur -> if (cur == companionId) null else companionId }
+        selectedIdsFlow.value = emptySet()
+    }
+
+    fun clearCompanionFilter() {
+        selectedCompanionIdFlow.value = null
     }
 
     suspend fun findDuplicateNameTarget(name: String): String? =
@@ -501,7 +600,9 @@ class PersonDetailViewModel(
         val person: PersonSummary?,
         val photos: List<MediaItem>,
         val faces: List<DetectedFaceEntity>,
-        val otherPersons: List<PersonSummary>
+        val otherPersons: List<PersonSummary>,
+        val frequentCompanions: List<PersonSummary>,
+        val selectedCompanion: PersonSummary?
     )
 
     private data class PersonDetailInteraction(

@@ -542,16 +542,20 @@ private fun StoryCoverImage(
                 .crossfade(200)
                 .build()
         } else {
-            val url = DriveConstants.buildThumbnailUrl(
-                thumbnailLink = item.thumbnailLink,
-                fileId = item.id,
-                isUnmeteredWifi = isUnmeteredWifi,
-                isVideo = item.isVideo,
-                sizeBytes = item.sizeBytes
-            )
             ImageRequest.Builder(context)
-                .data(url)
-                .crossfade(200)
+                .data(
+                    com.luminagallery.drive.data.repository.DriveThumbnailRequest(
+                        fileId = item.id,
+                        thumbnailLink = item.thumbnailLink,
+                        isUnmeteredWifi = isUnmeteredWifi,
+                        isVideo = item.isVideo,
+                        sizeBytes = item.sizeBytes,
+                        requestedMaxPx = 440
+                    )
+                )
+                .memoryCacheKey(DriveConstants.stableThumbMemoryKey(item.id))
+                .diskCacheKey(DriveConstants.stableThumbDiskKey(item.id))
+                .crossfade(160)
                 .build()
         }
     }

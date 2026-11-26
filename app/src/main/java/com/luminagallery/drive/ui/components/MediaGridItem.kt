@@ -31,8 +31,12 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -53,8 +57,10 @@ import coil3.request.crossfade
 import coil3.size.Precision
 import com.luminagallery.drive.LocalGalleryImageLoader
 import com.luminagallery.drive.data.remote.DriveConstants
+import com.luminagallery.drive.data.repository.DriveThumbnailRequest
 import com.luminagallery.drive.data.repository.LocalThumbnailRequest
 import com.luminagallery.drive.domain.model.MediaItem
+import kotlinx.coroutines.delay
 
 private val VideoBottomScrimBrush = Brush.verticalGradient(
     colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.62f))
@@ -107,31 +113,65 @@ fun MediaGridItem(
     )
     val cornerRadius = cornerRadiusRaw.coerceAtLeast(0.dp)
 
-    val imageRequest = remember(item.isLocal, item.localContentUri, item.id, item.thumbnailLink, item.isVideo, isUnmeteredWifi) {
+    var retryAttempt by remember(item.id, item.localContentUri, item.thumbnailLink) {
+        mutableIntStateOf(0)
+    }
+    var pendingRetry by remember(item.id, item.localContentUri, item.thumbnailLink) {
+        mutableStateOf(false)
+    }
+    LaunchedEffect(pendingRetry, retryAttempt) {
+        if (pendingRetry && retryAttempt < 2) {
+            delay(if (retryAttempt == 0) 240L else 850L)
+            pendingRetry = false
+            retryAttempt += 1
+        }
+    }
+
+    val imageRequest = remember(
+        item.isLocal,
+        item.localContentUri,
+        item.id,
+        item.thumbnailLink,
+        item.isVideo,
+        item.sizeBytes,
+        isUnmeteredWifi,
+        retryAttempt
+    ) {
         if (item.isLocal && !item.localContentUri.isNullOrBlank()) {
             ImageRequest.Builder(context)
-                .data(LocalThumbnailRequest(item.localContentUri, item.isVideo))
+                .data(LocalThumbnailRequest(item.localContentUri, item.isVideo, retryAttempt = retryAttempt))
                 .size(360)
                 .precision(Precision.INEXACT)
                 .allowRgb565(true)
-                .memoryCacheKey(DriveConstants.stableThumbMemoryKey(item.id))
+                .apply {
+                    if (retryAttempt == 0) {
+                        memoryCacheKey(DriveConstants.stableThumbMemoryKey(item.id))
+                    }
+                }
                 .crossfade(false)
                 .build()
         } else {
-            val url = DriveConstants.buildThumbnailUrl(
-                thumbnailLink = item.thumbnailLink,
-                fileId = item.id,
-                isUnmeteredWifi = isUnmeteredWifi,
-                isVideo = item.isVideo,
-                sizeBytes = item.sizeBytes
-            ) ?: return@remember null
             ImageRequest.Builder(context)
-                .data(url)
+                .data(
+                    DriveThumbnailRequest(
+                        fileId = item.id,
+                        thumbnailLink = item.thumbnailLink,
+                        isUnmeteredWifi = isUnmeteredWifi,
+                        isVideo = item.isVideo,
+                        sizeBytes = item.sizeBytes,
+                        requestedMaxPx = 360,
+                        retryAttempt = retryAttempt
+                    )
+                )
                 .size(360)
                 .precision(Precision.INEXACT)
                 .allowRgb565(true)
-                .memoryCacheKey(DriveConstants.stableThumbMemoryKey(item.id))
-                .diskCacheKey(DriveConstants.thumbnailCacheKey(item.id, isUnmeteredWifi))
+                .apply {
+                    if (retryAttempt == 0) {
+                        memoryCacheKey(DriveConstants.stableThumbMemoryKey(item.id))
+                    }
+                }
+                .diskCacheKey(DriveConstants.stableThumbDiskKey(item.id))
                 .crossfade(80)
                 .build()
         }
@@ -223,6 +263,11 @@ fun MediaGridItem(
             imageLoader = imageLoader,
             contentDescription = item.name,
             contentScale = ContentScale.Crop,
+            onError = {
+                if (retryAttempt < 2) {
+                    pendingRetry = true
+                }
+            },
             modifier = baseTileMod.background(MaterialTheme.colorScheme.surfaceContainer)
         )
 

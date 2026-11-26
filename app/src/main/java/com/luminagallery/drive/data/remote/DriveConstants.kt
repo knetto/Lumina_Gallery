@@ -31,7 +31,9 @@ object DriveConstants {
         "${BASE_URL}drive/v3/files/$fileId?alt=media&supportsAllDrives=true"
 
     /**
-     * Builds a crisp thumbnail URL for grids & album covers.
+     * Builds a fast, crisp thumbnail URL for grids & album covers.
+     * Uses optimal pixel targets (`=s440` Wi-Fi / `=s300` metered, or caller-requested size)
+     * so Drive covers load ~2× faster than oversized `=s600` downloads while staying razor-sharp.
      * NEVER falls back to `?alt=media` for videos or huge >16 MB files (preventing
      * 200+ MB video downloads from trying to render as album cover images!).
      */
@@ -40,9 +42,16 @@ object DriveConstants {
         fileId: String,
         isUnmeteredWifi: Boolean,
         isVideo: Boolean = false,
-        sizeBytes: Long = 0L
+        sizeBytes: Long = 0L,
+        requestedMaxPx: Int = 0
     ): String? {
-        val targetSize = if (isUnmeteredWifi) "=s600" else "=s360"
+        val defaultPx = if (isUnmeteredWifi) 440 else 300
+        val clampedPx = if (requestedMaxPx > 0) {
+            requestedMaxPx.coerceIn(220, if (isUnmeteredWifi) 512 else 360)
+        } else {
+            defaultPx
+        }
+        val targetSize = "=s$clampedPx"
         if (!thumbnailLink.isNullOrBlank()) {
             return resizeThumbnailLink(thumbnailLink, targetSize)
         }
@@ -66,7 +75,7 @@ object DriveConstants {
         return buildFullMediaUrl(fileId)
     }
 
-    private fun resizeThumbnailLink(thumbnailLink: String, targetSize: String): String = when {
+    fun resizeThumbnailLink(thumbnailLink: String, targetSize: String): String = when {
         THUMB_SIZE_REGEX.containsMatchIn(thumbnailLink) ->
             thumbnailLink.replace(THUMB_SIZE_REGEX, targetSize)
         THUMB_WH_REGEX.containsMatchIn(thumbnailLink) ->
@@ -77,8 +86,14 @@ object DriveConstants {
         else -> thumbnailLink
     }
 
-    fun thumbnailCacheKey(fileId: String, isUnmeteredWifi: Boolean): String =
-        "thumb_${fileId}_${if (isUnmeteredWifi) "hd" else "eco"}"
+    /**
+     * Single stable disk cache key per Drive file ID (independent of Wi-Fi/cellular switches
+     * and expiring `thumbnailLink` URLs) so cached Drive covers load instantaneously offline.
+     */
+    fun stableThumbDiskKey(fileId: String): String = "drive_thumb_v2_$fileId"
+
+    fun thumbnailCacheKey(fileId: String, @Suppress("UNUSED_PARAMETER") isUnmeteredWifi: Boolean): String =
+        stableThumbDiskKey(fileId)
 
     fun stableThumbMemoryKey(fileId: String): String = "thumb_mem_$fileId"
 

@@ -25,6 +25,13 @@ class DriveAuthInterceptor(
             return chain.proceed(originalRequest)
         }
 
+        if (originalRequest.header(HEADER_SKIP_AUTH) != null) {
+            val cleanRequest = originalRequest.newBuilder()
+                .removeHeader(HEADER_SKIP_AUTH)
+                .build()
+            return chain.proceed(cleanRequest)
+        }
+
         val token = tokenManager.getAccessToken(forceRefresh = false)
         if (chain.call().isCanceled()) {
             throw IOException("Request canceled during authentication.")
@@ -60,8 +67,9 @@ class DriveAuthInterceptor(
             lower == "drive.google.com"
     }
 
-    private companion object {
-        const val HEADER_AUTHORIZATION = "Authorization"
-        const val BEARER_PREFIX = "Bearer "
+    companion object {
+        const val HEADER_SKIP_AUTH = "X-Lumina-Skip-Auth"
+        private const val HEADER_AUTHORIZATION = "Authorization"
+        private const val BEARER_PREFIX = "Bearer "
     }
 }

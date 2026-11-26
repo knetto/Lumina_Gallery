@@ -195,6 +195,7 @@ fun ViewerScreen(
     isRectMorphing: Boolean = false,
     onActiveItemChanged: (String) -> Unit,
     onOpenEditor: (itemId: String, sourceUri: String, displayName: String, isLocal: Boolean) -> Unit = { _, _, _, _ -> },
+    onOpenPerson: ((personId: String) -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -1129,7 +1130,13 @@ fun ViewerScreen(
             item = uiState.activeExifOverride ?: currentItem,
             driveFolderPath = uiState.activeDrivePath,
             onDismiss = viewModel::closeExifSheet,
-            onCopiedMessage = viewModel::showMessage
+            onCopiedMessage = viewModel::showMessage,
+            onOpenPerson = onOpenPerson?.let { openFn ->
+                { pid ->
+                    viewModel.closeExifSheet()
+                    openFn(pid)
+                }
+            }
         )
     }
 
@@ -1601,17 +1608,19 @@ private fun SamsungFilmstripScrubber(
                             .crossfade(false)
                             .build()
                     } else {
-                        val url = DriveConstants.buildThumbnailUrl(
-                            thumbnailLink = item.thumbnailLink,
-                            fileId = item.id,
-                            isUnmeteredWifi = isUnmeteredWifi,
-                            isVideo = item.isVideo,
-                            sizeBytes = item.sizeBytes
-                        )
                         ImageRequest.Builder(context)
-                            .data(url)
+                            .data(
+                                com.luminagallery.drive.data.repository.DriveThumbnailRequest(
+                                    fileId = item.id,
+                                    thumbnailLink = item.thumbnailLink,
+                                    isUnmeteredWifi = isUnmeteredWifi,
+                                    isVideo = item.isVideo,
+                                    sizeBytes = item.sizeBytes,
+                                    requestedMaxPx = 220
+                                )
+                            )
                             .memoryCacheKey(DriveConstants.stableThumbMemoryKey(item.id))
-                            .diskCacheKey(DriveConstants.thumbnailCacheKey(item.id, isUnmeteredWifi))
+                            .diskCacheKey(DriveConstants.stableThumbDiskKey(item.id))
                             .size(160)
                             .precision(Precision.INEXACT)
                             .allowRgb565(true)

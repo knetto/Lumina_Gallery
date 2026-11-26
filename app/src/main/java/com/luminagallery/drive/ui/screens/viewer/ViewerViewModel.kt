@@ -45,7 +45,7 @@ data class ViewerLaunchContext(
     val albumFilter: AlbumMediaFilter = AlbumMediaFilter.ALL,
     val albumSort: AlbumMediaSort = AlbumMediaSort.DATE_DESC,
     val locationKey: String? = null,
-    val personId: String? = null
+    val personIds: List<String> = emptyList()
 )
 
 @Immutable
@@ -93,15 +93,31 @@ class ViewerViewModel(
         .map { ids -> repository.expandBlockedFolderIds(ids) }
 
     private val mediaSourceFlow = when {
-        !launchContext.personId.isNullOrBlank() && !launchContext.isSearchMode -> combine(
+        launchContext.personIds.isNotEmpty() && !launchContext.isSearchMode -> combine(
             localMediaRepository.observeAllLocalMedia(),
             repository.searchMedia("", null, null, null),
-            smartRecognitionManager.observeFacesForPerson(launchContext.personId),
+            smartRecognitionManager.allActiveFacesFlow,
             excludedAlbumIdsFlow
-        ) { local, drive, faces, excluded ->
-            val targetPhotoIds = faces.mapTo(HashSet(faces.size)) { it.itemId }
+        ) { local, drive, allFaces, excluded ->
+            val targetSet = launchContext.personIds.toSet()
+            val photosByPerson = HashMap<String, MutableSet<String>>(targetSet.size)
+            for (face in allFaces) {
+                val pid = face.personId
+                if (pid != null && pid in targetSet) {
+                    photosByPerson.getOrPut(pid) { HashSet() }.add(face.itemId)
+                }
+            }
+            val intersected = if (photosByPerson.size < targetSet.size) {
+                emptySet()
+            } else {
+                var acc: Set<String>? = null
+                for (ids in photosByPerson.values) {
+                    acc = if (acc == null) ids else acc.intersect(ids)
+                }
+                acc.orEmpty()
+            }
             (local + drive)
-                .filter { it.id in targetPhotoIds && it.parentId !in excluded }
+                .filter { it.id in intersected && it.parentId !in excluded }
                 .sortedByDescending { it.createdTimeEpochMs }
         }.flowOn(Dispatchers.Default)
 
@@ -173,17 +189,35 @@ class ViewerViewModel(
                     .split(Regex("\\s+")).map { it.removePrefix("#").trim() }.filter { it.isNotBlank() }
                 val personById = enrich.persons.associateBy { it.personId }
                 val personNamesByPhoto = HashMap<String, MutableList<String>>()
-                val selectedPersonPhotoIds = if (!launchContext.personId.isNullOrBlank()) HashSet<String>() else null
+                val targetPersonSet = launchContext.personIds.toSet()
+                val photosBySelectedPerson = if (targetPersonSet.isNotEmpty()) {
+                    HashMap<String, MutableSet<String>>(targetPersonSet.size)
+                } else {
+                    null
+                }
                 for (face in enrich.faces) {
                     val pid = face.personId ?: continue
                     val p = personById[pid] ?: continue
                     if (p.isHidden) continue
-                    if (selectedPersonPhotoIds != null && pid == launchContext.personId) {
-                        selectedPersonPhotoIds.add(face.itemId)
+                    if (photosBySelectedPerson != null && pid in targetPersonSet) {
+                        photosBySelectedPerson.getOrPut(pid) { HashSet() }.add(face.itemId)
                     }
                     if (p.name.isNotBlank()) {
                         personNamesByPhoto.getOrPut(face.itemId) { mutableListOf() }.add(p.name)
                     }
+                }
+                val selectedPersonPhotoIds: Set<String>? = if (photosBySelectedPerson != null) {
+                    if (photosBySelectedPerson.size < targetPersonSet.size) {
+                        emptySet()
+                    } else {
+                        var acc: Set<String>? = null
+                        for (ids in photosBySelectedPerson.values) {
+                            acc = if (acc == null) ids else acc.intersect(ids)
+                        }
+                        acc.orEmpty()
+                    }
+                } else {
+                    null
                 }
                 (localItems + driveItems).filter { item ->
                     if (item.parentId in enrich.excludedIds) return@filter false
@@ -358,7 +392,7 @@ class ViewerViewModel(
             extrasRepository.latestLockedAlbumIds + extrasRepository.latestHiddenAlbumIds
         )
         val cached = when {
-            !launchContext.personId.isNullOrBlank() || !launchContext.locationKey.isNullOrBlank() -> emptyList()
+            launchContext.personIds.isNotEmpty() || !launchContext.locationKey.isNullOrBlank() -> emptyList()
             launchContext.specialFilter == SpecialGalleryFilter.VIDEOS ->
                 localMediaRepository.getCachedAlbumMedia(LocalMediaRepository.LOCAL_BUCKET_VIDEOS)
                     .filterNot { it.parentId in excluded }

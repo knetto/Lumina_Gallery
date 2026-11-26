@@ -35,6 +35,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.CompareArrows
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
@@ -82,6 +83,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.luminagallery.drive.data.repository.ai.PersonMergeSuggestionUi
 import com.luminagallery.drive.data.repository.ai.PersonSummary
 import com.luminagallery.drive.data.repository.ai.SmartIndexProgress
 import com.luminagallery.drive.ui.components.LuminaSnackbarHost
@@ -199,10 +201,10 @@ fun PeopleScreen(
                                     }
                                 )
                                 DropdownMenuItem(
-                                    text = { Text("Scan more photos now") },
+                                    text = { Text("Scan entire library") },
                                     onClick = {
                                         showOverflowMenu = false
-                                        viewModel.triggerScan(maxNewItems = 1000)
+                                        viewModel.scanEntireLibrary()
                                     }
                                 )
                                 DropdownMenuItem(
@@ -239,14 +241,33 @@ fun PeopleScreen(
                 verticalArrangement = Arrangement.spacedBy(18.dp),
                 modifier = Modifier.fillMaxSize()
             ) {
-                // Live scan status banner (shown while scanning or if remaining unindexed photos exist)
+                // Live scan status banner (shown while scanning or if remaining unindexed items exist)
                 val prog = uiState.progress
                 if (prog.isIndexing || prog.isDownloadingModels || prog.remainingPhotos > 0) {
                     item(key = "smart_scan_banner", span = { GridItemSpan(maxLineSpan) }) {
                         SmartScanProgressBanner(
                             progress = prog,
-                            onScanMore = { viewModel.triggerScan(maxNewItems = 1200) },
+                            onScanAll = viewModel::scanEntireLibrary,
                             onPause = viewModel::pauseScan
+                        )
+                    }
+                }
+
+                // Interactive "Same person?" merge suggestion card (Google Photos / Apple Photos style)
+                val topSuggestion = uiState.mergeSuggestions.firstOrNull()
+                if (!uiState.showHiddenSection && !uiState.isSelectionMode && topSuggestion != null) {
+                    item(key = "merge_suggestion_card", span = { GridItemSpan(maxLineSpan) }) {
+                        MergeSuggestionCard(
+                            suggestion = topSuggestion,
+                            totalCount = uiState.mergeSuggestions.size,
+                            onCombine = {
+                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                viewModel.acceptMergeSuggestion(topSuggestion)
+                            },
+                            onDismiss = {
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                viewModel.dismissMergeSuggestion(topSuggestion)
+                            }
                         )
                     }
                 }
@@ -256,7 +277,7 @@ fun PeopleScreen(
                         PeopleEmptyState(
                             isHiddenView = uiState.showHiddenSection,
                             isScanning = prog.isIndexing || prog.isDownloadingModels,
-                            onScanNow = { viewModel.triggerScan(maxNewItems = 800) }
+                            onScanNow = viewModel::scanEntireLibrary
                         )
                     }
                 } else {
@@ -582,7 +603,7 @@ fun PeopleScreen(
             title = { Text("Rebuild People & Objects?") },
             text = {
                 Text(
-                    text = "This clears cached face groups and object tags and re-analyzes your local & Drive photos cleanly on-device (locked folders are always skipped).",
+                    text = "This re-analyzes your local & Google Drive photos and videos cleanly on-device while automatically keeping your saved names and pinned people (locked folders are always skipped).",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -656,9 +677,148 @@ private fun PersonGridCard(
 }
 
 @Composable
+private fun MergeSuggestionCard(
+    suggestion: PersonMergeSuggestionUi,
+    totalCount: Int,
+    onCombine: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(22.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(
+                0.8.dp,
+                MaterialTheme.colorScheme.primary.copy(alpha = 0.28f),
+                RoundedCornerShape(22.dp)
+            )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Same person?",
+                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                if (totalCount > 1) {
+                    Text(
+                        text = "1 of $totalCount",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    PersonAvatar(
+                        cropPath = suggestion.target.coverCropPath,
+                        contentDescription = suggestion.target.displayTitle,
+                        size = 64.dp,
+                        isFavorite = suggestion.target.isFavorite
+                    )
+                    Spacer(Modifier.height(5.dp))
+                    Text(
+                        text = suggestion.target.displayTitle,
+                        fontSize = 12.5.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "${suggestion.target.photoCount} items",
+                        fontSize = 10.5.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.CompareArrows,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    PersonAvatar(
+                        cropPath = suggestion.source.coverCropPath,
+                        contentDescription = suggestion.source.displayTitle,
+                        size = 64.dp,
+                        isFavorite = suggestion.source.isFavorite
+                    )
+                    Spacer(Modifier.height(5.dp))
+                    Text(
+                        text = suggestion.source.displayTitle,
+                        fontSize = 12.5.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "${suggestion.source.photoCount} items",
+                        fontSize = 10.5.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                FilledTonalButton(
+                    onClick = onDismiss,
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("Not the same", fontSize = 13.sp)
+                }
+                Button(
+                    onClick = onCombine,
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(Icons.Rounded.Merge, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(5.dp))
+                    Text("Combine", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun SmartScanProgressBanner(
     progress: SmartIndexProgress,
-    onScanMore: () -> Unit,
+    onScanAll: () -> Unit,
     onPause: () -> Unit
 ) {
     Surface(
@@ -698,8 +858,9 @@ private fun SmartScanProgressBanner(
                         Text(
                             text = when {
                                 progress.isDownloadingModels -> "Preparing on-device AI models…"
-                                progress.isIndexing -> progress.statusText ?: "Analyzing photos on-device…"
-                                else -> "${progress.remainingPhotos} more photos ready to scan"
+                                progress.isIndexing -> progress.statusText ?: "Analyzing photos & videos on-device…"
+                                !progress.statusText.isNullOrBlank() -> progress.statusText
+                                else -> "${progress.remainingPhotos} more items ready to scan"
                             },
                             style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
                             color = MaterialTheme.colorScheme.onSurface,
@@ -721,13 +882,13 @@ private fun SmartScanProgressBanner(
                     }
                 } else if (!progress.isDownloadingModels) {
                     FilledTonalButton(
-                        onClick = onScanMore,
+                        onClick = onScanAll,
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
                         modifier = Modifier.height(32.dp)
                     ) {
                         Icon(Icons.Rounded.PlayArrow, contentDescription = null, modifier = Modifier.size(15.dp))
                         Spacer(Modifier.width(3.dp))
-                        Text("Scan", fontSize = 12.sp)
+                        Text("Scan all", fontSize = 12.sp)
                     }
                 }
             }

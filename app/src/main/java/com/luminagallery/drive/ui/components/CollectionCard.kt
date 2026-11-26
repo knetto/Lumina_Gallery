@@ -30,9 +30,13 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -54,9 +58,11 @@ import coil3.request.crossfade
 import coil3.size.Precision
 import com.luminagallery.drive.LocalGalleryImageLoader
 import com.luminagallery.drive.data.remote.DriveConstants
+import com.luminagallery.drive.data.repository.DriveThumbnailRequest
 import com.luminagallery.drive.data.repository.LocalThumbnailRequest
 import com.luminagallery.drive.domain.model.AlbumCoverPreview
 import com.luminagallery.drive.domain.model.AlbumGridItem
+import kotlinx.coroutines.delay
 
 private val CollectionCoverShape = RoundedCornerShape(18.dp)
 
@@ -423,33 +429,53 @@ private fun CollageTile(
 ) {
     val context = LocalContext.current
     val imageLoader = LocalGalleryImageLoader.current
+    var retryAttempt by remember(preview.itemId, preview.thumbnailLink) { mutableIntStateOf(0) }
+    var pendingRetry by remember(preview.itemId, preview.thumbnailLink) { mutableStateOf(false) }
+    LaunchedEffect(pendingRetry, retryAttempt) {
+        if (pendingRetry && retryAttempt < 2) {
+            delay(if (retryAttempt == 0) 260L else 900L)
+            pendingRetry = false
+            retryAttempt += 1
+        }
+    }
 
-    val request = remember(preview, isUnmeteredWifi) {
+    val request = remember(preview, isUnmeteredWifi, retryAttempt) {
         if (preview.isLocal) {
             val uri = preview.thumbnailLink ?: return@remember null
             ImageRequest.Builder(context)
-                .data(LocalThumbnailRequest(uri, preview.isVideo))
+                .data(LocalThumbnailRequest(uri, preview.isVideo, retryAttempt = retryAttempt))
                 .size(256)
                 .precision(Precision.INEXACT)
                 .allowRgb565(true)
-                .memoryCacheKey(DriveConstants.stableThumbMemoryKey(preview.itemId))
+                .apply {
+                    if (retryAttempt == 0) {
+                        memoryCacheKey(DriveConstants.stableThumbMemoryKey(preview.itemId))
+                    }
+                }
                 .crossfade(false)
                 .build()
         } else {
-            val url = DriveConstants.buildThumbnailUrl(
-                thumbnailLink = preview.thumbnailLink,
-                fileId = preview.itemId,
-                isUnmeteredWifi = isUnmeteredWifi,
-                isVideo = preview.isVideo,
-                sizeBytes = preview.sizeBytes
-            ) ?: return@remember null
             ImageRequest.Builder(context)
-                .data(url)
+                .data(
+                    DriveThumbnailRequest(
+                        fileId = preview.itemId,
+                        thumbnailLink = preview.thumbnailLink,
+                        isUnmeteredWifi = isUnmeteredWifi,
+                        isVideo = preview.isVideo,
+                        sizeBytes = preview.sizeBytes,
+                        requestedMaxPx = 280,
+                        retryAttempt = retryAttempt
+                    )
+                )
                 .size(256)
                 .precision(Precision.INEXACT)
                 .allowRgb565(true)
-                .memoryCacheKey(DriveConstants.stableThumbMemoryKey(preview.itemId))
-                .diskCacheKey(DriveConstants.thumbnailCacheKey(preview.itemId, isUnmeteredWifi))
+                .apply {
+                    if (retryAttempt == 0) {
+                        memoryCacheKey(DriveConstants.stableThumbMemoryKey(preview.itemId))
+                    }
+                }
+                .diskCacheKey(DriveConstants.stableThumbDiskKey(preview.itemId))
                 .crossfade(80)
                 .build()
         }
@@ -464,6 +490,11 @@ private fun CollageTile(
                 imageLoader = imageLoader,
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
+                onError = {
+                    if (retryAttempt < 2) {
+                        pendingRetry = true
+                    }
+                },
                 modifier = Modifier.fillMaxSize()
             )
         }

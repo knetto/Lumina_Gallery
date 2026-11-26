@@ -241,6 +241,57 @@ class SmartRecognitionTest {
     }
 
     @Test
+    fun interactiveMergeSuggestions_detectsGrayZonePairsAndRespectsRejections() {
+        val base = FaceClusteringEngine.l2Normalize(floatArrayOf(1f, 0f, 0f, 0f))
+        // Cosine similarity ~0.58 -> gray zone (sunglasses / different lighting)
+        val sunglasses = FaceClusteringEngine.l2Normalize(floatArrayOf(0.58f, 0.81f, 0f, 0f))
+        val other = FaceClusteringEngine.l2Normalize(floatArrayOf(0f, 0f, 1f, 0f))
+
+        val clusters = listOf(
+            FaceClusteringEngine.ClusterCandidate("p1", base, sampleCount = 5, isNamed = true, photoIds = setOf("a", "b")),
+            FaceClusteringEngine.ClusterCandidate("p2", sunglasses, sampleCount = 2, isNamed = false, photoIds = setOf("c", "d")),
+            FaceClusteringEngine.ClusterCandidate("p3", other, sampleCount = 4, isNamed = false, photoIds = setOf("e"))
+        )
+
+        val suggestions = FaceClusteringEngine.findInteractiveMergeSuggestions(clusters)
+        assertEquals(1, suggestions.size)
+        assertEquals("p1", suggestions.first().targetPersonId)
+        assertEquals("p2", suggestions.first().sourcePersonId)
+
+        // Once user marks "Not the same", it must NEVER be suggested or auto-merged again
+        val rejected = setOf(FaceClusteringEngine.canonicalPairKey("p2", "p1"))
+        assertTrue(FaceClusteringEngine.findInteractiveMergeSuggestions(clusters, rejectedPairs = rejected).isEmpty())
+    }
+
+    @Test
+    fun preservedProfileMatching_restoresNamesAndPinsAfterIndexRebuild() {
+        val preserved = listOf(
+            FaceClusteringEngine.PreservedPersonProfile(
+                name = "Mom",
+                isFavorite = true,
+                photoIds = setOf("p1", "p2", "p3", "p4")
+            ),
+            FaceClusteringEngine.PreservedPersonProfile(
+                name = "Alex",
+                isFavorite = false,
+                photoIds = setOf("p10", "p11", "p12")
+            )
+        )
+        val dummyVec = FaceClusteringEngine.l2Normalize(floatArrayOf(1f, 0f, 0f, 0f))
+        val rebuiltClusters = listOf(
+            FaceClusteringEngine.ClusterCandidate("new_1", dummyVec, sampleCount = 3, isNamed = false, photoIds = setOf("p1", "p2", "p5")),
+            FaceClusteringEngine.ClusterCandidate("new_2", dummyVec, sampleCount = 2, isNamed = false, photoIds = setOf("p10", "p11")),
+            FaceClusteringEngine.ClusterCandidate("new_3", dummyVec, sampleCount = 2, isNamed = false, photoIds = setOf("p99", "p100"))
+        )
+
+        val restored = FaceClusteringEngine.matchPreservedProfiles(preserved, rebuiltClusters)
+        assertEquals(2, restored.size)
+        assertEquals("Mom", restored.first { it.personId == "new_1" }.profile.name)
+        assertTrue(restored.first { it.personId == "new_1" }.profile.isFavorite)
+        assertEquals("Alex", restored.first { it.personId == "new_2" }.profile.name)
+    }
+
+    @Test
     fun bundledAiModelAssets_existWithValidTfliteHeadersAnd1000Labels() {
         fun findAsset(name: String): File {
             return listOf(File("src/main/assets/$name"), File("app/src/main/assets/$name"))

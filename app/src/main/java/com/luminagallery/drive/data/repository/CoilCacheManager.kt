@@ -7,6 +7,8 @@ import coil3.memory.MemoryCache
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import coil3.request.crossfade
 import coil3.video.VideoFrameDecoder
+import com.luminagallery.drive.data.local.GalleryDatabase
+import com.luminagallery.drive.data.remote.DriveApiService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -25,11 +27,18 @@ import java.io.File
 class CoilCacheManager(
     private val context: Context,
     private val okHttpClient: OkHttpClient,
+    private val driveApi: DriveApiService,
+    private val database: GalleryDatabase,
     initialMaxCacheMb: Int
 ) {
     private val diskCacheDir: File = File(context.cacheDir, CACHE_DIR_NAME)
     private val shareCacheDir: File = File(context.cacheDir, SHARE_DIR_NAME)
     private val cacheMutex = Mutex()
+    private val driveThumbnailFetcherFactory = DriveThumbnailFetcher.Factory(
+        okHttpClient = okHttpClient,
+        driveApi = driveApi,
+        database = database
+    )
 
     private val _imageLoader = MutableStateFlow(buildImageLoader(initialMaxCacheMb))
     val imageLoaderFlow: StateFlow<ImageLoader> = _imageLoader.asStateFlow()
@@ -75,6 +84,8 @@ class CoilCacheManager(
             .components {
                 add(LocalMediaThumbnailKeyer())
                 add(LocalMediaThumbnailFetcher.Factory(context))
+                add(DriveThumbnailKeyer())
+                add(driveThumbnailFetcherFactory)
                 add(RawImageDecoder.Factory())
                 add(VideoFrameDecoder.Factory())
                 add(

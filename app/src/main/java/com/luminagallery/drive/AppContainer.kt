@@ -64,6 +64,8 @@ class AppContainer(context: Context) {
     val coilCacheManager: CoilCacheManager = CoilCacheManager(
         context = appContext,
         okHttpClient = okHttpClient,
+        driveApi = driveApiService,
+        database = database,
         initialMaxCacheMb = PreferencesManager.DEFAULT_CACHE_MB
     )
 
@@ -143,6 +145,7 @@ class AppContainer(context: Context) {
         database = database,
         localMediaRepository = localMediaRepository,
         offlineMediaManager = offlineMediaManager,
+        preferencesManager = preferencesManager,
         okHttpClient = okHttpClient,
         networkMonitor = networkMonitor
     )

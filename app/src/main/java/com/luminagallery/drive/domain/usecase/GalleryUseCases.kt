@@ -15,8 +15,8 @@ class SyncGalleryUseCase(
     ): Result<Unit> =
         repository.performSmartSync(forceFullRescan = forceFullRescan, waitIfBusy = waitIfBusy)
 
-    suspend fun syncFolder(folderId: String): Result<List<String>> =
-        repository.syncFolderChildren(folderId)
+    suspend fun syncFolder(folderId: String, force: Boolean = true): Result<List<String>> =
+        repository.syncFolderChildren(folderId, force = force)
 
     suspend fun syncFolderTree(rootFolderId: String): Result<Unit> =
         repository.syncFolderTree(rootFolderId)

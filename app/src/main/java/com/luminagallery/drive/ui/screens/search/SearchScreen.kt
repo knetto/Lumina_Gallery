@@ -103,7 +103,7 @@ fun SearchScreen(
         fromEpochMs: Long?,
         toEpochMs: Long?,
         onlyWithText: Boolean,
-        personId: String?
+        personIdsCsv: String?
     ) -> Unit,
     onOpenCompare: (List<String>) -> Unit = {}
 ) {
@@ -185,36 +185,33 @@ fun SearchScreen(
                     }
                 }
 
-                // Media type, active Person filter & date filter chips
+                // Media type, active multi-Person filters & date filter chips
                 LazyRow(
                     contentPadding = PaddingValues(horizontal = 16.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    val activePerson = uiState.selectedPerson
-                    if (activePerson != null) {
-                        item(key = "active_person_filter") {
-                            InputChip(
-                                selected = true,
-                                onClick = { onOpenPersonDetail(activePerson.personId) },
-                                avatar = {
-                                    PersonAvatar(
-                                        cropPath = activePerson.coverCropPath,
-                                        contentDescription = activePerson.displayTitle,
-                                        size = 24.dp
-                                    )
-                                },
-                                label = { Text(activePerson.displayTitle, fontWeight = FontWeight.SemiBold) },
-                                trailingIcon = {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Close,
-                                        contentDescription = "Clear person filter",
-                                        modifier = Modifier
-                                            .size(16.dp)
-                                            .clickable { viewModel.selectPersonFilter(null) }
-                                    )
-                                }
-                            )
-                        }
+                    items(uiState.selectedPeople, key = { "active_person_${it.personId}" }) { activePerson ->
+                        InputChip(
+                            selected = true,
+                            onClick = { onOpenPersonDetail(activePerson.personId) },
+                            avatar = {
+                                PersonAvatar(
+                                    cropPath = activePerson.coverCropPath,
+                                    contentDescription = activePerson.displayTitle,
+                                    size = 24.dp
+                                )
+                            },
+                            label = { Text(activePerson.displayTitle, fontWeight = FontWeight.SemiBold) },
+                            trailingIcon = {
+                                Icon(
+                                    imageVector = Icons.Rounded.Close,
+                                    contentDescription = "Remove person filter",
+                                    modifier = Modifier
+                                        .size(16.dp)
+                                        .clickable { viewModel.togglePersonFilter(activePerson.personId) }
+                                )
+                            }
+                        )
                     }
                     item(key = "type_all") {
                         FilterChip(
@@ -362,14 +359,15 @@ fun SearchScreen(
                 .padding(innerPadding)
         ) {
             val showSmartDiscovery = uiState.query.isBlank() &&
-                uiState.selectedPerson == null &&
+                uiState.selectedPeople.isEmpty() &&
                 (uiState.suggestedPeople.isNotEmpty() ||
                     uiState.suggestedObjects.isNotEmpty() ||
                     uiState.recentSearches.isNotEmpty() ||
                     uiState.suggestedCities.isNotEmpty() ||
                     uiState.suggestedTags.isNotEmpty() ||
                     uiState.smartProgress.remainingPhotos > 0)
-            val discoveryHeaderOffset = if (showSmartDiscovery) 1 else 0
+            val showCompanionBar = uiState.selectedPeople.isNotEmpty() && uiState.companionPeople.isNotEmpty()
+            val discoveryHeaderOffset = (if (showSmartDiscovery) 1 else 0) + (if (showCompanionBar) 1 else 0)
 
             PinchZoomGridContainer(
                 currentColumns = uiState.gridColumns,
@@ -396,13 +394,51 @@ fun SearchScreen(
                             gridState = gridState,
                             orderedItemIds = orderedResultIds,
                             keyToItemId = { key ->
-                                (key as? String)?.takeUnless { it == "smart_discovery" || it == "empty_search_state" }
+                                (key as? String)?.takeUnless {
+                                    it == "smart_discovery" || it == "companion_people_bar" || it == "empty_search_state"
+                                }
                             },
                             selectedIds = uiState.selectedIds,
                             onSetItemSelected = viewModel::setItemSelected,
                             onSetRangeSelected = viewModel::setItemsSelectedRange
                         )
                 ) {
+                    // Multi-person "Together with…" companion bar when 1+ people are selected!
+                    if (showCompanionBar) {
+                        item(key = "companion_people_bar", span = { GridItemSpan(maxLineSpan) }) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text(
+                                    text = "Together with…",
+                                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    items(uiState.companionPeople, key = { "with_${it.personId}" }) { comp ->
+                                        AssistChip(
+                                            onClick = {
+                                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                viewModel.togglePersonFilter(comp.personId)
+                                            },
+                                            leadingIcon = {
+                                                PersonAvatar(
+                                                    cropPath = comp.coverCropPath,
+                                                    contentDescription = comp.displayTitle,
+                                                    size = 24.dp
+                                                )
+                                            },
+                                            label = { Text("${comp.displayTitle} · ${comp.photoCount}") }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // Recent searches & smart city/tag discovery chips stay accessible even when results are empty
                     if (showSmartDiscovery) {
                         item(key = "smart_discovery", span = { GridItemSpan(maxLineSpan) }) {
@@ -430,11 +466,11 @@ fun SearchScreen(
                                         ) {
                                             if (uiState.smartProgress.remainingPhotos > 0 && !uiState.smartProgress.isIndexing) {
                                                 Text(
-                                                    text = "Scan more",
+                                                    text = "Scan all",
                                                     style = MaterialTheme.typography.labelMedium,
                                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                                     modifier = Modifier
-                                                        .clickable(onClick = viewModel::scanMoreSmartPhotos)
+                                                        .clickable(onClick = viewModel::scanEntireLibrary)
                                                         .padding(4.dp)
                                                 )
                                             }
@@ -462,7 +498,7 @@ fun SearchScreen(
                                                         .combinedClickable(
                                                             onClick = {
                                                                 haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                                                viewModel.selectPersonFilter(person.personId)
+                                                                viewModel.togglePersonFilter(person.personId)
                                                             },
                                                             onLongClick = {
                                                                 haptic.performHapticFeedback(HapticFeedbackType.LongPress)
@@ -656,7 +692,7 @@ fun SearchScreen(
                                             uiState.resolvedFromEpochMs,
                                             uiState.resolvedToEpochMs,
                                             uiState.onlyWithText,
-                                            uiState.selectedPerson?.personId
+                                            uiState.selectedPeople.joinToString(",") { it.personId }.takeIf { it.isNotBlank() }
                                         )
                                     }
                                 },
@@ -732,7 +768,11 @@ fun SearchScreen(
             item = item,
             driveFolderPath = uiState.infoFolderPath,
             onDismiss = viewModel::closeInfoSheet,
-            onCopiedMessage = viewModel::showMessage
+            onCopiedMessage = viewModel::showMessage,
+            onOpenPerson = { pid ->
+                viewModel.closeInfoSheet()
+                onOpenPersonDetail(pid)
+            }
         )
     }
 

@@ -178,17 +178,19 @@ fun VideoPlayerPage(
                 .memoryCacheKey(DriveConstants.stableThumbMemoryKey(item.id))
                 .build()
         } else {
-            val url = DriveConstants.buildThumbnailUrl(
-                thumbnailLink = item.thumbnailLink,
-                fileId = item.id,
-                isUnmeteredWifi = isUnmeteredWifi,
-                isVideo = true,
-                sizeBytes = item.sizeBytes
-            ) ?: return@remember null
             ImageRequest.Builder(context)
-                .data(url)
+                .data(
+                    com.luminagallery.drive.data.repository.DriveThumbnailRequest(
+                        fileId = item.id,
+                        thumbnailLink = item.thumbnailLink,
+                        isUnmeteredWifi = isUnmeteredWifi,
+                        isVideo = true,
+                        sizeBytes = item.sizeBytes,
+                        requestedMaxPx = 512
+                    )
+                )
                 .memoryCacheKey(DriveConstants.stableThumbMemoryKey(item.id))
-                .diskCacheKey(DriveConstants.thumbnailCacheKey(item.id, isUnmeteredWifi))
+                .diskCacheKey(DriveConstants.stableThumbDiskKey(item.id))
                 .build()
         }
     }

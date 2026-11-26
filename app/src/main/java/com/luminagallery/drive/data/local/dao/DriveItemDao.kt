@@ -151,6 +151,12 @@ interface DriveItemDao {
     @Query("SELECT * FROM drive_items WHERE id = :id LIMIT 1")
     suspend fun getById(id: String): DriveItemEntity?
 
+    @Query("SELECT thumbnailLink FROM drive_items WHERE id = :id LIMIT 1")
+    suspend fun getThumbnailLink(id: String): String?
+
+    @Query("UPDATE drive_items SET thumbnailLink = :thumbnailLink WHERE id = :id")
+    suspend fun updateThumbnailLink(id: String, thumbnailLink: String?)
+
     @Query("SELECT id FROM drive_items WHERE parentId = :parentId")
     suspend fun getChildIdsInParent(parentId: String): List<String>
 

@@ -1884,19 +1884,22 @@ private fun FloatingPhotoDragStack(
                 .crossfade(false)
                 .build()
         } else {
-            val url = DriveConstants.buildThumbnailUrl(
-                thumbnailLink = leadItem.thumbnailLink,
-                fileId = leadItem.id,
-                isUnmeteredWifi = isUnmeteredWifi,
-                isVideo = leadItem.isVideo,
-                sizeBytes = leadItem.sizeBytes
-            ) ?: return@remember null
             ImageRequest.Builder(context)
-                .data(url)
+                .data(
+                    com.luminagallery.drive.data.repository.DriveThumbnailRequest(
+                        fileId = leadItem.id,
+                        thumbnailLink = leadItem.thumbnailLink,
+                        isUnmeteredWifi = isUnmeteredWifi,
+                        isVideo = leadItem.isVideo,
+                        sizeBytes = leadItem.sizeBytes,
+                        requestedMaxPx = 256
+                    )
+                )
                 .size(256)
                 .precision(Precision.INEXACT)
                 .allowRgb565(true)
                 .memoryCacheKey(DriveConstants.stableThumbMemoryKey(leadItem.id))
+                .diskCacheKey(DriveConstants.stableThumbDiskKey(leadItem.id))
                 .crossfade(false)
                 .build()
         }

@@ -798,21 +798,23 @@ private fun AlbumCoverMorphOverlay(
                 .crossfade(false)
                 .build()
         } else {
-            val url = DriveConstants.buildThumbnailUrl(
-                thumbnailLink = preview.thumbnailLink,
-                fileId = preview.itemId,
-                isUnmeteredWifi = coverInfo.isUnmeteredWifi,
-                isVideo = preview.isVideo,
-                sizeBytes = preview.sizeBytes
-            ) ?: return@remember null
             ImageRequest.Builder(context)
-                .data(url)
+                .data(
+                    com.luminagallery.drive.data.repository.DriveThumbnailRequest(
+                        fileId = preview.itemId,
+                        thumbnailLink = preview.thumbnailLink,
+                        isUnmeteredWifi = coverInfo.isUnmeteredWifi,
+                        isVideo = preview.isVideo,
+                        sizeBytes = preview.sizeBytes,
+                        requestedMaxPx = 420
+                    )
+                )
                 .size(420)
                 .precision(Precision.INEXACT)
                 .allowRgb565(true)
                 .memoryCacheKey(DriveConstants.stableThumbMemoryKey(preview.itemId))
                 .placeholderMemoryCacheKey(DriveConstants.stableThumbMemoryKey(preview.itemId))
-                .diskCacheKey(DriveConstants.thumbnailCacheKey(preview.itemId, coverInfo.isUnmeteredWifi))
+                .diskCacheKey(DriveConstants.stableThumbDiskKey(preview.itemId))
                 .crossfade(false)
                 .build()
         }
@@ -906,23 +908,92 @@ fun prefetchAlbumThumbnails(
                 .crossfade(false)
                 .build()
         } else {
-            val url = DriveConstants.buildThumbnailUrl(
-                thumbnailLink = item.thumbnailLink,
-                fileId = item.id,
-                isUnmeteredWifi = isUnmeteredWifi,
-                isVideo = item.isVideo,
-                sizeBytes = item.sizeBytes
-            ) ?: continue
             ImageRequest.Builder(context)
-                .data(url)
+                .data(
+                    com.luminagallery.drive.data.repository.DriveThumbnailRequest(
+                        fileId = item.id,
+                        thumbnailLink = item.thumbnailLink,
+                        isUnmeteredWifi = isUnmeteredWifi,
+                        isVideo = item.isVideo,
+                        sizeBytes = item.sizeBytes,
+                        requestedMaxPx = 360
+                    )
+                )
                 .size(360)
                 .precision(Precision.INEXACT)
                 .allowRgb565(true)
                 .memoryCacheKey(DriveConstants.stableThumbMemoryKey(item.id))
-                .diskCacheKey(DriveConstants.thumbnailCacheKey(item.id, isUnmeteredWifi))
+                .diskCacheKey(DriveConstants.stableThumbDiskKey(item.id))
                 .crossfade(false)
                 .build()
         }
         imageLoader.enqueue(request)
+    }
+}
+
+/**
+ * Pre-warms visible Google Drive album covers (including split collage tiles) right after
+ * pinned roots load from Room so Drive album cards paint immediately without gray delays.
+ */
+fun prefetchDriveAlbumCovers(
+    context: Context,
+    imageLoader: ImageLoader,
+    folders: List<com.luminagallery.drive.domain.model.DriveFolder>,
+    isUnmeteredWifi: Boolean,
+    maxCovers: Int = 16
+) {
+    if (folders.isEmpty()) return
+    val enqueuedIds = HashSet<String>(maxCovers)
+    for (folder in folders) {
+        if (enqueuedIds.size >= maxCovers) break
+        if (folder.isLocal || folder.isLocked) continue
+
+        if (folder.subfolderCount > 0 && folder.previewCovers.size >= 2) {
+            for (preview in folder.previewCovers.take(4)) {
+                if (enqueuedIds.size >= maxCovers) break
+                if (preview.isLocal || !enqueuedIds.add(preview.itemId)) continue
+                val req = ImageRequest.Builder(context)
+                    .data(
+                        com.luminagallery.drive.data.repository.DriveThumbnailRequest(
+                            fileId = preview.itemId,
+                            thumbnailLink = preview.thumbnailLink,
+                            isUnmeteredWifi = isUnmeteredWifi,
+                            isVideo = preview.isVideo,
+                            sizeBytes = preview.sizeBytes,
+                            requestedMaxPx = 280
+                        )
+                    )
+                    .size(256)
+                    .precision(Precision.INEXACT)
+                    .allowRgb565(true)
+                    .memoryCacheKey(DriveConstants.stableThumbMemoryKey(preview.itemId))
+                    .diskCacheKey(DriveConstants.stableThumbDiskKey(preview.itemId))
+                    .crossfade(false)
+                    .build()
+                imageLoader.enqueue(req)
+            }
+        } else {
+            val coverId = folder.coverItemId ?: continue
+            if (!enqueuedIds.add(coverId)) continue
+            val req = ImageRequest.Builder(context)
+                .data(
+                    com.luminagallery.drive.data.repository.DriveThumbnailRequest(
+                        fileId = coverId,
+                        thumbnailLink = folder.coverThumbnailLink,
+                        isUnmeteredWifi = isUnmeteredWifi,
+                        isVideo = folder.coverIsVideo,
+                        sizeBytes = folder.coverSizeBytes,
+                        requestedMaxPx = 420
+                    )
+                )
+                .size(420)
+                .precision(Precision.INEXACT)
+                .allowRgb565(true)
+                .memoryCacheKey(DriveConstants.stableThumbMemoryKey(coverId))
+                .diskCacheKey(DriveConstants.stableThumbDiskKey(coverId))
+                .crossfade(false)
+                .build()
+            imageLoader.enqueue(req)
+        }
     }
 }

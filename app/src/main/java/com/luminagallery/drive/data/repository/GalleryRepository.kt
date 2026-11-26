@@ -30,12 +30,15 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.shareIn
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import retrofit2.HttpException
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 
 /**
  * Single source of truth implementing Stale-While-Revalidate:
@@ -83,6 +86,7 @@ class GalleryRepository(
     private val repoScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val folderMediaCache = ConcurrentHashMap<String, List<MediaItem>>()
     private val subfoldersCache = ConcurrentHashMap<String, List<DriveFolder>>()
+    private val lastFolderSyncEpochMs = ConcurrentHashMap<String, Long>()
 
     @Volatile
     private var latestFolderParentById: Map<String, String?> = emptyMap()
@@ -394,8 +398,10 @@ class GalleryRepository(
     }
 
     /**
-     * Performs delta sync via `changes.list` once an initial scan has recorded a `startPageToken`,
-     * or executes an initial tree scan of all pinned roots if none has completed yet.
+     * Performs fast delta sync via `changes.list` once an initial scan has recorded a `startPageToken`,
+     * or executes a parallel initial tree scan of all pinned roots if none has completed yet.
+     * Expired Google Drive `thumbnailLink` URLs are self-healed on demand by `DriveThumbnailFetcher`,
+     * so we no longer force slow full-tree rescans every few hours.
      */
     suspend fun performSmartSync(
         forceFullRescan: Boolean = false,
@@ -414,29 +420,51 @@ class GalleryRepository(
             lastSyncErrorFlow.value = null
             try {
                 val state = syncStateDao.getSyncState()
-                val now = System.currentTimeMillis()
-                // Google Drive thumbnailLink URLs expire after a few hours; periodically refresh
-                // metadata so Drive covers & thumbnails never break permanently after initial scan.
-                val thumbnailsStale = state?.lastFullSyncEpochMs == null ||
-                    (now - state.lastFullSyncEpochMs) > THUMBNAIL_REFRESH_INTERVAL_MS
-                val shouldRunDelta = !forceFullRescan &&
-                    !thumbnailsStale &&
-                    state != null &&
-                    state.initialScanComplete &&
-                    !state.changesStartPageToken.isNullOrBlank()
+                val startToken = state?.changesStartPageToken
+                val shouldRunDelta = shouldUseDeltaSync(
+                    forceFullRescan = forceFullRescan,
+                    initialScanComplete = state?.initialScanComplete == true,
+                    changesStartPageToken = startToken
+                )
 
-                if (shouldRunDelta) {
-                    runDeltaSyncLocked(state.changesStartPageToken)
-                    // Ensure any pinned root (including ones just restored from cloud) has its
-                    // own folder node in drive_items (for breadcrumbs) and its full tree indexed
-                    val pinnedRoots = pinnedRootDao.getAll()
-                    for (root in pinnedRoots) {
-                        if (itemDao.getById(root.folderId) == null) {
-                            runCatching { driveApi.getFile(root.folderId) }.getOrNull()
-                                ?.let { itemDao.upsert(DriveMapper.dtoToEntity(it)) }
+                if (shouldRunDelta && !startToken.isNullOrBlank()) {
+                    var deltaSucceeded = true
+                    try {
+                        runDeltaSyncLocked(startToken)
+                    } catch (http: HttpException) {
+                        if (http.code() == 400 || http.code() == 410) {
+                            // Google Drive occasionally invalidates very old startPageTokens; recover cleanly.
+                            deltaSucceeded = false
+                            runInitialScanLocked()
+                        } else {
+                            throw http
                         }
-                        if (itemDao.getChildCount(root.folderId) == 0) {
-                            syncFolderTree(root.folderId).getOrThrow()
+                    }
+
+                    if (deltaSucceeded) {
+                        // Ensure any newly restored pinned root has its folder node & initial subtree indexed
+                        val pinnedRoots = pinnedRootDao.getAll()
+                        val missingNodes = coroutineScope {
+                            pinnedRoots.map { root ->
+                                async(Dispatchers.IO) {
+                                    if (itemDao.getById(root.folderId) == null) {
+                                        runCatching { driveApi.getFile(root.folderId) }.getOrNull()
+                                            ?.let { DriveMapper.dtoToEntity(it) }
+                                    } else {
+                                        null
+                                    }
+                                }
+                            }.awaitAll().filterNotNull()
+                        }
+                        if (missingNodes.isNotEmpty()) {
+                            itemDao.upsertAll(missingNodes)
+                        }
+
+                        val rootsNeedingTree = pinnedRoots.filter { root ->
+                            root.lastSyncedEpochMs == null && itemDao.getChildCount(root.folderId) == 0
+                        }.map { it.folderId }
+                        if (rootsNeedingTree.isNotEmpty()) {
+                            syncFolderTreesParallel(rootsNeedingTree)
                         }
                     }
                 } else {
@@ -455,16 +483,28 @@ class GalleryRepository(
     /**
      * Syncs a single folder's direct children with complete `nextPageToken` pagination,
      * reconciling additions, updates, and removals atomically inside a Room transaction.
+     * When `force = false` (background silent refresh on folder open), skips redundant network
+     * calls if this folder was already synced recently.
      */
-    suspend fun syncFolderChildren(folderId: String): Result<List<String>> =
+    suspend fun syncFolderChildren(
+        folderId: String,
+        force: Boolean = true
+    ): Result<List<String>> =
         withContext(Dispatchers.IO) {
             if (!networkMonitor.isOnline()) {
                 return@withContext Result.success(emptyList())
             }
+            if (!force) {
+                val lastSynced = lastFolderSyncEpochMs[folderId] ?: 0L
+                if (lastSynced > 0L && (System.currentTimeMillis() - lastSynced) < SILENT_FOLDER_SYNC_COOLDOWN_MS) {
+                    return@withContext Result.success(emptyList())
+                }
+            }
             runCatching {
-                val childSubfolderIds = fetchAndPersistFolderChildren(folderId)
+                val remote = fetchFolderChildrenRemote(folderId)
+                persistFolderBatches(listOf(remote.batch))
                 pinnedRootDao.updateLastSynced(folderId, System.currentTimeMillis())
-                childSubfolderIds
+                remote.childSubfolderIds
             }.onFailure { e ->
                 lastSyncErrorFlow.value = e.message
             }
@@ -472,7 +512,7 @@ class GalleryRepository(
 
     /**
      * Recursively indexes an entire nested Drive folder hierarchy (folder-inside-folder)
-     * with bounded HTTP/2 parallelism (4 concurrent folder queries) and full pagination.
+     * with dynamic HTTP/2 work-stealing concurrency and batched Room commits.
      */
     suspend fun syncFolderTree(rootFolderId: String): Result<Unit> =
         withContext(Dispatchers.IO) {
@@ -480,25 +520,7 @@ class GalleryRepository(
                 return@withContext Result.success(Unit)
             }
             runCatching {
-                val semaphore = Semaphore(MAX_CONCURRENT_FOLDER_SCANS)
-                val visited = mutableSetOf<String>()
-                var frontier = listOf(rootFolderId)
-
-                while (frontier.isNotEmpty()) {
-                    val currentBatch = frontier.filter { visited.add(it) }
-                    if (currentBatch.isEmpty()) break
-
-                    frontier = coroutineScope {
-                        currentBatch.map { folderId ->
-                            async(Dispatchers.IO) {
-                                semaphore.withPermit {
-                                    fetchAndPersistFolderChildren(folderId)
-                                }
-                            }
-                        }.awaitAll().flatten()
-                    }
-                }
-                pinnedRootDao.updateLastSynced(rootFolderId, System.currentTimeMillis())
+                syncFolderTreesParallel(listOf(rootFolderId))
             }.onFailure { e ->
                 lastSyncErrorFlow.value = e.message
             }
@@ -694,6 +716,7 @@ class GalleryRepository(
         }
         folderMediaCache.clear()
         subfoldersCache.clear()
+        lastFolderSyncEpochMs.clear()
     }
 
     suspend fun resetMetadataCache() = withContext(Dispatchers.IO) {
@@ -703,6 +726,7 @@ class GalleryRepository(
         }
         folderMediaCache.clear()
         subfoldersCache.clear()
+        lastFolderSyncEpochMs.clear()
         latestFolderParentById = emptyMap()
     }
 
@@ -716,6 +740,7 @@ class GalleryRepository(
         }
         folderMediaCache.clear()
         subfoldersCache.clear()
+        lastFolderSyncEpochMs.clear()
         latestFolderParentById = emptyMap()
         lastSyncErrorFlow.value = null
     }
@@ -744,18 +769,22 @@ class GalleryRepository(
         val pinnedRoots = pinnedRootDao.getAll()
 
         if (pinnedRoots.isNotEmpty()) {
-            // Ensure each pinned root itself exists in drive_items for recursive breadcrumbs
-            val rootEntities = pinnedRoots.mapNotNull { root ->
-                runCatching { driveApi.getFile(root.folderId) }.getOrNull()
-                    ?.let { DriveMapper.dtoToEntity(it) }
+            // Fetch all pinned root folder nodes in parallel for recursive breadcrumbs
+            val rootEntities = coroutineScope {
+                pinnedRoots.map { root ->
+                    async(Dispatchers.IO) {
+                        runCatching { driveApi.getFile(root.folderId) }.getOrNull()
+                            ?.let { DriveMapper.dtoToEntity(it) }
+                    }
+                }.awaitAll().filterNotNull()
             }
             if (rootEntities.isNotEmpty()) {
                 itemDao.upsertAll(rootEntities)
             }
 
-            for (root in pinnedRoots) {
-                syncFolderTree(root.folderId).getOrThrow()
-            }
+            // Scan all pinned roots and nested subfolders concurrently with batched Room commits
+            syncFolderTreesParallel(pinnedRoots.map { it.folderId })
+
             database.withTransaction {
                 pruneUnreferencedDriveItemsLocked()
             }
@@ -859,32 +888,129 @@ class GalleryRepository(
         }
     }
 
-    private suspend fun fetchAndPersistFolderChildren(folderId: String): List<String> {
+    private data class FolderSyncBatch(
+        val folderId: String,
+        val entities: List<DriveItemEntity>,
+        val remoteIds: Set<String>
+    )
+
+    private data class RemoteFolderChildren(
+        val batch: FolderSyncBatch,
+        val childSubfolderIds: List<String>
+    )
+
+    /**
+     * Walks one or more Drive folder trees concurrently using dynamic HTTP/2 work-stealing
+     * (no level-by-level barrier stalls behind huge folders!) and commits Room transactions in
+     * batches so album rollups don't thrash on every single subfolder.
+     */
+    private suspend fun syncFolderTreesParallel(rootFolderIds: List<String>) {
+        if (rootFolderIds.isEmpty()) return
+        val semaphore = Semaphore(MAX_CONCURRENT_FOLDER_SCANS)
+        val visited = ConcurrentHashMap.newKeySet<String>()
+        val pendingBatches = ConcurrentLinkedQueue<FolderSyncBatch>()
+        val flushMutex = Mutex()
+
+        suspend fun walkFolder(folderId: String, depth: Int) {
+            if (depth >= MAX_FOLDER_DEPTH || !visited.add(folderId)) return
+            val remote = semaphore.withPermit {
+                fetchFolderChildrenRemote(folderId)
+            }
+            pendingBatches.add(remote.batch)
+            // Flush top-level folders immediately so album covers appear fast; batch deeper levels
+            if (depth == 0 || pendingBatches.size >= FOLDER_DB_FLUSH_BATCH_SIZE) {
+                flushPendingBatches(pendingBatches, flushMutex)
+            }
+            if (remote.childSubfolderIds.isNotEmpty()) {
+                coroutineScope {
+                    remote.childSubfolderIds.forEach { childId ->
+                        launch(Dispatchers.IO) {
+                            walkFolder(childId, depth + 1)
+                        }
+                    }
+                }
+            }
+        }
+
+        coroutineScope {
+            rootFolderIds.forEach { rootId ->
+                launch(Dispatchers.IO) {
+                    walkFolder(rootId, depth = 0)
+                }
+            }
+        }
+
+        flushPendingBatches(pendingBatches, flushMutex)
+        val now = System.currentTimeMillis()
+        for (rootId in rootFolderIds) {
+            pinnedRootDao.updateLastSynced(rootId, now)
+        }
+    }
+
+    private suspend fun flushPendingBatches(
+        queue: ConcurrentLinkedQueue<FolderSyncBatch>,
+        flushMutex: Mutex
+    ) {
+        flushMutex.withLock {
+            if (queue.isEmpty()) return
+            val drained = ArrayList<FolderSyncBatch>(queue.size.coerceAtLeast(4))
+            while (true) {
+                val next = queue.poll() ?: break
+                drained.add(next)
+            }
+            if (drained.isNotEmpty()) {
+                persistFolderBatches(drained)
+            }
+        }
+    }
+
+    private suspend fun fetchFolderChildrenRemote(folderId: String): RemoteFolderChildren {
         val escapedId = folderId.replace("'", "\\'")
         val query = "'$escapedId' in parents and trashed = false"
-        val dtos = fetchAllPages(query = query, orderBy = "folder,createdTime desc")
+        // Omit server-side orderBy so Google Drive uses its fastest index path; Room sorts locally.
+        val dtos = fetchAllPages(query = query, orderBy = null)
         val supported = dtos.filter(DriveMapper::isSupportedGalleryDto)
         val entities = supported.map { DriveMapper.dtoToEntity(it, fallbackParentId = folderId) }
         val remoteIds = entities.mapTo(HashSet(entities.size)) { it.id }
+        val childSubfolderIds = entities.filter { it.isFolder }.map { it.id }
+        return RemoteFolderChildren(
+            batch = FolderSyncBatch(
+                folderId = folderId,
+                entities = entities,
+                remoteIds = remoteIds
+            ),
+            childSubfolderIds = childSubfolderIds
+        )
+    }
 
+    private suspend fun persistFolderBatches(batches: List<FolderSyncBatch>) {
+        if (batches.isEmpty()) return
+        val now = System.currentTimeMillis()
         database.withTransaction {
-            val existingChildIds = itemDao.getChildIdsInParent(folderId)
-            val staleIds = existingChildIds.filterNot { it in remoteIds }
-            if (staleIds.isNotEmpty()) {
-                val allStaleWithDescendants = LinkedHashSet<String>(staleIds.size)
+            val allStaleWithDescendants = LinkedHashSet<String>()
+            val allEntitiesToUpsert = ArrayList<DriveItemEntity>()
+            for (batch in batches) {
+                val existingChildIds = itemDao.getChildIdsInParent(batch.folderId)
+                val staleIds = existingChildIds.filterNot { it in batch.remoteIds }
                 for (staleId in staleIds) {
                     allStaleWithDescendants.addAll(itemDao.getSubtreeItemIds(staleId))
                 }
+                if (batch.entities.isNotEmpty()) {
+                    allEntitiesToUpsert.addAll(batch.entities)
+                }
+            }
+            if (allStaleWithDescendants.isNotEmpty()) {
                 allStaleWithDescendants.chunked(SQLITE_MAX_BIND_PARAMS).forEach { chunk ->
                     itemDao.deleteByIds(chunk)
                 }
             }
-            if (entities.isNotEmpty()) {
-                itemDao.upsertAll(entities)
+            if (allEntitiesToUpsert.isNotEmpty()) {
+                itemDao.upsertAll(allEntitiesToUpsert)
             }
         }
-
-        return entities.filter { it.isFolder }.map { it.id }
+        for (batch in batches) {
+            lastFolderSyncEpochMs[batch.folderId] = now
+        }
     }
 
     /**
@@ -912,9 +1038,17 @@ class GalleryRepository(
         return results
     }
 
-    private companion object {
-        const val MAX_CONCURRENT_FOLDER_SCANS = 4
+    internal companion object {
+        const val MAX_CONCURRENT_FOLDER_SCANS = 8
+        const val FOLDER_DB_FLUSH_BATCH_SIZE = 10
+        const val MAX_FOLDER_DEPTH = 32
         const val SQLITE_MAX_BIND_PARAMS = 450
-        const val THUMBNAIL_REFRESH_INTERVAL_MS = 4L * 60L * 60L * 1000L
+        const val SILENT_FOLDER_SYNC_COOLDOWN_MS = 25_000L
+
+        internal fun shouldUseDeltaSync(
+            forceFullRescan: Boolean,
+            initialScanComplete: Boolean,
+            changesStartPageToken: String?
+        ): Boolean = !forceFullRescan && initialScanComplete && !changesStartPageToken.isNullOrBlank()
     }
 }

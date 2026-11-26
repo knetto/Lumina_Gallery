@@ -508,15 +508,18 @@ fun LuminaNavGraph(
                             personId = route.personId,
                             viewModel = detailViewModel,
                             onNavigateBack = { safePopBackStack() },
-                            onOpenViewer = { pid, itemId ->
+                            onOpenViewer = { pids, itemId ->
                                 activeViewerItemId = itemId
                                 navController.navigate(
                                     ViewerRoute(
                                         folderId = "",
                                         initialItemId = itemId,
-                                        personId = pid
+                                        personId = pids.joinToString(",")
                                     )
                                 )
+                            },
+                            onOpenPerson = { targetPid ->
+                                navController.navigate(PersonDetailRoute(targetPid))
                             },
                             onOpenCompare = { ids ->
                                 navController.navigate(CompareRoute(ids.joinToString(",")))
@@ -723,7 +726,7 @@ fun LuminaNavGraph(
                             onOpenPersonDetail = { personId ->
                                 navController.navigate(PersonDetailRoute(personId))
                             },
-                            onOpenViewer = { itemId, query, mediaType, fromMs, toMs, onlyWithText, personId ->
+                            onOpenViewer = { itemId, query, mediaType, fromMs, toMs, onlyWithText, personIdsCsv ->
                                 activeViewerItemId = itemId
                                 navController.navigate(
                                     ViewerRoute(
@@ -735,7 +738,7 @@ fun LuminaNavGraph(
                                         fromEpochMs = fromMs,
                                         toEpochMs = toMs,
                                         onlyWithText = onlyWithText,
-                                        personId = personId
+                                        personId = personIdsCsv
                                     )
                                 )
                             },
@@ -785,6 +788,9 @@ fun LuminaNavGraph(
                     val initialTappedItem = remember(route.initialItemId) {
                         originTracker.lastTappedMediaItem?.takeIf { it.id == route.initialItemId }
                     }
+                    val parsedPersonIds = remember(route.personId) {
+                        route.personId.orEmpty().split(",").map { it.trim() }.filter { it.isNotEmpty() }
+                    }
                     val viewerViewModel: ViewerViewModel = viewModel(
                         key = "viewer_${route.folderId}_${route.initialItemId}_${route.isFlattened}_${route.isSearchMode}_${route.onlyWithText}_${route.specialFilterName}_${route.albumFilterName}_${route.albumSortName}_${route.locationKey}_${route.personId}",
                         factory = ViewerViewModel.Factory(
@@ -802,7 +808,7 @@ fun LuminaNavGraph(
                                 albumFilter = albumFilter,
                                 albumSort = albumSort,
                                 locationKey = route.locationKey,
-                                personId = route.personId
+                                personIds = parsedPersonIds
                             ),
                             container = container,
                             initialTappedItem = initialTappedItem
@@ -845,6 +851,9 @@ fun LuminaNavGraph(
                                         isLocked = isAlbumLocked(route.folderId) || sourceUri.startsWith("file://")
                                     )
                                 )
+                            },
+                            onOpenPerson = { pid ->
+                                navController.navigate(PersonDetailRoute(pid))
                             },
                             onDismiss = { safePopBackStack() }
                         )

@@ -33,9 +33,13 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -59,9 +63,11 @@ import coil3.size.Precision
 import com.luminagallery.drive.LocalGalleryImageLoader
 import com.luminagallery.drive.data.local.LocalMediaRepository
 import com.luminagallery.drive.data.remote.DriveConstants
+import com.luminagallery.drive.data.repository.DriveThumbnailRequest
 import com.luminagallery.drive.data.repository.LocalThumbnailRequest
 import com.luminagallery.drive.domain.model.AlbumCoverPreview
 import com.luminagallery.drive.domain.model.DriveFolder
+import kotlinx.coroutines.delay
 
 private val FolderCoverShape = RoundedCornerShape(18.dp)
 
@@ -318,6 +324,19 @@ fun FolderCoverArtwork(
     val context = LocalContext.current
     val imageLoader = LocalGalleryImageLoader.current
     val coverShape = FolderCoverShape
+    var retryAttempt by remember(folder.isLocal, folder.coverItemId, folder.coverThumbnailLink) {
+        mutableIntStateOf(0)
+    }
+    var pendingRetry by remember(folder.isLocal, folder.coverItemId, folder.coverThumbnailLink) {
+        mutableStateOf(false)
+    }
+    LaunchedEffect(pendingRetry, retryAttempt) {
+        if (pendingRetry && retryAttempt < 2) {
+            delay(if (retryAttempt == 0) 260L else 900L)
+            pendingRetry = false
+            retryAttempt += 1
+        }
+    }
 
     val coverRequest = remember(
         folder.isLocal,
@@ -325,35 +344,47 @@ fun FolderCoverArtwork(
         folder.coverThumbnailLink,
         folder.coverIsVideo,
         folder.coverSizeBytes,
-        isUnmeteredWifi
+        isUnmeteredWifi,
+        retryAttempt
     ) {
         val coverId = folder.coverItemId ?: return@remember null
         if (folder.isLocal) {
             val uriStr = folder.coverThumbnailLink ?: return@remember null
             ImageRequest.Builder(context)
-                .data(LocalThumbnailRequest(uriStr, folder.coverIsVideo))
+                .data(LocalThumbnailRequest(uriStr, folder.coverIsVideo, retryAttempt = retryAttempt))
                 .size(420)
                 .precision(Precision.INEXACT)
                 .allowRgb565(true)
-                .memoryCacheKey(DriveConstants.stableThumbMemoryKey(coverId))
+                .apply {
+                    if (retryAttempt == 0) {
+                        memoryCacheKey(DriveConstants.stableThumbMemoryKey(coverId))
+                    }
+                }
                 .crossfade(false)
                 .build()
         } else {
-            val url = DriveConstants.buildThumbnailUrl(
-                thumbnailLink = folder.coverThumbnailLink,
-                fileId = coverId,
-                isUnmeteredWifi = isUnmeteredWifi,
-                isVideo = folder.coverIsVideo,
-                sizeBytes = folder.coverSizeBytes
-            ) ?: return@remember null
             ImageRequest.Builder(context)
-                .data(url)
+                .data(
+                    DriveThumbnailRequest(
+                        fileId = coverId,
+                        thumbnailLink = folder.coverThumbnailLink,
+                        isUnmeteredWifi = isUnmeteredWifi,
+                        isVideo = folder.coverIsVideo,
+                        sizeBytes = folder.coverSizeBytes,
+                        requestedMaxPx = 420,
+                        retryAttempt = retryAttempt
+                    )
+                )
                 .size(420)
                 .precision(Precision.INEXACT)
                 .allowRgb565(true)
-                .memoryCacheKey(DriveConstants.stableThumbMemoryKey(coverId))
-                .diskCacheKey(DriveConstants.thumbnailCacheKey(coverId, isUnmeteredWifi))
-                .crossfade(100)
+                .apply {
+                    if (retryAttempt == 0) {
+                        memoryCacheKey(DriveConstants.stableThumbMemoryKey(coverId))
+                    }
+                }
+                .diskCacheKey(DriveConstants.stableThumbDiskKey(coverId))
+                .crossfade(80)
                 .build()
         }
     }
@@ -380,6 +411,11 @@ fun FolderCoverArtwork(
                 imageLoader = imageLoader,
                 contentDescription = folder.name,
                 contentScale = ContentScale.Crop,
+                onError = {
+                    if (retryAttempt < 2) {
+                        pendingRetry = true
+                    }
+                },
                 modifier = Modifier.fillMaxSize()
             )
         } else {

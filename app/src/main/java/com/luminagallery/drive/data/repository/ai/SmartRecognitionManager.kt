@@ -6,8 +6,10 @@ import android.graphics.BitmapFactory
 import android.graphics.ColorSpace
 import android.graphics.ImageDecoder
 import android.graphics.Matrix
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
+import android.util.Size
 import androidx.compose.runtime.Immutable
 import androidx.exifinterface.media.ExifInterface
 import androidx.room.withTransaction
@@ -23,6 +25,7 @@ import com.google.mlkit.vision.label.defaults.ImageLabelerOptions
 import com.luminagallery.drive.data.local.GalleryDatabase
 import com.luminagallery.drive.data.local.HiddenLockedFolderManager
 import com.luminagallery.drive.data.local.LocalMediaRepository
+import com.luminagallery.drive.data.local.PreferencesManager
 import com.luminagallery.drive.data.local.entity.DetectedFaceEntity
 import com.luminagallery.drive.data.local.entity.PersonClusterEntity
 import com.luminagallery.drive.data.local.entity.PhotoSmartIndexEntity
@@ -43,6 +46,9 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
@@ -84,20 +90,35 @@ data class SmartObjectChip(
     val category: SmartObjectVocabulary.ObjectCategory?
 )
 
+@Immutable
+data class PersonMergeSuggestionUi(
+    val target: PersonSummary,
+    val source: PersonSummary,
+    val similarity: Float
+)
+
+@Serializable
+private data class SavedPreservedProfileDto(
+    val name: String,
+    val isFavorite: Boolean,
+    val photoIds: List<String>
+)
+
 /**
  * 100% on-device People (Face Recognition + Clustering) & Objects/Scenes AI indexing engine:
- *  - Scans BOTH on-device local photos AND connected Google Drive photo thumbnails (`=s640`).
+ *  - Scans BOTH on-device local photos/videos AND connected Google Drive thumbnails (`=s640`).
  *  - STRICTLY skips all locked & hidden albums (and every nested Drive descendant folder) BEFORE
  *    decoding or downloading a single byte, and automatically purges cached faces/labels if an
  *    album is later locked.
- *  - Powers Samsung-style People avatars, naming, combining/merging clusters, hiding strangers,
- *    removing misclassified faces, choosing cover portraits, and bilingual EN+NL object search.
+ *  - Supports interactive "Same person?" merge suggestions, preserving user-given names across
+ *    rebuilds, full-library scans with Wi-Fi awareness for Drive, and bilingual EN+NL object search.
  */
 class SmartRecognitionManager(
     private val context: Context,
     private val database: GalleryDatabase,
     private val localMediaRepository: LocalMediaRepository,
     private val offlineMediaManager: OfflineMediaManager,
+    private val preferencesManager: PreferencesManager,
     private val okHttpClient: OkHttpClient,
     private val networkMonitor: NetworkMonitor
 ) {
@@ -107,6 +128,7 @@ class SmartRecognitionManager(
     private val faceEngine = FaceEmbeddingEngine(context)
     private val objectEngine = ImageNetObjectEngine(context)
     private val metaPrefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val profileJson = Json { ignoreUnknownKeys = true }
 
     private val scanMutex = Mutex()
     @Volatile
@@ -114,6 +136,11 @@ class SmartRecognitionManager(
 
     private val _progress = MutableStateFlow(SmartIndexProgress())
     val progress: StateFlow<SmartIndexProgress> = _progress.asStateFlow()
+
+    private val _rejectedMergePairs = MutableStateFlow(
+        metaPrefs.getStringSet(KEY_REJECTED_MERGE_PAIRS, emptySet())?.toSet().orEmpty()
+    )
+    val rejectedMergePairsFlow: StateFlow<Set<String>> = _rejectedMergePairs.asStateFlow()
 
     private val faceDetector by lazy {
         val options = FaceDetectorOptions.Builder()
@@ -162,24 +189,122 @@ class SmartRecognitionManager(
         pauseRequested = true
     }
 
+    fun dismissMergeSuggestion(personIdA: String, personIdB: String) {
+        val key = FaceClusteringEngine.canonicalPairKey(personIdA, personIdB)
+        val updated = _rejectedMergePairs.value + key
+        _rejectedMergePairs.value = updated
+        metaPrefs.edit().putStringSet(KEY_REJECTED_MERGE_PAIRS, updated).apply()
+    }
+
     /**
      * Clears all cached People clusters, face crops, and object tags so the library re-scans
-     * cleanly from scratch with the upgraded v2 detector (e.g., removing false positives).
+     * cleanly from scratch — automatically preserving user-assigned names & pinned favorites so
+     * they re-attach to the rebuilt clusters by photo overlap!
      */
-    suspend fun resetAllIndexData() = withContext(Dispatchers.IO) {
+    suspend fun resetAllIndexData(preserveNames: Boolean = true) = withContext(Dispatchers.IO) {
         pauseRequested = true
         scanMutex.lock()
         try {
+            if (preserveNames) {
+                snapshotNamedProfilesBeforeReset()
+            } else {
+                metaPrefs.edit().remove(KEY_PRESERVED_PROFILES).apply()
+            }
             database.withTransaction {
                 smartDao.clearAllFaces()
                 smartDao.clearAllPersons()
                 smartDao.clearAllSmartIndex()
             }
             faceEngine.clearAllCropFiles()
-            metaPrefs.edit().putInt(KEY_AI_INDEX_VERSION, CURRENT_AI_INDEX_VERSION).apply()
+            _rejectedMergePairs.value = emptySet()
+            metaPrefs.edit()
+                .remove(KEY_REJECTED_MERGE_PAIRS)
+                .putInt(KEY_AI_INDEX_VERSION, CURRENT_AI_INDEX_VERSION)
+                .apply()
             _progress.value = SmartIndexProgress()
         } finally {
             scanMutex.unlock()
+        }
+    }
+
+    private suspend fun snapshotNamedProfilesBeforeReset() {
+        val persons = smartDao.getAllPersons().filter { it.name.isNotBlank() || it.isFavorite }
+        if (persons.isEmpty()) return
+        val dtos = persons.mapNotNull { person ->
+            val photoIds = smartDao.getFacesForPerson(person.personId)
+                .map { it.itemId }
+                .distinct()
+                .take(80)
+            if (photoIds.isEmpty()) null
+            else SavedPreservedProfileDto(
+                name = person.name,
+                isFavorite = person.isFavorite,
+                photoIds = photoIds
+            )
+        }
+        if (dtos.isNotEmpty()) {
+            val serialized = runCatching { profileJson.encodeToString(dtos) }.getOrNull()
+            if (serialized != null) {
+                metaPrefs.edit().putString(KEY_PRESERVED_PROFILES, serialized).apply()
+            }
+        }
+    }
+
+    private suspend fun applyPreservedPersonProfiles() {
+        val raw = metaPrefs.getString(KEY_PRESERVED_PROFILES, null) ?: return
+        val dtos = runCatching {
+            profileJson.decodeFromString<List<SavedPreservedProfileDto>>(raw)
+        }.getOrDefault(emptyList())
+        if (dtos.isEmpty()) {
+            metaPrefs.edit().remove(KEY_PRESERVED_PROFILES).apply()
+            return
+        }
+
+        val allPersons = smartDao.getAllPersons().filterNot { it.isHidden }
+        if (allPersons.isEmpty()) return
+        val candidates = allPersons.map { p ->
+            val faces = smartDao.getFacesForPerson(p.personId)
+            FaceClusteringEngine.ClusterCandidate(
+                personId = p.personId,
+                centroid = FaceClusteringEngine.decodeEmbedding(p.centroidBlob),
+                sampleCount = faces.size.coerceAtLeast(p.sampleCount),
+                isNamed = p.name.isNotBlank(),
+                photoIds = faces.mapTo(HashSet(faces.size)) { it.itemId }
+            )
+        }
+        val profiles = dtos.map {
+            FaceClusteringEngine.PreservedPersonProfile(
+                name = it.name,
+                isFavorite = it.isFavorite,
+                photoIds = it.photoIds.toSet()
+            )
+        }
+        val restored = FaceClusteringEngine.matchPreservedProfiles(profiles, candidates)
+        if (restored.isEmpty()) return
+
+        val matchedProfileNames = HashSet<String>()
+        val now = System.currentTimeMillis()
+        database.withTransaction {
+            for (match in restored) {
+                val target = smartDao.getPersonById(match.personId) ?: continue
+                smartDao.upsertPerson(
+                    target.copy(
+                        name = match.profile.name.ifBlank { target.name },
+                        isFavorite = target.isFavorite || match.profile.isFavorite,
+                        updatedAtEpochMs = now
+                    )
+                )
+                matchedProfileNames.add(match.profile.name)
+            }
+        }
+
+        val remainingDtos = dtos.filterNot { it.name in matchedProfileNames }
+        if (remainingDtos.isEmpty()) {
+            metaPrefs.edit().remove(KEY_PRESERVED_PROFILES).apply()
+        } else {
+            runCatching { profileJson.encodeToString(remainingDtos) }.getOrNull()?.let { updated ->
+                metaPrefs.edit().putString(KEY_PRESERVED_PROFILES, updated).apply()
+            }
         }
     }
 
@@ -238,14 +363,16 @@ class SmartRecognitionManager(
      */
     suspend fun syncSmartIndex(
         maxNewItemsPerRun: Int = 120,
-        includeDrive: Boolean = true
+        includeDrive: Boolean = true,
+        respectWifiOnlyForDrive: Boolean = true
     ) = withContext(Dispatchers.IO) {
         if (!scanMutex.tryLock()) return@withContext
         pauseRequested = false
         try {
-            // One-time automatic clean rebuild when upgrading from v1 -> v2 (fixes old crooked face embeddings & non-human false positives)
+            // One-time automatic clean rebuild when upgrading from v1 -> v2 (preserves any names set!)
             val savedVersion = metaPrefs.getInt(KEY_AI_INDEX_VERSION, 0)
             if (savedVersion < CURRENT_AI_INDEX_VERSION) {
+                snapshotNamedProfilesBeforeReset()
                 database.withTransaction {
                     smartDao.clearAllFaces()
                     smartDao.clearAllPersons()
@@ -257,13 +384,13 @@ class SmartRecognitionManager(
 
             val blockedFolderIds = computeBlockedFolderIdsFromDb()
 
-            // Gather eligible local photos (skipping locked, hidden, and hidden-on-disk vault files)
+            // Gather eligible local photos AND videos (1 fast thumbnail frame per video),
+            // strictly skipping locked, hidden, and hidden-on-disk vault files!
             val localCandidates = if (localMediaRepository.hasMediaPermission()) {
                 localMediaRepository.getCachedAllMedia().ifEmpty {
                     runCatching { localMediaRepository.observeAllLocalMedia().first() }.getOrDefault(emptyList())
                 }.filter { item ->
                     item.isLocal &&
-                        !item.isVideo &&
                         !item.isRaw &&
                         !item.localContentUri.isNullOrBlank() &&
                         item.parentId !in blockedFolderIds &&
@@ -273,15 +400,15 @@ class SmartRecognitionManager(
                 emptyList()
             }
 
-            // Gather eligible connected Google Drive photos (skipping locked & hidden Drive subtrees)
+            // Gather eligible connected Google Drive photos AND videos (via lightweight =s600 server thumbnails),
+            // strictly skipping locked & hidden Drive subtrees!
             val driveCandidates = if (includeDrive) {
                 driveItemDao.getAllNonTrashedMediaSync()
                     .asSequence()
                     .map(DriveMapper::entityToMediaItem)
                     .filter { item ->
-                        !item.isVideo &&
-                            item.parentId !in blockedFolderIds &&
-                            (!item.thumbnailLink.isNullOrBlank() || offlineMediaManager.getOfflineFilePath(item.id) != null)
+                        item.parentId !in blockedFolderIds &&
+                            (!item.thumbnailLink.isNullOrBlank() || (!item.isVideo && offlineMediaManager.getOfflineFilePath(item.id) != null))
                     }
                     .toList()
             } else {
@@ -318,15 +445,27 @@ class SmartRecognitionManager(
                 return@withContext
             }
 
-            val batchItems = unindexedAll.take(maxNewItemsPerRun)
-            val isOnline = networkMonitor.isOnline()
-            val runQueue = if (isOnline) {
-                batchItems
+            val prefs = runCatching { preferencesManager.getCurrentPreferences() }.getOrNull()
+            val net = networkMonitor.networkState.value
+            val canFetchOnlineDrive = net.isOnline && (!respectWifiOnlyForDrive || prefs?.wifiOnlyHighRes != true || net.isUnmeteredWifi)
+
+            val filteredByNetwork = if (canFetchOnlineDrive) {
+                unindexedAll
             } else {
-                batchItems.filter { it.isLocal || offlineMediaManager.getOfflineFilePath(it.id) != null }
+                unindexedAll.filter { it.isLocal || (!it.isVideo && offlineMediaManager.getOfflineFilePath(it.id) != null) }
+            }
+            val runQueue = if (maxNewItemsPerRun == Int.MAX_VALUE) {
+                filteredByNetwork
+            } else {
+                filteredByNetwork.take(maxNewItemsPerRun)
             }
 
             if (runQueue.isEmpty()) {
+                val waitMsg = if (!net.isOnline) {
+                    "Connect to the internet to scan Google Drive items"
+                } else {
+                    "Waiting for Wi-Fi to scan Google Drive thumbnails"
+                }
                 _progress.value = SmartIndexProgress(
                     isIndexing = false,
                     scannedInRun = 0,
@@ -334,7 +473,7 @@ class SmartRecognitionManager(
                     totalIndexedPhotos = alreadyIndexed,
                     totalEligiblePhotos = totalEligible,
                     remainingPhotos = unindexedAll.size,
-                    statusText = "Connect to Wi-Fi/internet to scan Google Drive photos"
+                    statusText = waitMsg
                 )
                 return@withContext
             }
@@ -502,9 +641,10 @@ class SmartRecognitionManager(
 
             flushPending()
 
-            // Post-scan high-confidence cluster consolidation (auto-merges split clusters of the same person)
+            // Post-scan high-confidence cluster consolidation & preserved-name restoration
             if (scanned > 0) {
                 runCatching { consolidateSplitClusters() }
+                runCatching { applyPreservedPersonProfiles() }
             }
 
             val finalRemaining = (unindexedAll.size - scanned).coerceAtLeast(0)
@@ -703,7 +843,10 @@ class SmartRecognitionManager(
                 photoIds = faces.mapTo(HashSet(faces.size)) { it.itemId }
             )
         }
-        val merges = FaceClusteringEngine.findAutoConsolidationPairs(candidates)
+        val merges = FaceClusteringEngine.findAutoConsolidationPairs(
+            clusters = candidates,
+            rejectedPairs = _rejectedMergePairs.value
+        )
         if (merges.isEmpty()) return
         for (merge in merges) {
             mergePersons(
@@ -1004,13 +1147,20 @@ class SmartRecognitionManager(
     private suspend fun decodeScanBitmap(item: MediaItem): Bitmap? {
         if (item.isLocal) {
             val uriStr = item.localContentUri ?: return null
-            return decodeLocalBitmapScaled(Uri.parse(uriStr))
+            val uri = Uri.parse(uriStr)
+            return if (item.isVideo) {
+                decodeLocalVideoKeyframe(uri)
+            } else {
+                decodeLocalBitmapScaled(uri)
+            }
         }
-        // Google Drive item: prefer offline pinned file, otherwise fetch crisp =s640 thumbnail
-        val offlinePath = offlineMediaManager.getOfflineFilePath(item.id)
-        if (!offlinePath.isNullOrBlank()) {
-            val f = File(offlinePath)
-            if (f.exists()) return decodeFileScaled(f)
+        // Google Drive item: prefer offline pinned photo, otherwise fetch crisp =s600 server thumbnail (works for both photos & videos!)
+        if (!item.isVideo) {
+            val offlinePath = offlineMediaManager.getOfflineFilePath(item.id)
+            if (!offlinePath.isNullOrBlank()) {
+                val f = File(offlinePath)
+                if (f.exists()) return decodeFileScaled(f)
+            }
         }
         if (!networkMonitor.isOnline()) return null
         val thumbUrl = DriveConstants.buildThumbnailUrl(
@@ -1031,6 +1181,31 @@ class SmartRecognitionManager(
             }
         }.getOrNull()
     }
+
+    private fun decodeLocalVideoKeyframe(uri: Uri): Bitmap? = runCatching {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            runCatching {
+                context.contentResolver.loadThumbnail(uri, Size(640, 640), null)
+            }.getOrNull()?.let { return@runCatching it }
+        }
+        val retriever = MediaMetadataRetriever()
+        try {
+            retriever.setDataSource(context, uri)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                retriever.getScaledFrameAtTime(
+                    500_000L,
+                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                    640,
+                    640
+                ) ?: retriever.getScaledFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 640, 640)
+            } else {
+                retriever.getFrameAtTime(500_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                    ?: retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            }
+        } finally {
+            runCatching { retriever.release() }
+        }
+    }.getOrNull()
 
     private fun decodeLocalBitmapScaled(uri: Uri): Bitmap? = runCatching {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
@@ -1121,10 +1296,11 @@ class SmartRecognitionManager(
     private fun scanPriority(item: MediaItem): Int {
         val path = (item.storagePath ?: item.relativePath).orEmpty()
         return when {
-            path.contains("camera", ignoreCase = true) -> 0
-            !item.isLocal -> 1 // Connected Google Drive albums right up front!
-            path.contains("screenshot", ignoreCase = true) -> 3
-            else -> 2
+            !item.isVideo && path.contains("camera", ignoreCase = true) -> 0
+            !item.isVideo && !item.isLocal -> 1 // Connected Google Drive photos right up front!
+            !item.isVideo && path.contains("screenshot", ignoreCase = true) -> 3
+            !item.isVideo -> 2
+            else -> 4 // Scan video keyframes cleanly right after still photos
         }
     }
 
@@ -1150,6 +1326,8 @@ class SmartRecognitionManager(
     companion object {
         private const val PREFS_NAME = "lumina_smart_ai_meta"
         private const val KEY_AI_INDEX_VERSION = "smart_ai_index_version"
+        private const val KEY_REJECTED_MERGE_PAIRS = "rejected_merge_pairs"
+        private const val KEY_PRESERVED_PROFILES = "preserved_person_profiles_json"
         private const val CURRENT_AI_INDEX_VERSION = 2
         private const val MAX_SCAN_DIMENSION_PX = 768
         private const val ML_TIMEOUT_SEC = 10L

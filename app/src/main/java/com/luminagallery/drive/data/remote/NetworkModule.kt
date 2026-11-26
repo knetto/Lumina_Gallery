@@ -27,14 +27,14 @@ object NetworkModule {
 
     fun createOkHttpClient(authInterceptor: DriveAuthInterceptor): OkHttpClient {
         val dispatcher = Dispatcher().apply {
-            maxRequests = 32
-            maxRequestsPerHost = 12
+            maxRequests = 48
+            maxRequestsPerHost = 16
         }
 
         val builder = OkHttpClient.Builder()
             .dispatcher(dispatcher)
             .protocols(listOf(Protocol.HTTP_2, Protocol.HTTP_1_1))
-            .connectionPool(ConnectionPool(maxIdleConnections = 8, keepAliveDuration = 2, TimeUnit.MINUTES))
+            .connectionPool(ConnectionPool(maxIdleConnections = 12, keepAliveDuration = 3, TimeUnit.MINUTES))
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .writeTimeout(15, TimeUnit.SECONDS)

@@ -564,7 +564,7 @@ class FolderViewModel(
             val result = if (viewModeFlow.value == FolderViewMode.FLATTENED) {
                 syncUseCase.syncFolderTree(activeId)
             } else {
-                syncUseCase.syncFolder(activeId).map { Unit }
+                syncUseCase.syncFolder(activeId, force = !silent).map { Unit }
             }
             result.onFailure { err ->
                 if (!silent) {

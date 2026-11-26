@@ -24,6 +24,24 @@ object FaceClusteringEngine {
     const val AUTO_CONSOLIDATE_MULTI_THRESHOLD: Float = 0.67f
     const val AUTO_CONSOLIDATE_SINGLE_THRESHOLD: Float = 0.72f
 
+    /** Gray-zone threshold band for interactive "Are these the same person?" merge suggestions. */
+    const val SUGGEST_MERGE_MIN_THRESHOLD: Float = 0.48f
+
+    fun canonicalPairKey(idA: String, idB: String): String =
+        if (idA <= idB) "$idA|$idB" else "$idB|$idA"
+
+    data class PreservedPersonProfile(
+        val name: String,
+        val isFavorite: Boolean,
+        val photoIds: Set<String>
+    )
+
+    data class RestoredProfileMatch(
+        val personId: String,
+        val profile: PreservedPersonProfile,
+        val overlapCount: Int
+    )
+
     /** Minimum normalized face bounding-box width relative to image width. */
     const val MIN_RELATIVE_FACE_SIZE: Float = 0.045f
 
@@ -344,9 +362,13 @@ object FaceClusteringEngine {
 
     /**
      * Finds high-confidence split cluster pairs that belong to the same person (never merging
-     * two differently-named people and never merging clusters that co-occur in the same photo).
+     * two differently-named people, never merging user-rejected pairs, and never merging clusters
+     * that co-occur in the same photo).
      */
-    fun findAutoConsolidationPairs(clusters: List<ClusterCandidate>): List<MergeSuggestion> {
+    fun findAutoConsolidationPairs(
+        clusters: List<ClusterCandidate>,
+        rejectedPairs: Set<String> = emptySet()
+    ): List<MergeSuggestion> {
         if (clusters.size < 2) return emptyList()
         val sorted = clusters.sortedWith(
             compareByDescending<ClusterCandidate> { it.isNamed }
@@ -361,10 +383,9 @@ object FaceClusteringEngine {
             for (j in (i + 1) until sorted.size) {
                 val source = sorted[j]
                 if (source.personId in absorbed) continue
-                // Never auto-merge two differently named people
                 if (target.isNamed && source.isNamed) continue
+                if (canonicalPairKey(target.personId, source.personId) in rejectedPairs) continue
                 if (target.centroid.size != source.centroid.size) continue
-                // Never merge two people who appear together in the same photo
                 if (target.photoIds.isNotEmpty() && source.photoIds.any { it in target.photoIds }) continue
 
                 val sim = cosineSimilarity(target.centroid, source.centroid)
@@ -386,6 +407,96 @@ object FaceClusteringEngine {
             }
         }
         return result
+    }
+
+    /**
+     * Finds interactive "Are these the same person?" gray-zone pairs (`0.48..0.72`) where lighting,
+     * sunglasses, or age may have split one person into two clusters. Respects user-rejected pairs,
+     * never suggests merging two differently-named people, and never pairs people seen in the same photo.
+     */
+    fun findInteractiveMergeSuggestions(
+        clusters: List<ClusterCandidate>,
+        rejectedPairs: Set<String> = emptySet(),
+        maxSuggestions: Int = 6
+    ): List<MergeSuggestion> {
+        if (clusters.size < 2) return emptyList()
+        val sorted = clusters.sortedWith(
+            compareByDescending<ClusterCandidate> { it.isNamed }
+                .thenByDescending { it.sampleCount }
+        )
+        val rawPairs = mutableListOf<MergeSuggestion>()
+        for (i in sorted.indices) {
+            val a = sorted[i]
+            for (j in (i + 1) until sorted.size) {
+                val b = sorted[j]
+                if (a.isNamed && b.isNamed) continue
+                if (canonicalPairKey(a.personId, b.personId) in rejectedPairs) continue
+                if (a.centroid.size != b.centroid.size) continue
+                if (a.photoIds.isNotEmpty() && b.photoIds.any { it in a.photoIds }) continue
+                val sim = cosineSimilarity(a.centroid, b.centroid)
+                if (sim >= SUGGEST_MERGE_MIN_THRESHOLD) {
+                    rawPairs.add(
+                        MergeSuggestion(
+                            targetPersonId = a.personId,
+                            sourcePersonId = b.personId,
+                            similarity = sim
+                        )
+                    )
+                }
+            }
+        }
+        rawPairs.sortByDescending { it.similarity }
+        val usedIds = HashSet<String>()
+        val selected = mutableListOf<MergeSuggestion>()
+        for (pair in rawPairs) {
+            if (pair.targetPersonId in usedIds || pair.sourcePersonId in usedIds) continue
+            usedIds.add(pair.targetPersonId)
+            usedIds.add(pair.sourcePersonId)
+            selected.add(pair)
+            if (selected.size >= maxSuggestions) break
+        }
+        return selected
+    }
+
+    /**
+     * Matches preserved (pre-rebuild) named/pinned person profiles to newly scanned clusters by
+     * photo-ID overlap so rebuilding the AI index never forces the user to re-name everyone.
+     */
+    fun matchPreservedProfiles(
+        preserved: List<PreservedPersonProfile>,
+        clusters: List<ClusterCandidate>
+    ): List<RestoredProfileMatch> {
+        if (preserved.isEmpty() || clusters.isEmpty()) return emptyList()
+        val unnamedClusters = clusters.filter { !it.isNamed && it.photoIds.isNotEmpty() }
+        if (unnamedClusters.isEmpty()) return emptyList()
+
+        data class Scored(val cluster: ClusterCandidate, val profile: PreservedPersonProfile, val overlap: Int, val score: Float)
+        val candidates = mutableListOf<Scored>()
+        for (profile in preserved) {
+            if (profile.photoIds.isEmpty()) continue
+            for (cluster in unnamedClusters) {
+                val overlap = cluster.photoIds.count { it in profile.photoIds }
+                if (overlap <= 0) continue
+                val minSize = minOf(cluster.photoIds.size, profile.photoIds.size).coerceAtLeast(1)
+                val ratio = overlap.toFloat() / minSize.toFloat()
+                if (ratio >= 0.40f || overlap >= 2) {
+                    candidates.add(Scored(cluster, profile, overlap, ratio * 100f + overlap))
+                }
+            }
+        }
+        candidates.sortByDescending { it.score }
+
+        val usedClusters = HashSet<String>()
+        val usedProfiles = HashSet<Int>()
+        val matches = mutableListOf<RestoredProfileMatch>()
+        for (c in candidates) {
+            val profileIdx = preserved.indexOf(c.profile)
+            if (c.cluster.personId in usedClusters || profileIdx in usedProfiles) continue
+            usedClusters.add(c.cluster.personId)
+            usedProfiles.add(profileIdx)
+            matches.add(RestoredProfileMatch(c.cluster.personId, c.profile, c.overlap))
+        }
+        return matches
     }
 
     fun isFaceUsableForRecognition(

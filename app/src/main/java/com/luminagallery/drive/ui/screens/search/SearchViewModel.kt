@@ -70,7 +70,8 @@ data class SearchUiState(
     val suggestedCities: List<String> = emptyList(),
     val suggestedTags: List<String> = emptyList(),
     val suggestedPeople: List<PersonSummary> = emptyList(),
-    val selectedPerson: PersonSummary? = null,
+    val selectedPeople: List<PersonSummary> = emptyList(),
+    val companionPeople: List<PersonSummary> = emptyList(),
     val suggestedObjects: List<SmartObjectChip> = emptyList(),
     val onlyWithText: Boolean = false,
     val ocrProgress: OcrIndexProgress = OcrIndexProgress(),
@@ -94,7 +95,7 @@ private data class SearchQueryParams(
     val fromEpochMs: Long?,
     val toEpochMs: Long?,
     val onlyWithText: Boolean = false,
-    val selectedPersonId: String? = null
+    val selectedPersonIds: Set<String> = emptySet()
 )
 
 class SearchViewModel(
@@ -111,7 +112,7 @@ class SearchViewModel(
     private val queryFlow = MutableStateFlow("")
     private val mediaTypeFlow = MutableStateFlow<MediaType?>(null)
     private val onlyWithTextFlow = MutableStateFlow(false)
-    private val selectedPersonIdFlow = MutableStateFlow<String?>(null)
+    private val selectedPersonIdsFlow = MutableStateFlow<Set<String>>(emptySet())
     private val datePresetFlow = MutableStateFlow(DateFilterPreset.ANY)
     private val customRangeFlow = MutableStateFlow(CustomRangeState())
     private val localCameraVersionFlow = MutableStateFlow(0)
@@ -161,10 +162,10 @@ class SearchViewModel(
         mediaTypeFlow,
         datePresetFlow,
         customRangeFlow,
-        combine(onlyWithTextFlow, selectedPersonIdFlow) { onlyText, personId -> onlyText to personId }
-    ) { query, type, preset, custom, (onlyText, personId) ->
+        combine(onlyWithTextFlow, selectedPersonIdsFlow) { onlyText, personIds -> onlyText to personIds }
+    ) { query, type, preset, custom, (onlyText, personIds) ->
         val (from, to) = resolveDateRange(preset, custom.localFromMs, custom.localToMs)
-        SearchQueryParams(query, type, from, to, onlyText, personId)
+        SearchQueryParams(query, type, from, to, onlyText, personIds)
     }
 
     // Combined offline index excluding locked & hidden albums (and Drive descendants)
@@ -262,8 +263,26 @@ class SearchViewModel(
                 .thenBy { it.name.lowercase(Locale.US) }
         )
 
-        val selectedPersonSummary = params.selectedPersonId?.let { selId ->
+        val selectedPeopleList = params.selectedPersonIds.mapNotNull { selId ->
             visiblePeople.firstOrNull { it.personId == selId }
+        }
+        val selectedIntersectionPhotoIds: Set<String>? = if (selectedPeopleList.isNotEmpty()) {
+            var acc: Set<String> = selectedPeopleList.first().photoIds
+            for (idx in 1 until selectedPeopleList.size) {
+                acc = acc.intersect(selectedPeopleList[idx].photoIds)
+            }
+            acc
+        } else {
+            null
+        }
+        val companionPeople = if (selectedIntersectionPhotoIds != null && selectedIntersectionPhotoIds.isNotEmpty()) {
+            visiblePeople.mapNotNull { candidate ->
+                if (candidate.personId in params.selectedPersonIds) return@mapNotNull null
+                val shared = candidate.photoIds.intersect(selectedIntersectionPhotoIds)
+                if (shared.isEmpty()) null else candidate.copy(photoCount = shared.size, photoIds = shared)
+            }.sortedByDescending { it.photoCount }.take(10)
+        } else {
+            emptyList()
         }
 
         // Top detected Objects & Scenes chips across unlocked local + Google Drive photos
@@ -320,7 +339,7 @@ class SearchViewModel(
             .filter { it.isNotEmpty() }
 
         val filtered = allMedia.filter { item ->
-            if (selectedPersonSummary != null && item.id !in selectedPersonSummary.photoIds) return@filter false
+            if (selectedIntersectionPhotoIds != null && item.id !in selectedIntersectionPhotoIds) return@filter false
             if (params.mediaType != null && item.mediaType != params.mediaType) return@filter false
             if (params.fromEpochMs != null && item.createdTimeEpochMs < params.fromEpochMs) return@filter false
             if (params.toEpochMs != null && item.createdTimeEpochMs > params.toEpochMs) return@filter false
@@ -348,7 +367,8 @@ class SearchViewModel(
             topCities = topCities,
             topTags = topTags,
             suggestedPeople = searchStripPeople,
-            selectedPerson = selectedPersonSummary,
+            selectedPeople = selectedPeopleList,
+            companionPeople = companionPeople,
             suggestedObjects = topObjects,
             ocrProgress = enrich.ocrProgress,
             smartProgress = enrich.smartProgress
@@ -403,7 +423,8 @@ class SearchViewModel(
             suggestedCities = computed.topCities,
             suggestedTags = computed.topTags,
             suggestedPeople = computed.suggestedPeople,
-            selectedPerson = computed.selectedPerson,
+            selectedPeople = computed.selectedPeople,
+            companionPeople = computed.companionPeople,
             suggestedObjects = computed.suggestedObjects,
             onlyWithText = controls.onlyWithText,
             ocrProgress = computed.ocrProgress,
@@ -474,13 +495,23 @@ class SearchViewModel(
         return false
     }
 
-    fun selectPersonFilter(personId: String?) {
-        selectedPersonIdFlow.value = personId
+    fun togglePersonFilter(personId: String) {
+        selectedPersonIdsFlow.update { cur ->
+            if (personId in cur) cur - personId else cur + personId
+        }
     }
 
-    fun scanMoreSmartPhotos() {
+    fun clearPersonFilters() {
+        selectedPersonIdsFlow.value = emptySet()
+    }
+
+    fun scanEntireLibrary() {
         viewModelScope.launch(Dispatchers.IO) {
-            smartRecognitionManager.syncSmartIndex(maxNewItemsPerRun = 800, includeDrive = true)
+            smartRecognitionManager.syncSmartIndex(
+                maxNewItemsPerRun = Int.MAX_VALUE,
+                includeDrive = true,
+                respectWifiOnlyForDrive = true
+            )
         }
     }
 
@@ -701,7 +732,8 @@ class SearchViewModel(
         val topCities: List<String>,
         val topTags: List<String>,
         val suggestedPeople: List<PersonSummary>,
-        val selectedPerson: PersonSummary?,
+        val selectedPeople: List<PersonSummary>,
+        val companionPeople: List<PersonSummary>,
         val suggestedObjects: List<SmartObjectChip>,
         val ocrProgress: OcrIndexProgress,
         val smartProgress: SmartIndexProgress

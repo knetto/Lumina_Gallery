@@ -244,6 +244,17 @@ fun HomeScreen(
         }
     }
 
+    LaunchedEffect(uiState.pinnedRoots, uiState.highResThumbnailsAllowed) {
+        if (uiState.pinnedRoots.isNotEmpty()) {
+            com.luminagallery.drive.ui.components.prefetchDriveAlbumCovers(
+                context = context.applicationContext,
+                imageLoader = appContainer.coilCacheManager.currentImageLoader,
+                folders = uiState.pinnedRoots,
+                isUnmeteredWifi = uiState.highResThumbnailsAllowed
+            )
+        }
+    }
+
     val trashLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->

@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items as lazyRowItems
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -92,7 +93,8 @@ fun PersonDetailScreen(
     personId: String,
     viewModel: PersonDetailViewModel,
     onNavigateBack: () -> Unit,
-    onOpenViewer: (personId: String, itemId: String) -> Unit,
+    onOpenViewer: (personIds: List<String>, itemId: String) -> Unit,
+    onOpenPerson: (personId: String) -> Unit = {},
     onOpenCompare: (List<String>) -> Unit = {}
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -365,6 +367,92 @@ fun PersonDetailScreen(
                                         )
                                     }
                                 }
+
+                                // "Frequently with…" companion strip -> 1-tap filter to photos of BOTH together!
+                                if (uiState.frequentCompanions.isNotEmpty()) {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(top = 4.dp),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 4.dp),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = if (uiState.selectedCompanion != null) {
+                                                    "Together with ${uiState.selectedCompanion?.displayTitle}"
+                                                } else {
+                                                    "Frequently with"
+                                                },
+                                                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                                                color = if (uiState.selectedCompanion != null) {
+                                                    MaterialTheme.colorScheme.primary
+                                                } else {
+                                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                                }
+                                            )
+                                            if (uiState.selectedCompanion != null) {
+                                                Text(
+                                                    text = "Show all",
+                                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                                    color = MaterialTheme.colorScheme.primary,
+                                                    modifier = Modifier
+                                                        .clickable(onClick = viewModel::clearCompanionFilter)
+                                                        .padding(4.dp)
+                                                )
+                                            }
+                                        }
+                                        LazyRow(
+                                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                            contentPadding = PaddingValues(horizontal = 2.dp)
+                                        ) {
+                                            lazyRowItems(
+                                                items = uiState.frequentCompanions,
+                                                key = { "comp_${it.personId}" }
+                                            ) { comp ->
+                                                val isActiveComp = uiState.selectedCompanion?.personId == comp.personId
+                                                Column(
+                                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                                    modifier = Modifier
+                                                        .width(62.dp)
+                                                        .clip(RoundedCornerShape(14.dp))
+                                                        .clickable {
+                                                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                            viewModel.toggleCompanionFilter(comp.personId)
+                                                        }
+                                                        .padding(vertical = 3.dp, horizontal = 2.dp)
+                                                ) {
+                                                    PersonAvatar(
+                                                        cropPath = comp.coverCropPath,
+                                                        contentDescription = comp.displayTitle,
+                                                        size = 50.dp,
+                                                        isSelected = isActiveComp
+                                                    )
+                                                    Spacer(Modifier.height(3.dp))
+                                                    Text(
+                                                        text = comp.displayTitle,
+                                                        fontSize = 10.5.sp,
+                                                        fontWeight = if (isActiveComp) FontWeight.SemiBold else FontWeight.Normal,
+                                                        color = if (isActiveComp) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis,
+                                                        textAlign = TextAlign.Center
+                                                    )
+                                                    Text(
+                                                        text = "${comp.photoCount}",
+                                                        fontSize = 9.5.sp,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -385,7 +473,11 @@ fun PersonDetailScreen(
                                 if (uiState.isSelectionMode) {
                                     viewModel.toggleSelection(item.id)
                                 } else {
-                                    onOpenViewer(personId, item.id)
+                                    val activeIds = buildList {
+                                        add(personId)
+                                        uiState.selectedCompanion?.personId?.let { add(it) }
+                                    }
+                                    onOpenViewer(activeIds, item.id)
                                 }
                             },
                             onLongClick = null,
@@ -669,7 +761,11 @@ fun PersonDetailScreen(
             item = item,
             driveFolderPath = uiState.infoFolderPath,
             onDismiss = viewModel::closeInfoSheet,
-            onCopiedMessage = viewModel::showMessage
+            onCopiedMessage = viewModel::showMessage,
+            onOpenPerson = { targetPid ->
+                viewModel.closeInfoSheet()
+                if (targetPid != personId) onOpenPerson(targetPid)
+            }
         )
     }
 }
