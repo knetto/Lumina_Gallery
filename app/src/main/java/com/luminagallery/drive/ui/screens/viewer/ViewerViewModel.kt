@@ -242,8 +242,8 @@ class ViewerViewModel(
                     val pNames = personNamesByPhoto[item.id]
                     tokens.all { token ->
                         (pNames != null && pNames.any { it.contains(token, ignoreCase = true) }) ||
-                            smart?.labelsCsv?.contains(token, ignoreCase = true) == true ||
-                            smart?.labelSearchTokens?.contains(token, ignoreCase = true) == true ||
+                            com.luminagallery.drive.data.repository.ai.SmartObjectVocabulary.tokensMatch(smart?.labelsCsv, token) ||
+                            com.luminagallery.drive.data.repository.ai.SmartObjectVocabulary.tokensMatch(smart?.labelSearchTokens, token) ||
                             ((smart?.faceCount ?: 0) > 0 && (token == "people" || token == "person" || token == "personen" || token == "mensen" || token == "face")) ||
                             item.name.contains(token, ignoreCase = true) ||
                             item.relativePath?.contains(token, ignoreCase = true) == true ||

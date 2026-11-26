@@ -695,15 +695,24 @@ class SmartRecognitionManager(
                     val detectedFaces = facesResult.getOrDefault(emptyList())
                     val rawMlLabels = labelsResult.getOrDefault(emptyList())
                         .map { it.text to it.confidence }
-                    val rawImageNetLabels = objectEngine.classify(
-                        bitmap = bitmap,
-                        topK = 5,
-                        minConfidence = 0.22f
-                    )
+                    // Full ImageNet softmax: animals are judged by summed group probability
+                    // (all dog breeds vs all primates vs all birds ...), never by one look-alike class.
+                    val wholeProbs = objectEngine.classifyProbabilities(bitmap)
+                    val wholeAnimal = wholeProbs?.let { AnimalTaxonomy.analyze(it) }
+                    val rawImageNetLabels = if (wholeProbs != null) {
+                        objectEngine.topLabels(wholeProbs, topK = 5, minConfidence = 0.22f, excludeAnimals = true)
+                    } else {
+                        emptyList()
+                    }
+                    val animalSpecificLabel = wholeAnimal?.dominantTopIndex
+                        ?.takeIf { idx -> idx >= 0 && (wholeProbs?.getOrNull(idx) ?: 0f) >= 0.25f }
+                        ?.let { idx -> objectEngine.labelAt(idx) }
 
                     val mergedObjects = SmartObjectVocabulary.mergeSceneAndObjectLabels(
                         mlKitLabels = rawMlLabels,
-                        imageNetLabels = rawImageNetLabels
+                        imageNetLabels = rawImageNetLabels,
+                        animal = wholeAnimal,
+                        animalSpecificLabel = animalSpecificLabel
                     )
                     val now = System.currentTimeMillis()
 
@@ -718,7 +727,8 @@ class SmartRecognitionManager(
                             faceIndex = idx,
                             now = now,
                             clusters = inMemoryClusters,
-                            forbiddenPersonIds = usedPersonIdsInThisPhoto
+                            forbiddenPersonIds = usedPersonIdsInThisPhoto,
+                            wholePhotoAnimal = wholeAnimal
                         )
                         if (processed != null) {
                             acceptedFaces++
@@ -824,7 +834,8 @@ class SmartRecognitionManager(
         faceIndex: Int,
         now: Long,
         clusters: LinkedHashMap<String, MutableClusterState>,
-        forbiddenPersonIds: Set<String>
+        forbiddenPersonIds: Set<String>,
+        wholePhotoAnimal: AnimalTaxonomy.Analysis? = null
     ): DetectedFaceEntity? {
         val box = face.boundingBox
         val w = box.width().toFloat()
@@ -887,11 +898,16 @@ class SmartRecognitionManager(
                     TimeUnit.SECONDS
                 ).map { it.text to it.confidence }
             }.getOrDefault(emptyList())
-            val cropImageNetLabels = objectEngine.classify(
-                bitmap = verifyBitmap,
-                topK = 5,
-                minConfidence = 0.16f
-            )
+            val cropProbs = objectEngine.classifyProbabilities(verifyBitmap)
+            val cropImageNetLabels = cropProbs?.let {
+                objectEngine.topLabels(it, topK = 5, minConfidence = 0.16f)
+            }.orEmpty()
+            // Group-mass veto: catches monkeys / pets whose probability is spread over many
+            // look-alike classes so that no single class name would have tripped the keyword veto.
+            val cropAnimal = cropProbs?.let { AnimalTaxonomy.analyze(it) }
+            if (cropAnimal != null && AnimalTaxonomy.isNonHumanFace(cropAnimal, wholePhotoAnimal)) {
+                return null
+            }
             if (SmartObjectVocabulary.isNonHumanFaceCrop(cropMlLabels, cropImageNetLabels)) {
                 return null
             }
@@ -1658,7 +1674,7 @@ class SmartRecognitionManager(
         private const val KEY_AVATAR_CROP_VERSION = "smart_avatar_crop_version"
         private const val KEY_REJECTED_MERGE_PAIRS = "rejected_merge_pairs"
         private const val KEY_PRESERVED_PROFILES = "preserved_person_profiles_json"
-        private const val CURRENT_AI_INDEX_VERSION = 2
+        private const val CURRENT_AI_INDEX_VERSION = 3
         private const val CURRENT_AVATAR_CROP_VERSION = 2
         private const val MAX_SCAN_DIMENSION_PX = 768
         private const val ML_TIMEOUT_SEC = 10L

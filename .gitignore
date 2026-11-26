@@ -10,3 +10,7 @@
 .cxx
 app/build
 app/src/main/assets/credentials.json
+
+# Local emulator dev loop
+.dev-emulator-photos.txt
+.dev-emulator-installed.txt

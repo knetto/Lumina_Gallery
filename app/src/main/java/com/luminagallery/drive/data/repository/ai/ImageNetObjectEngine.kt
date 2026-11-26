@@ -104,6 +104,56 @@ class ImageNetObjectEngine(private val context: Context) {
     }
 
     /**
+     * Full 1000-class softmax for [bitmap] (center-crop, zero aspect distortion), or null if the
+     * model is unavailable. Feed it to [AnimalTaxonomy.analyze] for group-level reasoning.
+     */
+    fun classifyProbabilities(bitmap: Bitmap): FloatArray? {
+        if (!ensureInitialized()) return null
+        val interp = interpreter ?: return null
+        return synchronized(inferenceLock) {
+            runCatching {
+                val w = inputWidth
+                val h = inputHeight
+                val prepared = centerCropScale(bitmap, w, h)
+                try {
+                    val pixels = IntArray(w * h)
+                    prepared.getPixels(pixels, 0, w, 0, 0, w, h)
+                    runAndDequantize(interp, buildInputBuffer(pixels, w, h))
+                } finally {
+                    if (prepared !== bitmap) prepared.recycle()
+                }
+            }.getOrNull()
+        }
+    }
+
+    /**
+     * Top [topK] `(label, probability)` pairs from a softmax produced by [classifyProbabilities].
+     * With [excludeAnimals] every animal class is skipped (animals are labelled through
+     * [AnimalTaxonomy] group masses instead of single, easily-confused breed names).
+     */
+    fun topLabels(
+        probs: FloatArray,
+        topK: Int = 5,
+        minConfidence: Float = 0.22f,
+        excludeAnimals: Boolean = false
+    ): List<Pair<String, Float>> {
+        if (labels.isEmpty()) return emptyList()
+        val limit = minOf(probs.size, labels.size)
+        val scored = ArrayList<Pair<String, Float>>(topK * 2)
+        for (i in 0 until limit) {
+            val p = probs[i]
+            if (p < minConfidence) continue
+            if (excludeAnimals && AnimalTaxonomy.groupOf(i) != null) continue
+            scored.add(labels[i] to p)
+        }
+        scored.sortByDescending { it.second }
+        return if (scored.size > topK) scored.subList(0, topK).toList() else scored
+    }
+
+    /** Raw ImageNet label for a class index (e.g. `"macaque"`), or null. */
+    fun labelAt(index: Int): String? = labels.getOrNull(index)
+
+    /**
      * Classifies [bitmap] using center-crop scaling (zero aspect distortion) and returns the top
      * [topK] `(rawImageNetLabel, probability)` pairs meeting [minConfidence].
      */

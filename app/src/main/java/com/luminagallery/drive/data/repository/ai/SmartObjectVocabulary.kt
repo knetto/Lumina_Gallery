@@ -71,7 +71,9 @@ object SmartObjectVocabulary {
         "bear", "panda", "koala", "kangaroo", "elephant", "zebra", "giraffe", "hippo", "rhino",
         "horse", "pony", "donkey", "cow", "ox", "bison", "sheep", "ram", "goat", "pig", "hog",
         "deer", "elk", "moose", "monkey", "ape", "gorilla", "chimpanzee", "orangutan", "baboon",
-        "macaque", "gibbon", "lemur", "squirrel", "rabbit", "hare", "hamster", "guinea pig",
+        "macaque", "gibbon", "lemur", "titi", "capuchin", "marmoset", "guenon", "patas", "langur",
+        "colobus", "proboscis", "siamang", "indri", "madagascar cat", "howler", "primate",
+        "squirrel", "rabbit", "hare", "hamster", "guinea pig",
         "mouse", "rat", "hedgehog", "otter", "ferret", "weasel", "badger", "skunk", "raccoon",
         "sloth", "bat", "camel", "llama",
         // Reptiles, Fish, Insects
@@ -404,10 +406,20 @@ object SmartObjectVocabulary {
         imageNetLabels: List<Pair<String, Float>>,
         minMlKitConf: Float = 0.62f,
         minImageNetTopConf: Float = 0.26f,
-        minImageNetSecondaryConf: Float = 0.36f
+        minImageNetSecondaryConf: Float = 0.36f,
+        animal: AnimalTaxonomy.Analysis? = null,
+        animalSpecificLabel: String? = null
     ): MergedObjectResult {
         val display = LinkedHashSet<String>()
         val rawSearchExtras = LinkedHashSet<String>()
+
+        // 0. Animals from whole-softmax group masses (never from a single look-alike breed name).
+        if (animal != null) {
+            AnimalTaxonomy.displayLabels(animal).forEach { display.add(it) }
+            if (!animalSpecificLabel.isNullOrBlank() && AnimalTaxonomy.confidentGroup(animal) != null) {
+                rawSearchExtras.add(animalSpecificLabel.trim().lowercase(Locale.US))
+            }
+        }
 
         // 1. Specific ImageNet-1000 objects/animals FIRST so specific labels like "Parrot", "Pizza", "Owl" lead!
         val sortedNet = imageNetLabels.sortedByDescending { it.second }
@@ -415,6 +427,8 @@ object SmartObjectVocabulary {
             val threshold = if (idx == 0) minImageNetTopConf else minImageNetSecondaryConf
             if (conf < threshold) return@forEachIndexed
             val normalized = normalizeImageNetLabel(raw)
+            // When group masses are available, animal tags only come from step 0.
+            if (animal != null && normalized.any { it in ANIMAL_DISPLAY_TAGS }) return@forEachIndexed
             if (normalized.isNotEmpty()) {
                 normalized.forEach { display.add(it) }
                 rawSearchExtras.add(raw.trim().lowercase(Locale.US))
@@ -424,6 +438,7 @@ object SmartObjectVocabulary {
         // 2. High-level ML Kit scene/context labels (Beach, Sunset, Mountain, Food, Architecture, Wedding…)
         for (label in filterUsefulLabels(mlKitLabels, minConfidence = minMlKitConf)) {
             if (display.size >= 8) break
+            if (animal != null && !isMlKitAnimalLabelConsistent(label, animal)) continue
             display.add(label)
         }
 
@@ -444,7 +459,69 @@ object SmartObjectVocabulary {
         )
     }
 
+    private val ANIMAL_DISPLAY_TAGS: Set<String> = buildSet {
+        AnimalTaxonomy.Group.entries.forEach { add(it.displayLabel); addAll(it.extraLabels) }
+        addAll(
+            listOf(
+                "Parrot", "Pet", "Animal", "Owl", "Eagle", "Flamingo", "Peacock", "Toucan", "Penguin",
+                "Hummingbird", "Swan", "Duck", "Goose", "Pelican", "Ostrich", "Chicken", "Rooster", "Stork",
+                "Heron", "Lion", "Tiger", "Elephant", "Zebra", "Panda", "Bear", "Fox", "Wolf", "Squirrel",
+                "Rabbit", "Hamster", "Horse", "Shark", "Whale", "Butterfly", "Turtle", "Frog", "Lizard"
+            )
+        )
+        remove("Nature")
+    }
+
+    /**
+     * Cross-checks an ML Kit scene label against the ImageNet group masses: ML Kit is great at
+     * scenes but happily calls a monkey a "Dog" or "Bird". Animal labels survive only when the
+     * full-softmax evidence agrees.
+     */
+    internal fun isMlKitAnimalLabelConsistent(label: String, animal: AnimalTaxonomy.Analysis): Boolean {
+        val lower = label.trim().lowercase(Locale.US)
+        val group = AnimalTaxonomy.groupForMlKitLabel(lower)
+        if (group != null) {
+            val confident = AnimalTaxonomy.confidentGroup(animal, minMass = 0.30f, minLeadRatio = 1.5f)
+            if (confident != null) return confident == group
+            return animal.massOf(group) >= 0.25f && animal.massOf(group) >= animal.dominantMass * 0.75f
+        }
+        if (lower in AnimalTaxonomy.GENERIC_ANIMAL_LABELS) return animal.animalMass >= 0.35f
+        return true
+    }
+
+    /**
+     * Word-aware search matching for label tokens: exact word, or word prefix for queries of 4+
+     * characters ("hond" -> "honden"). Prevents "dog" matching "hotdog" or "cat" matching "catamaran".
+     */
+    fun tokensMatch(haystack: String?, query: String): Boolean {
+        if (haystack.isNullOrBlank()) return false
+        val q = query.trim().lowercase(Locale.US)
+        if (q.isEmpty()) return false
+        val lower = haystack.lowercase(Locale.US)
+        if (q.contains(' ')) {
+            return (" " + lower.replace(',', ' ') + " ").contains(" $q")
+        }
+        var start = -1
+        for (i in 0..lower.length) {
+            val inWord = i < lower.length && (lower[i].isLetterOrDigit() || lower[i] == '-' || lower[i] == '\'')
+            if (inWord) {
+                if (start < 0) start = i
+            } else if (start >= 0) {
+                val word = lower.substring(start, i)
+                if (word == q || (q.length >= 4 && word.startsWith(q))) return true
+                start = -1
+            }
+        }
+        return false
+    }
+
     private val SYNONYM_MAP: Map<String, List<String>> = mapOf(
+        "monkey" to listOf("monkeys", "aap", "apen", "aapje", "primate", "primaat", "ape", "animal", "dier", "zoo", "dierentuin", "wildlife"),
+        "reptile" to listOf("reptiel", "reptielen", "animal", "dier"),
+        "insect" to listOf("insecten", "bug", "beestje", "nature", "natuur"),
+        "rodent" to listOf("knaagdier", "knaagdieren", "animal", "dier"),
+        "wildcat" to listOf("roofkat", "lion", "leeuw", "tiger", "tijger", "leopard", "luipaard", "animal", "dier", "safari", "zoo", "dierentuin"),
+        "sealife" to listOf("zeedier", "ocean", "zee", "animal", "dier"),
         "parrot" to listOf("parrots", "papegaai", "papegaaien", "macaw", "ara", "cockatoo", "kaketoe", "lorikeet", "parakeet", "parkiet", "bird", "vogel", "pet", "huisdier", "animal", "dier"),
         "owl" to listOf("uil", "uilen", "bird", "vogel", "animal", "dier", "wildlife"),
         "eagle" to listOf("arend", "adelaar", "bird", "vogel", "animal", "dier", "wildlife"),
@@ -559,6 +636,12 @@ object SmartObjectVocabulary {
     )
 
     private val LABEL_TO_CATEGORY: Map<String, ObjectCategory> = mapOf(
+        "monkey" to ObjectCategory.PETS,
+        "reptile" to ObjectCategory.PETS,
+        "rodent" to ObjectCategory.PETS,
+        "wildcat" to ObjectCategory.PETS,
+        "sealife" to ObjectCategory.PETS,
+        "insect" to ObjectCategory.NATURE,
         "parrot" to ObjectCategory.PETS,
         "owl" to ObjectCategory.PETS,
         "eagle" to ObjectCategory.PETS,

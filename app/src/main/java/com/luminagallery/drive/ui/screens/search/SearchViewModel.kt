@@ -460,8 +460,9 @@ class SearchViewModel(
     ): Boolean {
         if (personNames != null && personNames.any { it.contains(token, ignoreCase = true) }) return true
         if (smart != null) {
-            if (smart.labelsCsv.contains(token, ignoreCase = true)) return true
-            if (smart.labelSearchTokens.contains(token, ignoreCase = true)) return true
+            // Word-aware: "dog" no longer matches "hotdog", "cat" no longer matches "catamaran".
+            if (com.luminagallery.drive.data.repository.ai.SmartObjectVocabulary.tokensMatch(smart.labelsCsv, token)) return true
+            if (com.luminagallery.drive.data.repository.ai.SmartObjectVocabulary.tokensMatch(smart.labelSearchTokens, token)) return true
             if (smart.faceCount > 0 && (
                     token.equals("people", ignoreCase = true) ||
                         token.equals("person", ignoreCase = true) ||
