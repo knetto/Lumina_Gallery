@@ -16,10 +16,13 @@ import com.luminagallery.drive.data.repository.CloudAlbumViewPref
 import com.luminagallery.drive.data.repository.CloudCustomAlbumCover
 import com.luminagallery.drive.data.repository.CloudHiddenAlbum
 import com.luminagallery.drive.data.repository.CloudMediaAnnotation
+import com.luminagallery.drive.data.repository.CloudPersonFaceAnchor
 import com.luminagallery.drive.data.repository.CloudPinnedRoot
 import com.luminagallery.drive.data.repository.CloudPreferencesPayload
 import com.luminagallery.drive.data.repository.CloudProfileSnapshot
 import com.luminagallery.drive.data.repository.CloudProfileSyncManager
+import com.luminagallery.drive.data.repository.CloudRejectedPersonPair
+import com.luminagallery.drive.data.repository.CloudSavedPerson
 import com.luminagallery.drive.data.repository.CollageLayoutMath
 import com.luminagallery.drive.data.repository.CollageLayoutMode
 import com.luminagallery.drive.data.repository.DriveMapper
@@ -735,5 +738,77 @@ class GalleryCoreLogicTest {
         )
         assertTrue(DriveMapper.isSupportedGalleryDto(driveMp2pMime))
         assertEquals(MediaType.VIDEO.name, DriveMapper.dtoToEntity(driveMp2pMime).mediaType)
+    }
+
+    @Test
+    fun cloudProfileSnapshotV3_roundTripsAndMergesSavedPeopleAndRejections() {
+        val codec = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+        val anchor1 = CloudPersonFaceAnchor(
+            itemId = "drive_p1",
+            isLocal = false,
+            bboxLeft = 0.1f,
+            bboxTop = 0.2f,
+            bboxRight = 0.4f,
+            bboxBottom = 0.5f,
+            originGroupId = "g1"
+        )
+        val anchor2 = CloudPersonFaceAnchor(
+            itemId = "local_42",
+            isLocal = true,
+            localFileName = "IMG_0042.jpg",
+            localRelativePath = "DCIM/Camera",
+            localSizeBytes = 2_400_000L,
+            bboxLeft = 0.2f,
+            bboxTop = 0.2f,
+            bboxRight = 0.5f,
+            bboxBottom = 0.6f,
+            originGroupId = "g2"
+        )
+        val localSnap = CloudProfileSnapshot(
+            savedPeople = listOf(
+                CloudSavedPerson(
+                    memoryId = "mem_alex",
+                    name = "Alex",
+                    isFavorite = true,
+                    isUserMerged = true,
+                    coverAnchor = anchor1,
+                    anchors = listOf(anchor1)
+                )
+            ),
+            savedPersonRejections = listOf(CloudRejectedPersonPair("mem_alex", "mem_other"))
+        )
+        val remoteSnap = CloudProfileSnapshot(
+            savedPeople = listOf(
+                CloudSavedPerson(
+                    memoryId = "mem_alex",
+                    name = "Alex",
+                    isFavorite = false,
+                    isUserMerged = true,
+                    anchors = listOf(anchor2)
+                ),
+                CloudSavedPerson(
+                    memoryId = "mem_mom",
+                    name = "Mom",
+                    anchors = listOf(anchor1)
+                )
+            ),
+            savedPersonRejections = listOf(CloudRejectedPersonPair("mem_other", "mem_alex"))
+        )
+
+        val decoded = codec.decodeFromString<CloudProfileSnapshot>(codec.encodeToString(localSnap))
+        assertEquals(localSnap, decoded)
+        assertEquals(localSnap.contentFingerprint(codec), decoded.contentFingerprint(codec))
+        assertNotEquals(
+            localSnap.contentFingerprint(codec),
+            localSnap.copy(savedPeople = listOf(localSnap.savedPeople.first().copy(name = "Alexander")))
+                .contentFingerprint(codec)
+        )
+
+        val merged = CloudProfileSyncManager.mergeSnapshots(localSnap, remoteSnap, preferLocalConflicts = true)
+        assertEquals(setOf("mem_alex", "mem_mom"), merged.savedPeople.map { it.memoryId }.toSet())
+        val mergedAlex = merged.savedPeople.first { it.memoryId == "mem_alex" }
+        assertTrue(mergedAlex.isFavorite)
+        assertEquals(setOf("drive_p1", "local_42"), mergedAlex.anchors.map { it.itemId }.toSet())
+        assertEquals(1, merged.savedPersonRejections.size)
     }
 }

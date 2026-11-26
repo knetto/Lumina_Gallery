@@ -6,6 +6,9 @@ import androidx.room.Upsert
 import com.luminagallery.drive.data.local.entity.DetectedFaceEntity
 import com.luminagallery.drive.data.local.entity.PersonClusterEntity
 import com.luminagallery.drive.data.local.entity.PhotoSmartIndexEntity
+import com.luminagallery.drive.data.local.entity.SavedPersonAnchorEntity
+import com.luminagallery.drive.data.local.entity.SavedPersonMemoryEntity
+import com.luminagallery.drive.data.local.entity.SavedRejectedMergeEntity
 import kotlinx.coroutines.flow.Flow
 
 data class IndexedItemStampRow(
@@ -55,6 +58,9 @@ interface SmartRecognitionDao {
 
     @Query("UPDATE person_clusters SET isFavorite = :favorite, updatedAtEpochMs = :updatedAt WHERE personId = :personId")
     suspend fun setPersonFavorite(personId: String, favorite: Boolean, updatedAt: Long)
+
+    @Query("UPDATE person_clusters SET memoryId = :memoryId, updatedAtEpochMs = :updatedAt WHERE personId = :personId")
+    suspend fun updatePersonMemoryId(personId: String, memoryId: String?, updatedAt: Long)
 
     @Query("DELETE FROM person_clusters WHERE personId IN (:personIds)")
     suspend fun deletePersons(personIds: List<String>)
@@ -141,4 +147,82 @@ interface SmartRecognitionDao {
 
     @Query("DELETE FROM photo_smart_index")
     suspend fun clearAllSmartIndex()
+
+    // Durable Saved Person Memory (survives AI detector/embedding/threshold rebuilds)
+    @Query("SELECT * FROM saved_person_memory ORDER BY updatedAtEpochMs DESC")
+    fun observeAllSavedPersonMemories(): Flow<List<SavedPersonMemoryEntity>>
+
+    @Query("SELECT * FROM saved_person_memory")
+    suspend fun getAllSavedPersonMemories(): List<SavedPersonMemoryEntity>
+
+    @Query("SELECT * FROM saved_person_memory WHERE memoryId = :memoryId LIMIT 1")
+    suspend fun getSavedPersonMemoryById(memoryId: String): SavedPersonMemoryEntity?
+
+    @Upsert
+    suspend fun upsertSavedPersonMemory(memory: SavedPersonMemoryEntity)
+
+    @Upsert
+    suspend fun upsertSavedPersonMemories(memories: List<SavedPersonMemoryEntity>)
+
+    @Query("DELETE FROM saved_person_memory WHERE memoryId IN (:memoryIds)")
+    suspend fun deleteSavedPersonMemories(memoryIds: List<String>)
+
+    @Query("DELETE FROM saved_person_memory")
+    suspend fun clearAllSavedPersonMemories()
+
+    @Query("UPDATE saved_person_memory SET coverItemId = NULL, coverBboxLeft = NULL, coverBboxTop = NULL, coverBboxRight = NULL, coverBboxBottom = NULL, updatedAtEpochMs = :updatedAt WHERE coverItemId IN (:itemIds)")
+    suspend fun clearSavedCoverForItems(itemIds: List<String>, updatedAt: Long)
+
+    // Durable face-location anchors
+    @Query("SELECT * FROM saved_person_anchors")
+    fun observeAllSavedPersonAnchors(): Flow<List<SavedPersonAnchorEntity>>
+
+    @Query("SELECT * FROM saved_person_anchors")
+    suspend fun getAllSavedPersonAnchors(): List<SavedPersonAnchorEntity>
+
+    @Query("SELECT * FROM saved_person_anchors WHERE memoryId = :memoryId")
+    suspend fun getAnchorsForMemory(memoryId: String): List<SavedPersonAnchorEntity>
+
+    @Query("SELECT * FROM saved_person_anchors WHERE memoryId IN (:memoryIds)")
+    suspend fun getAnchorsForMemories(memoryIds: List<String>): List<SavedPersonAnchorEntity>
+
+    @Upsert
+    suspend fun upsertSavedPersonAnchors(anchors: List<SavedPersonAnchorEntity>)
+
+    @Query("DELETE FROM saved_person_anchors WHERE anchorId IN (:anchorIds)")
+    suspend fun deleteAnchorsByIds(anchorIds: List<String>)
+
+    @Query("DELETE FROM saved_person_anchors WHERE memoryId = :memoryId")
+    suspend fun deleteAnchorsForMemory(memoryId: String)
+
+    @Query("DELETE FROM saved_person_anchors WHERE memoryId IN (:memoryIds)")
+    suspend fun deleteAnchorsForMemories(memoryIds: List<String>)
+
+    @Query("DELETE FROM saved_person_anchors WHERE itemId IN (:itemIds)")
+    suspend fun deleteAnchorsForItems(itemIds: List<String>)
+
+    @Query("DELETE FROM saved_person_anchors")
+    suspend fun clearAllSavedPersonAnchors()
+
+    // Durable "Not the same person" rejections
+    @Query("SELECT * FROM saved_rejected_merges")
+    fun observeAllRejectedMerges(): Flow<List<SavedRejectedMergeEntity>>
+
+    @Query("SELECT * FROM saved_rejected_merges")
+    suspend fun getAllRejectedMerges(): List<SavedRejectedMergeEntity>
+
+    @Upsert
+    suspend fun upsertRejectedMerge(entry: SavedRejectedMergeEntity)
+
+    @Upsert
+    suspend fun upsertRejectedMerges(entries: List<SavedRejectedMergeEntity>)
+
+    @Query("DELETE FROM saved_rejected_merges WHERE pairKey = :pairKey")
+    suspend fun deleteRejectedMergeByPairKey(pairKey: String)
+
+    @Query("DELETE FROM saved_rejected_merges WHERE memoryIdA = :memoryId OR memoryIdB = :memoryId")
+    suspend fun deleteRejectedMergesForMemory(memoryId: String)
+
+    @Query("DELETE FROM saved_rejected_merges")
+    suspend fun clearAllRejectedMerges()
 }

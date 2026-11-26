@@ -30,6 +30,11 @@ import com.luminagallery.drive.data.local.dao.LightFaceRow
 import com.luminagallery.drive.data.local.entity.DetectedFaceEntity
 import com.luminagallery.drive.data.local.entity.PersonClusterEntity
 import com.luminagallery.drive.data.local.entity.PhotoSmartIndexEntity
+import com.luminagallery.drive.data.local.entity.SavedPersonAnchorEntity
+import com.luminagallery.drive.data.local.entity.SavedPersonMemoryEntity
+import com.luminagallery.drive.data.local.entity.SavedRejectedMergeEntity
+import com.luminagallery.drive.data.repository.ai.PersonMemoryEngine.coverBoxOrNull
+import com.luminagallery.drive.data.repository.ai.PersonMemoryEngine.toFaceBox
 import com.luminagallery.drive.data.remote.DriveApiService
 import com.luminagallery.drive.data.remote.DriveConstants
 import com.luminagallery.drive.data.remote.NetworkMonitor
@@ -56,7 +61,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -159,7 +163,20 @@ class SmartRecognitionManager(
     private val _rejectedMergePairs = MutableStateFlow(
         metaPrefs.getStringSet(KEY_REJECTED_MERGE_PAIRS, emptySet())?.toSet().orEmpty()
     )
-    val rejectedMergePairsFlow: StateFlow<Set<String>> = _rejectedMergePairs.asStateFlow()
+
+    private val managerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    val rejectedMergePairsFlow: StateFlow<Set<String>> = combine(
+        _rejectedMergePairs,
+        smartDao.observeAllRejectedMerges()
+    ) { legacyPairs, savedPairs ->
+        if (savedPairs.isEmpty()) legacyPairs
+        else legacyPairs + savedPairs.map { it.pairKey }
+    }.stateIn(
+        scope = managerScope,
+        started = SharingStarted.Lazily,
+        initialValue = _rejectedMergePairs.value
+    )
 
     private val faceDetector by lazy {
         val options = FaceDetectorOptions.Builder()
@@ -184,8 +201,6 @@ class SmartRecognitionManager(
             .build()
         ImageLabeling.getClient(options)
     }
-
-    private val managerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     val allPersonsFlow: StateFlow<List<PersonClusterEntity>> = smartDao.observeAllPersons()
         .stateIn(
@@ -216,6 +231,7 @@ class SmartRecognitionManager(
 
     fun warmCaches() {
         managerScope.launch {
+            launch(Dispatchers.IO) { runCatching { ensurePersonMemoryMigrated() } }
             launch { allPersonsFlow.collect {} }
             launch { allActiveLightFacesFlow.collect {} }
             launch { smartIndexMapFlow.collect {} }
@@ -286,6 +302,7 @@ class SmartRecognitionManager(
 
         if (scanMutex.tryLock()) {
             try {
+                ensurePersonMemoryMigrated()
                 ensureAiIndexVersionCurrent()
                 // Re-check inside lock
                 smartDao.getSmartIndexForPhoto(item.id)?.let { cached ->
@@ -334,6 +351,7 @@ class SmartRecognitionManager(
                         return@withContext mergedObjects.displayLabels
                     }
                     val now = System.currentTimeMillis()
+                    val savedMemoryLookup = loadSavedMemoryLookup()
                     val inMemoryClusters = smartDao.getAllPersons()
                         .associateByTo(LinkedHashMap()) { it.personId }
                         .mapValuesTo(LinkedHashMap()) { (_, entity) ->
@@ -354,7 +372,9 @@ class SmartRecognitionManager(
                             now = now,
                             clusters = inMemoryClusters,
                             forbiddenPersonIds = usedPersonIds,
-                            wholePhotoAnimal = wholeAnimal
+                            wholePhotoAnimal = wholeAnimal,
+                            savedMemoryLookup = savedMemoryLookup,
+                            detectedFacesInPhoto = detectedFaces.size
                         )
                         if (processed != null) {
                             processed.personId?.let { pid ->
@@ -428,20 +448,49 @@ class SmartRecognitionManager(
         val updated = _rejectedMergePairs.value + key
         _rejectedMergePairs.value = updated
         metaPrefs.edit().putStringSet(KEY_REJECTED_MERGE_PAIRS, updated).apply()
+
+        // Persist durably by stable memory IDs so "Not the same person" survives AI rebuilds!
+        managerScope.launch(Dispatchers.IO) {
+            runCatching {
+                val now = System.currentTimeMillis()
+                database.withTransaction {
+                    val memA = ensureMemoryForPersonLocked(personId = personIdA, now = now) ?: return@withTransaction
+                    val memB = ensureMemoryForPersonLocked(personId = personIdB, now = now) ?: return@withTransaction
+                    if (memA.memoryId != memB.memoryId) {
+                        val memPairKey = FaceClusteringEngine.canonicalPairKey(memA.memoryId, memB.memoryId)
+                        smartDao.upsertRejectedMerge(
+                            SavedRejectedMergeEntity(
+                                pairKey = memPairKey,
+                                memoryIdA = minOf(memA.memoryId, memB.memoryId),
+                                memoryIdB = maxOf(memA.memoryId, memB.memoryId),
+                                createdAtEpochMs = now
+                            )
+                        )
+                    }
+                }
+            }
+        }
     }
 
     /**
      * Clears all cached People clusters, face crops, and object tags so the library re-scans
-     * cleanly from scratch — automatically preserving user-assigned names & pinned favorites so
-     * they re-attach to the rebuilt clusters by photo overlap!
+     * cleanly from scratch — while keeping durable [SavedPersonMemoryEntity] names, user-combined
+     * groups, favorites, hidden states, custom covers, exclusions, and "Not the same" rejections
+     * completely intact in SQLite!
      */
     suspend fun resetAllIndexData(preserveNames: Boolean = true) = withContext(Dispatchers.IO) {
         pauseRequested = true
         scanMutex.lock()
         try {
+            ensurePersonMemoryMigrated()
             if (preserveNames) {
-                snapshotNamedProfilesBeforeReset()
+                snapshotActiveRememberedClustersIntoMemory()
             } else {
+                database.withTransaction {
+                    smartDao.clearAllSavedPersonMemories()
+                    smartDao.clearAllSavedPersonAnchors()
+                    smartDao.clearAllRejectedMerges()
+                }
                 metaPrefs.edit().remove(KEY_PRESERVED_PROFILES).apply()
             }
             database.withTransaction {
@@ -462,102 +511,361 @@ class SmartRecognitionManager(
         }
     }
 
+    /**
+     * Public hook (e.g., after Cloud Profile restore) to immediately apply durable saved names,
+     * favorites, hidden states, custom covers, and combined groups onto existing scanned clusters.
+     */
+    suspend fun reconcileSavedMemoriesNow() = withContext(Dispatchers.IO) {
+        scanMutex.lock()
+        try {
+            ensurePersonMemoryMigrated()
+            reconcileSavedPersonMemoriesLocked()
+        } finally {
+            scanMutex.unlock()
+        }
+    }
+
     private suspend fun ensureAiIndexVersionCurrent() {
         val savedVersion = metaPrefs.getInt(KEY_AI_INDEX_VERSION, 0)
         if (savedVersion >= CURRENT_AI_INDEX_VERSION) return
-        snapshotNamedProfilesBeforeReset()
+        ensurePersonMemoryMigrated()
+        snapshotActiveRememberedClustersIntoMemory()
         database.withTransaction {
             smartDao.clearAllFaces()
             smartDao.clearAllPersons()
             smartDao.clearAllSmartIndex()
         }
         faceEngine.clearAllCropFiles()
+        _rejectedMergePairs.value = emptySet()
         metaPrefs.edit()
+            .remove(KEY_REJECTED_MERGE_PAIRS)
             .putInt(KEY_AI_INDEX_VERSION, CURRENT_AI_INDEX_VERSION)
             .putInt(KEY_AVATAR_CROP_VERSION, CURRENT_AVATAR_CROP_VERSION)
             .apply()
     }
 
-    private suspend fun snapshotNamedProfilesBeforeReset() {
-        val persons = smartDao.getAllPersons().filter { it.name.isNotBlank() || it.isFavorite }
-        if (persons.isEmpty()) return
-        val dtos = persons.mapNotNull { person ->
-            val photoIds = smartDao.getFacesForPerson(person.personId)
-                .map { it.itemId }
-                .distinct()
-                .take(80)
-            if (photoIds.isEmpty()) null
-            else SavedPreservedProfileDto(
-                name = person.name,
-                isFavorite = person.isFavorite,
-                photoIds = photoIds
-            )
-        }
-        if (dtos.isNotEmpty()) {
-            val serialized = runCatching { profileJson.encodeToString(dtos) }.getOrNull()
-            if (serialized != null) {
-                metaPrefs.edit().putString(KEY_PRESERVED_PROFILES, serialized).apply()
-            }
-        }
-    }
-
-    private suspend fun applyPreservedPersonProfiles() {
-        val raw = metaPrefs.getString(KEY_PRESERVED_PROFILES, null) ?: return
-        val dtos = runCatching {
-            profileJson.decodeFromString<List<SavedPreservedProfileDto>>(raw)
-        }.getOrDefault(emptyList())
-        if (dtos.isEmpty()) {
-            metaPrefs.edit().remove(KEY_PRESERVED_PROFILES).apply()
-            return
-        }
-
-        val allPersons = smartDao.getAllPersons().filterNot { it.isHidden }
-        if (allPersons.isEmpty()) return
-        val candidates = allPersons.map { p ->
-            val faces = smartDao.getFacesForPerson(p.personId)
-            FaceClusteringEngine.ClusterCandidate(
-                personId = p.personId,
-                centroid = FaceClusteringEngine.decodeEmbedding(p.centroidBlob),
-                sampleCount = faces.size.coerceAtLeast(p.sampleCount),
-                isNamed = p.name.isNotBlank(),
-                photoIds = faces.mapTo(HashSet(faces.size)) { it.itemId }
-            )
-        }
-        val profiles = dtos.map {
-            FaceClusteringEngine.PreservedPersonProfile(
-                name = it.name,
-                isFavorite = it.isFavorite,
-                photoIds = it.photoIds.toSet()
-            )
-        }
-        val restored = FaceClusteringEngine.matchPreservedProfiles(profiles, candidates)
-        if (restored.isEmpty()) return
-
-        val matchedProfileNames = HashSet<String>()
+    /**
+     * One-time migration moving any legacy `KEY_PRESERVED_PROFILES` JSON and any pre-existing
+     * named/favorited/hidden `person_clusters` into the durable Room `saved_person_memory` +
+     * `saved_person_anchors` tables. Safe & idempotent.
+     */
+    private suspend fun ensurePersonMemoryMigrated() {
+        if (metaPrefs.getInt(KEY_PERSON_MEMORY_MIGRATED, 0) >= CURRENT_PERSON_MEMORY_VERSION) return
         val now = System.currentTimeMillis()
         database.withTransaction {
-            for (match in restored) {
-                val target = smartDao.getPersonById(match.personId) ?: continue
-                smartDao.upsertPerson(
-                    target.copy(
-                        name = match.profile.name.ifBlank { target.name },
-                        isFavorite = target.isFavorite || match.profile.isFavorite,
+            val existingMemories = smartDao.getAllSavedPersonMemories()
+            val memoryByLowerName = existingMemories
+                .filter { it.name.isNotBlank() }
+                .associateByTo(HashMap()) { it.name.trim().lowercase(Locale.US) }
+
+            // 1. Migrate legacy SharedPreferences preserved profiles (if any exist)
+            val legacyRaw = metaPrefs.getString(KEY_PRESERVED_PROFILES, null)
+            if (!legacyRaw.isNullOrBlank()) {
+                val legacyDtos = runCatching {
+                    profileJson.decodeFromString<List<SavedPreservedProfileDto>>(legacyRaw)
+                }.getOrDefault(emptyList())
+                for (dto in legacyDtos) {
+                    val cleanName = dto.name.trim()
+                    if (cleanName.isEmpty() && !dto.isFavorite) continue
+                    val existing = cleanName.takeIf { it.isNotEmpty() }
+                        ?.let { memoryByLowerName[it.lowercase(Locale.US)] }
+                    val memId = existing?.memoryId ?: newMemoryId()
+                    val mergedMem = (existing ?: SavedPersonMemoryEntity(
+                        memoryId = memId,
+                        name = cleanName,
+                        isFavorite = dto.isFavorite,
+                        updatedAtEpochMs = now
+                    )).copy(
+                        name = cleanName.ifBlank { existing?.name.orEmpty() },
+                        isFavorite = (existing?.isFavorite == true) || dto.isFavorite,
                         updatedAtEpochMs = now
                     )
+                    smartDao.upsertSavedPersonMemory(mergedMem)
+                    if (cleanName.isNotEmpty()) {
+                        memoryByLowerName[cleanName.lowercase(Locale.US)] = mergedMem
+                    }
+                    val legacyAnchors = dto.photoIds.distinct().map { itemId ->
+                        SavedPersonAnchorEntity(
+                            anchorId = newAnchorId(),
+                            memoryId = memId,
+                            itemId = itemId,
+                            bboxLeft = 0f,
+                            bboxTop = 0f,
+                            bboxRight = 1f,
+                            bboxBottom = 1f,
+                            originGroupId = PersonMemoryEngine.LEGACY_ORIGIN_GROUP,
+                            isUserAssigned = false,
+                            isExcluded = false,
+                            qualityScore = 0.2f,
+                            updatedAtEpochMs = now
+                        )
+                    }
+                    if (legacyAnchors.isNotEmpty()) {
+                        mergeAnchorsForMemoryLocked(memId, mergedMem, legacyAnchors)
+                    }
+                }
+            }
+
+            // 2. Capture any pre-existing named/favorited/hidden person_clusters with exact face boxes
+            val unlinkedPersons = smartDao.getAllPersons().filter { person ->
+                person.memoryId == null && (person.name.isNotBlank() || person.isFavorite || person.isHidden)
+            }
+            for (person in unlinkedPersons) {
+                ensureMemoryForPersonLocked(
+                    personId = person.personId,
+                    overrideName = person.name.trim(),
+                    overrideFavorite = person.isFavorite,
+                    overrideHidden = person.isHidden,
+                    now = now
                 )
-                matchedProfileNames.add(match.profile.name)
             }
         }
+        metaPrefs.edit()
+            .remove(KEY_PRESERVED_PROFILES)
+            .putInt(KEY_PERSON_MEMORY_MIGRATED, CURRENT_PERSON_MEMORY_VERSION)
+            .apply()
+    }
 
-        val remainingDtos = dtos.filterNot { it.name in matchedProfileNames }
-        if (remainingDtos.isEmpty()) {
-            metaPrefs.edit().remove(KEY_PRESERVED_PROFILES).apply()
-        } else {
-            runCatching { profileJson.encodeToString(remainingDtos) }.getOrNull()?.let { updated ->
-                metaPrefs.edit().putString(KEY_PRESERVED_PROFILES, updated).apply()
+    /**
+     * Merges any newly-scanned faces belonging to already-remembered clusters into their durable
+     * `saved_person_anchors` right before an AI rebuild—strictly additive so anchors from photos
+     * not yet rescanned in an earlier partial rebuild are NEVER lost.
+     */
+    private suspend fun snapshotActiveRememberedClustersIntoMemory() {
+        val now = System.currentTimeMillis()
+        database.withTransaction {
+            val persons = smartDao.getAllPersons().filter {
+                !it.memoryId.isNullOrBlank() || it.name.isNotBlank() || it.isFavorite || it.isHidden
+            }
+            for (person in persons) {
+                ensureMemoryForPersonLocked(
+                    personId = person.personId,
+                    now = now
+                )
             }
         }
     }
+
+    private suspend fun loadSavedMemoryLookup(): SavedMemoryLookup {
+        val memories = smartDao.getAllSavedPersonMemories()
+        if (memories.isEmpty()) return SavedMemoryLookup.EMPTY
+        val anchors = smartDao.getAllSavedPersonAnchors()
+        return SavedMemoryLookup(
+            memoriesById = memories.associateBy { it.memoryId },
+            anchorsByItemId = anchors.groupBy { it.itemId }
+        )
+    }
+
+    private suspend fun getAllEffectiveRejectedPairKeys(): Set<String> {
+        val saved = smartDao.getAllRejectedMerges()
+        if (saved.isEmpty()) return _rejectedMergePairs.value
+        return _rejectedMergePairs.value + saved.map { it.pairKey }
+    }
+
+    private suspend fun reconcileSavedPersonMemoriesLocked() {
+        val memories = smartDao.getAllSavedPersonMemories()
+        if (memories.isEmpty()) return
+        val anchors = smartDao.getAllSavedPersonAnchors()
+        val persons = smartDao.getAllPersons()
+        if (persons.isEmpty()) return
+        val activeFaces = smartDao.getAllActiveFacesSync()
+
+        val facesByPerson = activeFaces.groupBy { it.personId }
+        val clusterSnapshots = persons.map { p ->
+            val pFaces = facesByPerson[p.personId].orEmpty()
+            PersonMemoryEngine.ActiveClusterSnapshot(
+                personId = p.personId,
+                memoryId = p.memoryId,
+                name = p.name,
+                isFavorite = p.isFavorite,
+                isHidden = p.isHidden,
+                coverFaceId = p.coverFaceId,
+                coverPhotoId = p.coverPhotoId,
+                sampleCount = pFaces.size.coerceAtLeast(p.sampleCount),
+                photoIds = pFaces.mapTo(HashSet(pFaces.size)) { it.itemId }
+            )
+        }
+        val faceSnapshots = activeFaces.mapNotNull { f ->
+            val pid = f.personId ?: return@mapNotNull null
+            PersonMemoryEngine.ActiveFaceSnapshot(
+                faceId = f.faceId,
+                itemId = f.itemId,
+                personId = pid,
+                box = PersonMemoryEngine.FaceBox(f.bboxLeft, f.bboxTop, f.bboxRight, f.bboxBottom),
+                qualityScore = f.qualityScore,
+                cropPath = f.cropPath
+            )
+        }
+
+        val plan = PersonMemoryEngine.planReconciliation(
+            memories = memories,
+            anchors = anchors,
+            clusters = clusterSnapshots,
+            faces = faceSnapshots
+        )
+        if (plan.links.isEmpty() && plan.merges.isEmpty() && plan.coverRestores.isEmpty()) return
+
+        val now = System.currentTimeMillis()
+        if (plan.links.isNotEmpty()) {
+            database.withTransaction {
+                for (link in plan.links) {
+                    val target = smartDao.getPersonById(link.personId) ?: continue
+                    smartDao.upsertPerson(
+                        target.copy(
+                            memoryId = link.memory.memoryId,
+                            name = link.memory.name.ifBlank { target.name },
+                            isFavorite = target.isFavorite || link.memory.isFavorite,
+                            isHidden = target.isHidden || link.memory.isHidden,
+                            updatedAtEpochMs = now
+                        )
+                    )
+                }
+            }
+        }
+
+        // Automatically re-combine split clusters belonging to the same saved memoryId!
+        for (merge in plan.merges) {
+            mergePersons(
+                targetPersonId = merge.targetPersonId,
+                sourcePersonIds = listOf(merge.sourcePersonId),
+                isUserInitiated = false
+            )
+        }
+
+        if (plan.coverRestores.isNotEmpty()) {
+            database.withTransaction {
+                for (cover in plan.coverRestores) {
+                    val person = smartDao.getPersonById(cover.personId) ?: continue
+                    smartDao.upsertPerson(
+                        person.copy(
+                            coverFaceId = cover.faceId,
+                            coverPhotoId = cover.itemId,
+                            coverCropPath = cover.cropPath ?: person.coverCropPath,
+                            updatedAtEpochMs = now
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    private suspend fun ensureMemoryForPersonLocked(
+        personId: String,
+        markUserMerged: Boolean = false,
+        overrideName: String? = null,
+        overrideFavorite: Boolean? = null,
+        overrideHidden: Boolean? = null,
+        overrideCoverFace: DetectedFaceEntity? = null,
+        extraAnchors: List<SavedPersonAnchorEntity> = emptyList(),
+        now: Long = System.currentTimeMillis()
+    ): SavedPersonMemoryEntity? {
+        val person = smartDao.getPersonById(personId) ?: return null
+        val memId = person.memoryId?.takeIf { it.isNotBlank() } ?: newMemoryId()
+        val existingMem = smartDao.getSavedPersonMemoryById(memId)
+
+        val resolvedName = overrideName ?: person.name.trim().ifBlank { existingMem?.name.orEmpty() }
+        val resolvedFavorite = overrideFavorite ?: (person.isFavorite || existingMem?.isFavorite == true)
+        val resolvedHidden = overrideHidden ?: person.isHidden
+        val resolvedCoverItem = overrideCoverFace?.itemId ?: existingMem?.coverItemId
+        val resolvedCoverL = overrideCoverFace?.bboxLeft ?: existingMem?.coverBboxLeft
+        val resolvedCoverT = overrideCoverFace?.bboxTop ?: existingMem?.coverBboxTop
+        val resolvedCoverR = overrideCoverFace?.bboxRight ?: existingMem?.coverBboxRight
+        val resolvedCoverB = overrideCoverFace?.bboxBottom ?: existingMem?.coverBboxBottom
+
+        val updatedMem = SavedPersonMemoryEntity(
+            memoryId = memId,
+            name = resolvedName,
+            isFavorite = resolvedFavorite,
+            isHidden = resolvedHidden,
+            isUserMerged = markUserMerged || (existingMem?.isUserMerged == true),
+            coverItemId = resolvedCoverItem,
+            coverBboxLeft = resolvedCoverL,
+            coverBboxTop = resolvedCoverT,
+            coverBboxRight = resolvedCoverR,
+            coverBboxBottom = resolvedCoverB,
+            updatedAtEpochMs = now
+        )
+        smartDao.upsertSavedPersonMemory(updatedMem)
+        if (person.memoryId != memId) {
+            smartDao.updatePersonMemoryId(personId, memId, now)
+        }
+
+        val currentFaces = smartDao.getFacesForPerson(personId)
+        val faceAnchors = currentFaces.map { face ->
+            face.toSavedAnchor(
+                memoryId = memId,
+                originGroupId = person.personId,
+                isUserAssigned = overrideCoverFace != null && face.faceId == overrideCoverFace.faceId,
+                isExcluded = false,
+                now = now
+            )
+        }
+        val combinedNew = faceAnchors + extraAnchors
+        if (combinedNew.isNotEmpty()) {
+            mergeAnchorsForMemoryLocked(memId, updatedMem, combinedNew)
+        }
+        return updatedMem
+    }
+
+    private suspend fun mergeAnchorsForMemoryLocked(
+        memoryId: String,
+        memory: SavedPersonMemoryEntity,
+        incomingAnchors: List<SavedPersonAnchorEntity>
+    ) {
+        val existing = smartDao.getAnchorsForMemory(memoryId)
+        val pruned = PersonMemoryEngine.pruneAndDeduplicateAnchors(
+            anchors = existing + incomingAnchors,
+            coverItemId = memory.coverItemId,
+            coverBox = memory.coverBoxOrNull()
+        )
+        smartDao.deleteAnchorsForMemory(memoryId)
+        if (pruned.isNotEmpty()) {
+            smartDao.upsertSavedPersonAnchors(pruned)
+        }
+    }
+
+    private suspend fun pruneMemoryIfNoUserStateLocked(
+        memoryId: String,
+        personId: String?,
+        now: Long
+    ) {
+        val memory = smartDao.getSavedPersonMemoryById(memoryId) ?: return
+        val hasExcluded = smartDao.getAnchorsForMemory(memoryId).any { it.isExcluded }
+        val hasRejected = smartDao.getAllRejectedMerges().any {
+            it.memoryIdA == memoryId || it.memoryIdB == memoryId
+        }
+        if (!PersonMemoryEngine.hasMeaningfulUserState(memory, hasExcluded, hasRejected)) {
+            smartDao.deleteAnchorsForMemory(memoryId)
+            smartDao.deleteSavedPersonMemories(listOf(memoryId))
+            if (personId != null) {
+                smartDao.updatePersonMemoryId(personId, null, now)
+            }
+        }
+    }
+
+    private fun DetectedFaceEntity.toSavedAnchor(
+        memoryId: String,
+        originGroupId: String,
+        isUserAssigned: Boolean,
+        isExcluded: Boolean,
+        now: Long
+    ): SavedPersonAnchorEntity = SavedPersonAnchorEntity(
+        anchorId = newAnchorId(),
+        memoryId = memoryId,
+        itemId = itemId,
+        bboxLeft = bboxLeft,
+        bboxTop = bboxTop,
+        bboxRight = bboxRight,
+        bboxBottom = bboxBottom,
+        originGroupId = originGroupId,
+        isUserAssigned = isUserAssigned,
+        isExcluded = isExcluded,
+        qualityScore = qualityScore,
+        updatedAtEpochMs = now
+    )
+
+    private fun newMemoryId(): String = "mem_${UUID.randomUUID().toString().take(12)}"
+    private fun newAnchorId(): String = "anc_${UUID.randomUUID().toString().take(16)}"
 
     /**
      * Observes privacy-filtered [PersonSummary] items computed exclusively from [visibleItemIdsFlow]
@@ -639,6 +947,7 @@ class SmartRecognitionManager(
         if (!scanMutex.tryLock()) return@withContext ScanRunOutcome.ALREADY_BUSY
         pauseRequested = false
         try {
+            ensurePersonMemoryMigrated()
             ensureAiIndexVersionCurrent()
 
             val blockedFolderIds = computeBlockedFolderIdsFromDb()
@@ -709,6 +1018,7 @@ class SmartRecognitionManager(
             }
 
             if (unindexedAll.isEmpty()) {
+                runCatching { reconcileSavedPersonMemoriesLocked() }
                 val doneProgress = SmartIndexProgress(
                     isIndexing = false,
                     scannedInRun = 0,
@@ -775,6 +1085,7 @@ class SmartRecognitionManager(
                 return@withContext ScanRunOutcome.WAITING_FOR_WIFI
             }
 
+            val savedMemoryLookup = loadSavedMemoryLookup()
             val inMemoryClusters = smartDao.getAllPersons()
                 .associateByTo(LinkedHashMap()) { it.personId }
                 .mapValuesTo(LinkedHashMap()) { (_, entity) ->
@@ -968,7 +1279,9 @@ class SmartRecognitionManager(
                             now = now,
                             clusters = inMemoryClusters,
                             forbiddenPersonIds = usedPersonIdsInThisPhoto,
-                            wholePhotoAnimal = wholeAnimal
+                            wholePhotoAnimal = wholeAnimal,
+                            savedMemoryLookup = savedMemoryLookup,
+                            detectedFacesInPhoto = detectedFaces.size
                         )
                         if (processed != null) {
                             acceptedFaces++
@@ -997,10 +1310,19 @@ class SmartRecognitionManager(
                     if (pendingIndexBatch.size >= BATCH_WRITE_SIZE) {
                         flushPending()
                     }
-                    // Periodically merge high-confidence split clusters during very large 30k runs
+                    // Periodically consolidate split clusters & re-apply saved memories during large 30k runs
                     if (newlyIndexedCount % PERIODIC_CONSOLIDATE_INTERVAL == 0) {
                         flushPending()
+                        runCatching { reconcileSavedPersonMemoriesLocked() }
                         runCatching { consolidateSplitClusters() }
+                        // Reload in-memory clusters so absorbed clusters never get resurrected
+                        inMemoryClusters.clear()
+                        for (entity in smartDao.getAllPersons()) {
+                            inMemoryClusters[entity.personId] = MutableClusterState(
+                                entity = entity,
+                                centroid = FaceClusteringEngine.decodeEmbedding(entity.centroidBlob)
+                            )
+                        }
                     }
                     val stepProgress = SmartIndexProgress(
                         isIndexing = true,
@@ -1025,10 +1347,10 @@ class SmartRecognitionManager(
 
             flushPending()
 
-            // Post-scan high-confidence cluster consolidation & preserved-name restoration
+            // Post-scan durable memory restoration (names, combines, covers) & split cluster consolidation
             if (newlyIndexedCount > 0) {
+                runCatching { reconcileSavedPersonMemoriesLocked() }
                 runCatching { consolidateSplitClusters() }
-                runCatching { applyPreservedPersonProfiles() }
             }
 
             val finalRemaining = (unindexedAll.size - newlyIndexedCount).coerceAtLeast(0)
@@ -1075,7 +1397,9 @@ class SmartRecognitionManager(
         now: Long,
         clusters: LinkedHashMap<String, MutableClusterState>,
         forbiddenPersonIds: Set<String>,
-        wholePhotoAnimal: AnimalTaxonomy.Analysis? = null
+        wholePhotoAnimal: AnimalTaxonomy.Analysis? = null,
+        savedMemoryLookup: SavedMemoryLookup = SavedMemoryLookup.EMPTY,
+        detectedFacesInPhoto: Int = 1
     ): DetectedFaceEntity? {
         val box = face.boundingBox
         val w = box.width().toFloat()
@@ -1188,61 +1512,152 @@ class SmartRecognitionManager(
             smilingProb = face.smilingProbability
         )
 
-        val candidates = clusters.values.map {
-            FaceClusteringEngine.ClusterCandidate(
-                personId = it.entity.personId,
-                centroid = it.centroid,
-                sampleCount = it.entity.sampleCount,
-                isNamed = it.entity.name.isNotBlank()
-            )
-        }
-        val match = FaceClusteringEngine.findBestMatchingCluster(
-            embedding = embedding,
-            candidates = candidates,
-            forbiddenPersonIds = forbiddenPersonIds
-        )
+        val imgW = bitmap.width.toFloat().coerceAtLeast(1f)
+        val imgH = bitmap.height.toFloat().coerceAtLeast(1f)
+        val normLeft = (box.left / imgW).coerceIn(0f, 1f)
+        val normTop = (box.top / imgH).coerceIn(0f, 1f)
+        val normRight = (box.right / imgW).coerceIn(0f, 1f)
+        val normBottom = (box.bottom / imgH).coerceIn(0f, 1f)
+        val detectedBox = PersonMemoryEngine.FaceBox(normLeft, normTop, normRight, normBottom)
+        val singleFaceInPhoto = detectedFacesInPhoto <= 1
 
-        val assignedPersonId = if (match != null) {
-            val state = clusters[match.personId]
-            if (state != null) {
-                val updatedCentroid = FaceClusteringEngine.updateRunningCentroid(
-                    oldCentroid = state.centroid,
-                    oldCount = state.entity.sampleCount,
-                    newEmbedding = embedding
-                )
-                val shouldUpgradeCover = state.entity.coverCropPath.isNullOrBlank() ||
-                    (cropPath != null && quality > state.bestCoverQuality + 0.04f)
-                state.centroid = updatedCentroid
-                if (shouldUpgradeCover && cropPath != null) {
-                    state.bestCoverQuality = quality
+        // Check durable user-saved face anchors (names, combined groups, custom covers, exclusions)
+        val itemAnchors = savedMemoryLookup.anchorsByItemId[item.id].orEmpty()
+        val excludedMemoryIds = PersonMemoryEngine.findExcludedMemoryIds(
+            detected = detectedBox,
+            anchorsForItem = itemAnchors,
+            singleFaceInPhoto = singleFaceInPhoto
+        )
+        val matchedMemoryId = PersonMemoryEngine.findBestPositiveMemoryId(
+            detected = detectedBox,
+            anchorsForItem = itemAnchors,
+            validMemoryIds = savedMemoryLookup.memoriesById.keys,
+            excludedMemoryIds = excludedMemoryIds,
+            singleFaceInPhoto = singleFaceInPhoto
+        )
+        val effectiveForbiddenPersonIds = if (excludedMemoryIds.isEmpty()) {
+            forbiddenPersonIds
+        } else {
+            val combined = HashSet<String>(forbiddenPersonIds)
+            for ((pid, st) in clusters) {
+                if (st.entity.memoryId != null && st.entity.memoryId in excludedMemoryIds) {
+                    combined.add(pid)
                 }
-                state.entity = state.entity.copy(
-                    centroidBlob = FaceClusteringEngine.encodeEmbedding(updatedCentroid),
-                    sampleCount = state.entity.sampleCount + 1,
-                    coverFaceId = if (shouldUpgradeCover) faceId else state.entity.coverFaceId,
-                    coverPhotoId = if (shouldUpgradeCover) item.id else state.entity.coverPhotoId,
-                    coverCropPath = if (shouldUpgradeCover && cropPath != null) cropPath else state.entity.coverCropPath,
-                    updatedAtEpochMs = now
+            }
+            combined
+        }
+
+        fun attachToExistingCluster(
+            state: MutableClusterState,
+            claimMemory: SavedPersonMemoryEntity? = null
+        ): String {
+            val activeMem = claimMemory ?: state.entity.memoryId?.let { savedMemoryLookup.memoriesById[it] }
+            val updatedCentroid = FaceClusteringEngine.updateRunningCentroid(
+                oldCentroid = state.centroid,
+                oldCount = state.entity.sampleCount,
+                newEmbedding = embedding
+            )
+            val isSavedCoverMatch = activeMem != null &&
+                PersonMemoryEngine.matchesSavedCover(activeMem, item.id, detectedBox, singleFaceInPhoto)
+            val hasLockedSavedCover = activeMem?.coverItemId != null &&
+                state.entity.coverPhotoId == activeMem.coverItemId &&
+                !state.entity.coverCropPath.isNullOrBlank()
+            val shouldUpgradeCover = isSavedCoverMatch ||
+                (!hasLockedSavedCover && (state.entity.coverCropPath.isNullOrBlank() ||
+                    (cropPath != null && quality > state.bestCoverQuality + 0.04f)))
+
+            state.centroid = updatedCentroid
+            if (shouldUpgradeCover && cropPath != null) {
+                state.bestCoverQuality = if (isSavedCoverMatch) 1.5f else quality
+            }
+            state.entity = state.entity.copy(
+                memoryId = activeMem?.memoryId ?: state.entity.memoryId,
+                name = activeMem?.name?.takeIf { it.isNotBlank() } ?: state.entity.name,
+                isFavorite = state.entity.isFavorite || (activeMem?.isFavorite == true),
+                isHidden = state.entity.isHidden || (activeMem?.isHidden == true),
+                centroidBlob = FaceClusteringEngine.encodeEmbedding(updatedCentroid),
+                sampleCount = state.entity.sampleCount + 1,
+                coverFaceId = if (shouldUpgradeCover) faceId else state.entity.coverFaceId,
+                coverPhotoId = if (shouldUpgradeCover) item.id else state.entity.coverPhotoId,
+                coverCropPath = if (shouldUpgradeCover && cropPath != null) cropPath else state.entity.coverCropPath,
+                updatedAtEpochMs = now
+            )
+            return state.entity.personId
+        }
+
+        val assignedPersonId = if (matchedMemoryId != null) {
+            val memory = savedMemoryLookup.memoriesById[matchedMemoryId]
+            val existingLinked = clusters.values.firstOrNull {
+                it.entity.memoryId == matchedMemoryId && it.entity.personId !in effectiveForbiddenPersonIds
+            }
+            if (existingLinked != null) {
+                attachToExistingCluster(existingLinked, claimMemory = memory)
+            } else {
+                // If an unlinked unnamed cluster already matches this face by embedding, claim it
+                val unlinkedCandidates = clusters.values
+                    .filter { it.entity.memoryId == null && it.entity.name.isBlank() }
+                    .map {
+                        FaceClusteringEngine.ClusterCandidate(
+                            personId = it.entity.personId,
+                            centroid = it.centroid,
+                            sampleCount = it.entity.sampleCount,
+                            isNamed = false,
+                            memoryId = null
+                        )
+                    }
+                val unlinkedMatch = FaceClusteringEngine.findBestMatchingCluster(
+                    embedding = embedding,
+                    candidates = unlinkedCandidates,
+                    forbiddenPersonIds = effectiveForbiddenPersonIds
                 )
-                match.personId
+                val claimedState = unlinkedMatch?.let { clusters[it.personId] }
+                if (claimedState != null) {
+                    attachToExistingCluster(claimedState, claimMemory = memory)
+                } else {
+                    createNewCluster(
+                        clusters = clusters,
+                        faceId = faceId,
+                        photoId = item.id,
+                        cropPath = cropPath,
+                        embedding = embedding,
+                        quality = quality,
+                        now = now,
+                        memory = memory
+                    )
+                }
+            }
+        } else {
+            val candidates = clusters.values.map {
+                FaceClusteringEngine.ClusterCandidate(
+                    personId = it.entity.personId,
+                    centroid = it.centroid,
+                    sampleCount = it.entity.sampleCount,
+                    isNamed = it.entity.name.isNotBlank(),
+                    memoryId = it.entity.memoryId
+                )
+            }
+            val match = FaceClusteringEngine.findBestMatchingCluster(
+                embedding = embedding,
+                candidates = candidates,
+                forbiddenPersonIds = effectiveForbiddenPersonIds
+            )
+            val matchedState = match?.let { clusters[it.personId] }
+            if (matchedState != null) {
+                attachToExistingCluster(matchedState)
             } else {
                 createNewCluster(clusters, faceId, item.id, cropPath, embedding, quality, now)
             }
-        } else {
-            createNewCluster(clusters, faceId, item.id, cropPath, embedding, quality, now)
         }
 
-        val imgW = bitmap.width.toFloat().coerceAtLeast(1f)
-        val imgH = bitmap.height.toFloat().coerceAtLeast(1f)
         return DetectedFaceEntity(
             faceId = faceId,
             itemId = item.id,
             personId = assignedPersonId,
             embeddingBlob = FaceClusteringEngine.encodeEmbedding(embedding),
-            bboxLeft = (box.left / imgW).coerceIn(0f, 1f),
-            bboxTop = (box.top / imgH).coerceIn(0f, 1f),
-            bboxRight = (box.right / imgW).coerceIn(0f, 1f),
-            bboxBottom = (box.bottom / imgH).coerceIn(0f, 1f),
+            bboxLeft = normLeft,
+            bboxTop = normTop,
+            bboxRight = normRight,
+            bboxBottom = normBottom,
             qualityScore = quality,
             cropPath = cropPath,
             isExcludedByUser = false,
@@ -1260,18 +1675,20 @@ class SmartRecognitionManager(
                 centroid = FaceClusteringEngine.decodeEmbedding(person.centroidBlob),
                 sampleCount = faces.size.coerceAtLeast(person.sampleCount),
                 isNamed = person.name.isNotBlank(),
-                photoIds = faces.mapTo(HashSet(faces.size)) { it.itemId }
+                photoIds = faces.mapTo(HashSet(faces.size)) { it.itemId },
+                memoryId = person.memoryId
             )
         }
         val merges = FaceClusteringEngine.findAutoConsolidationPairs(
             clusters = candidates,
-            rejectedPairs = _rejectedMergePairs.value
+            rejectedPairs = getAllEffectiveRejectedPairKeys()
         )
         if (merges.isEmpty()) return
         for (merge in merges) {
             mergePersons(
                 targetPersonId = merge.targetPersonId,
-                sourcePersonIds = listOf(merge.sourcePersonId)
+                sourcePersonIds = listOf(merge.sourcePersonId),
+                isUserInitiated = false
             )
         }
     }
@@ -1283,20 +1700,22 @@ class SmartRecognitionManager(
         cropPath: String?,
         embedding: FloatArray,
         quality: Float,
-        now: Long
+        now: Long,
+        memory: SavedPersonMemoryEntity? = null
     ): String {
         val newId = "person_${UUID.randomUUID().toString().take(12)}"
         val entity = PersonClusterEntity(
             personId = newId,
-            name = "",
-            isHidden = false,
-            isFavorite = false,
+            name = memory?.name.orEmpty(),
+            isHidden = memory?.isHidden == true,
+            isFavorite = memory?.isFavorite == true,
             coverFaceId = faceId,
             coverPhotoId = photoId,
             coverCropPath = cropPath,
             centroidBlob = FaceClusteringEngine.encodeEmbedding(embedding),
             sampleCount = 1,
-            updatedAtEpochMs = now
+            updatedAtEpochMs = now,
+            memoryId = memory?.memoryId
         )
         clusters[newId] = MutableClusterState(
             entity = entity,
@@ -1318,65 +1737,254 @@ class SmartRecognitionManager(
         }
 
     suspend fun renamePerson(personId: String, newName: String) = withContext(Dispatchers.IO) {
-        smartDao.renamePerson(
-            personId = personId,
-            name = newName.trim(),
-            updatedAt = System.currentTimeMillis()
-        )
+        val clean = newName.trim()
+        val now = System.currentTimeMillis()
+        database.withTransaction {
+            val person = smartDao.getPersonById(personId) ?: return@withTransaction
+            smartDao.renamePerson(
+                personId = personId,
+                name = clean,
+                updatedAt = now
+            )
+            if (clean.isNotEmpty()) {
+                ensureMemoryForPersonLocked(
+                    personId = personId,
+                    overrideName = clean,
+                    now = now
+                )
+            } else {
+                val memId = person.memoryId
+                if (!memId.isNullOrBlank()) {
+                    smartDao.getSavedPersonMemoryById(memId)?.let { existing ->
+                        smartDao.upsertSavedPersonMemory(existing.copy(name = "", updatedAtEpochMs = now))
+                    }
+                    pruneMemoryIfNoUserStateLocked(memId, personId, now)
+                }
+            }
+        }
     }
 
     suspend fun setPersonHidden(personId: String, hidden: Boolean) = withContext(Dispatchers.IO) {
-        smartDao.setPersonHidden(
-            personId = personId,
-            hidden = hidden,
-            updatedAt = System.currentTimeMillis()
-        )
+        val now = System.currentTimeMillis()
+        database.withTransaction {
+            val person = smartDao.getPersonById(personId) ?: return@withTransaction
+            smartDao.setPersonHidden(
+                personId = personId,
+                hidden = hidden,
+                updatedAt = now
+            )
+            if (hidden) {
+                ensureMemoryForPersonLocked(
+                    personId = personId,
+                    overrideHidden = true,
+                    now = now
+                )
+            } else {
+                val memId = person.memoryId
+                if (!memId.isNullOrBlank()) {
+                    smartDao.getSavedPersonMemoryById(memId)?.let { existing ->
+                        smartDao.upsertSavedPersonMemory(existing.copy(isHidden = false, updatedAtEpochMs = now))
+                    }
+                    pruneMemoryIfNoUserStateLocked(memId, personId, now)
+                }
+            }
+        }
     }
 
     suspend fun togglePersonFavorite(personId: String) = withContext(Dispatchers.IO) {
-        val current = smartDao.getPersonById(personId) ?: return@withContext
-        smartDao.setPersonFavorite(
-            personId = personId,
-            favorite = !current.isFavorite,
-            updatedAt = System.currentTimeMillis()
-        )
+        val now = System.currentTimeMillis()
+        database.withTransaction {
+            val current = smartDao.getPersonById(personId) ?: return@withTransaction
+            val nextFav = !current.isFavorite
+            smartDao.setPersonFavorite(
+                personId = personId,
+                favorite = nextFav,
+                updatedAt = now
+            )
+            if (nextFav) {
+                ensureMemoryForPersonLocked(
+                    personId = personId,
+                    overrideFavorite = true,
+                    now = now
+                )
+            } else {
+                val memId = current.memoryId
+                if (!memId.isNullOrBlank()) {
+                    smartDao.getSavedPersonMemoryById(memId)?.let { existing ->
+                        smartDao.upsertSavedPersonMemory(existing.copy(isFavorite = false, updatedAtEpochMs = now))
+                    }
+                    pruneMemoryIfNoUserStateLocked(memId, personId, now)
+                }
+            }
+        }
     }
 
     suspend fun setPersonCoverFace(personId: String, faceId: String) = withContext(Dispatchers.IO) {
-        val person = smartDao.getPersonById(personId) ?: return@withContext
-        val face = smartDao.getFaceById(faceId) ?: return@withContext
-        if (face.personId != personId) return@withContext
-        smartDao.upsertPerson(
-            person.copy(
-                coverFaceId = face.faceId,
-                coverPhotoId = face.itemId,
-                coverCropPath = face.cropPath ?: person.coverCropPath,
-                updatedAtEpochMs = System.currentTimeMillis()
+        val now = System.currentTimeMillis()
+        database.withTransaction {
+            val person = smartDao.getPersonById(personId) ?: return@withTransaction
+            val face = smartDao.getFaceById(faceId) ?: return@withTransaction
+            if (face.personId != personId) return@withTransaction
+            smartDao.upsertPerson(
+                person.copy(
+                    coverFaceId = face.faceId,
+                    coverPhotoId = face.itemId,
+                    coverCropPath = face.cropPath ?: person.coverCropPath,
+                    updatedAtEpochMs = now
+                )
             )
-        )
+            ensureMemoryForPersonLocked(
+                personId = personId,
+                overrideCoverFace = face,
+                now = now
+            )
+        }
     }
 
     /**
      * Combines multiple person clusters into [targetPersonId] inside one Room transaction:
      * preserves the preferred name, merges all faces, recomputes the L2-normalized centroid
-     * across every face embedding, picks the sharpest cover portrait, and removes absorbed clusters.
+     * across every face embedding, picks the sharpest cover portrait, removes absorbed clusters,
+     * and durably saves the combined face anchors from every sub-group into `saved_person_memory`
+     * so future detection/embedding rebuilds automatically re-combine them!
      */
     suspend fun mergePersons(
         targetPersonId: String,
         sourcePersonIds: List<String>,
-        overrideName: String? = null
+        overrideName: String? = null,
+        isUserInitiated: Boolean = true
     ): String = withContext(Dispatchers.IO) {
         val sourcesToMerge = sourcePersonIds.distinct().filter { it != targetPersonId }
         if (sourcesToMerge.isEmpty()) return@withContext targetPersonId
 
+        val now = System.currentTimeMillis()
         database.withTransaction {
             val target = smartDao.getPersonById(targetPersonId) ?: return@withTransaction
             val sourceEntities = sourcesToMerge.mapNotNull { smartDao.getPersonById(it) }
+            if (sourceEntities.isEmpty()) return@withTransaction
+
+            // Capture faces per source cluster BEFORE reassigning so each combined sub-group
+            // keeps a distinct originGroupId for balanced long-term anchor retention!
+            val targetFacesBefore = smartDao.getFacesForPerson(targetPersonId)
+            val sourceFacesByCluster = sourceEntities.associate { src ->
+                src.personId to smartDao.getFacesForPerson(src.personId)
+            }
 
             val resolvedName = overrideName?.trim()?.takeIf { it.isNotEmpty() }
                 ?: target.name.takeIf { it.isNotBlank() }
                 ?: sourceEntities.firstOrNull { it.name.isNotBlank() }?.name
                 ?: ""
+            val mergedFavorite = target.isFavorite || sourceEntities.any { it.isFavorite }
+
+            val existingMemoryIds = buildList {
+                target.memoryId?.takeIf { it.isNotBlank() }?.let { add(it) }
+                sourceEntities
+                    .sortedWith(
+                        compareByDescending<PersonClusterEntity> { it.name.isNotBlank() }
+                            .thenByDescending { it.isFavorite }
+                            .thenByDescending { it.sampleCount }
+                    )
+                    .mapNotNull { it.memoryId?.takeIf { id -> id.isNotBlank() } }
+                    .forEach { if (it !in this) add(it) }
+            }
+
+            val survivingMemoryId: String? = existingMemoryIds.firstOrNull()
+                ?: if (isUserInitiated || resolvedName.isNotBlank() || mergedFavorite) newMemoryId() else null
+
+            if (survivingMemoryId != null) {
+                val absorbedMemoryIds = existingMemoryIds.filter { it != survivingMemoryId }
+                val survivingExisting = smartDao.getSavedPersonMemoryById(survivingMemoryId)
+                val absorbedExisting = absorbedMemoryIds.mapNotNull { smartDao.getSavedPersonMemoryById(it) }
+                val allExistingMemories = listOfNotNull(survivingExisting) + absorbedExisting
+
+                val resolvedMemName = resolvedName.ifBlank {
+                    allExistingMemories.firstOrNull { it.name.isNotBlank() }?.name.orEmpty()
+                }
+                val coverOwner = survivingExisting?.takeIf { !it.coverItemId.isNullOrBlank() }
+                    ?: absorbedExisting.firstOrNull { !it.coverItemId.isNullOrBlank() }
+
+                val mergedMemory = SavedPersonMemoryEntity(
+                    memoryId = survivingMemoryId,
+                    name = resolvedMemName,
+                    isFavorite = mergedFavorite || allExistingMemories.any { it.isFavorite },
+                    isHidden = false,
+                    isUserMerged = isUserInitiated || allExistingMemories.any { it.isUserMerged },
+                    coverItemId = coverOwner?.coverItemId,
+                    coverBboxLeft = coverOwner?.coverBboxLeft,
+                    coverBboxTop = coverOwner?.coverBboxTop,
+                    coverBboxRight = coverOwner?.coverBboxRight,
+                    coverBboxBottom = coverOwner?.coverBboxBottom,
+                    updatedAtEpochMs = now
+                )
+                smartDao.upsertSavedPersonMemory(mergedMemory)
+
+                // Combine saved anchors from surviving + absorbed memories + all active faces
+                val existingAnchors = smartDao.getAnchorsForMemories(existingMemoryIds)
+                    .map { anchor ->
+                        if (anchor.memoryId == survivingMemoryId) anchor
+                        else anchor.copy(memoryId = survivingMemoryId, updatedAtEpochMs = now)
+                    }
+                val newActiveAnchors = buildList {
+                    for (face in targetFacesBefore) {
+                        add(face.toSavedAnchor(survivingMemoryId, target.personId, isUserAssigned = false, isExcluded = false, now = now))
+                    }
+                    for ((srcClusterId, srcFaces) in sourceFacesByCluster) {
+                        for (face in srcFaces) {
+                            add(face.toSavedAnchor(survivingMemoryId, srcClusterId, isUserAssigned = false, isExcluded = false, now = now))
+                        }
+                    }
+                }
+                // If user explicitly combined these clusters, drop any stale exclusion that conflicts
+                // with a positive face/anchor from the combined clusters.
+                val positiveBoxesByItem = (existingAnchors.filterNot { it.isExcluded } + newActiveAnchors)
+                    .groupBy { it.itemId }
+                val cleanedExisting = if (isUserInitiated) {
+                    existingAnchors.filterNot { anc ->
+                        if (!anc.isExcluded) return@filterNot false
+                        val exclBox = anc.toFaceBox()
+                        positiveBoxesByItem[anc.itemId].orEmpty().any { pos ->
+                            PersonMemoryEngine.isSameFaceLocation(pos.toFaceBox(), exclBox, singleFaceInPhoto = false)
+                        }
+                    }
+                } else {
+                    existingAnchors
+                }
+
+                val prunedAnchors = PersonMemoryEngine.pruneAndDeduplicateAnchors(
+                    anchors = cleanedExisting + newActiveAnchors,
+                    coverItemId = mergedMemory.coverItemId,
+                    coverBox = mergedMemory.coverBoxOrNull()
+                )
+                if (absorbedMemoryIds.isNotEmpty()) {
+                    smartDao.deleteAnchorsForMemories(absorbedMemoryIds)
+                    smartDao.deleteSavedPersonMemories(absorbedMemoryIds)
+                    // Remap any "Not the same" rejections pointing to absorbed memories
+                    val absorbedSet = absorbedMemoryIds.toHashSet()
+                    val allRejected = smartDao.getAllRejectedMerges()
+                    for (rej in allRejected) {
+                        if (rej.memoryIdA in absorbedSet || rej.memoryIdB in absorbedSet) {
+                            smartDao.deleteRejectedMergeByPairKey(rej.pairKey)
+                            val newA = if (rej.memoryIdA in absorbedSet) survivingMemoryId else rej.memoryIdA
+                            val newB = if (rej.memoryIdB in absorbedSet) survivingMemoryId else rej.memoryIdB
+                            if (newA != newB) {
+                                val newKey = FaceClusteringEngine.canonicalPairKey(newA, newB)
+                                smartDao.upsertRejectedMerge(
+                                    SavedRejectedMergeEntity(
+                                        pairKey = newKey,
+                                        memoryIdA = minOf(newA, newB),
+                                        memoryIdB = maxOf(newA, newB),
+                                        createdAtEpochMs = rej.createdAtEpochMs
+                                    )
+                                )
+                            }
+                        }
+                    }
+                }
+                smartDao.deleteAnchorsForMemory(survivingMemoryId)
+                if (prunedAnchors.isNotEmpty()) {
+                    smartDao.upsertSavedPersonAnchors(prunedAnchors)
+                }
+            }
 
             smartDao.reassignPersonFaces(sourcesToMerge, targetPersonId)
             smartDao.deletePersons(sourcesToMerge)
@@ -1389,8 +1997,9 @@ class SmartRecognitionManager(
 
             smartDao.upsertPerson(
                 target.copy(
+                    memoryId = survivingMemoryId ?: target.memoryId,
                     name = resolvedName,
-                    isFavorite = target.isFavorite || sourceEntities.any { it.isFavorite },
+                    isFavorite = mergedFavorite,
                     isHidden = false,
                     coverFaceId = bestCover?.faceId ?: target.coverFaceId,
                     coverPhotoId = bestCover?.itemId ?: target.coverPhotoId,
@@ -1401,7 +2010,7 @@ class SmartRecognitionManager(
                         target.centroidBlob
                     },
                     sampleCount = allFaces.size.coerceAtLeast(1),
-                    updatedAtEpochMs = System.currentTimeMillis()
+                    updatedAtEpochMs = now
                 )
             )
         }
@@ -1409,27 +2018,73 @@ class SmartRecognitionManager(
     }
 
     /**
-     * Removes misclassified photo(s) from [personId] so they never re-attach automatically,
-     * recalculating the person's centroid and cover portrait cleanly (or deleting the cluster if empty).
+     * Removes misclassified photo(s) from [personId] so they never re-attach automatically (even
+     * after future AI rebuilds!), recalculating the person's centroid and cover portrait cleanly.
      */
     suspend fun removePhotosFromPerson(personId: String, photoIds: Collection<String>) =
         withContext(Dispatchers.IO) {
             if (photoIds.isEmpty()) return@withContext
+            val photoIdSet = photoIds.toSet()
+            val now = System.currentTimeMillis()
             database.withTransaction {
+                val personBefore = smartDao.getPersonById(personId)
+                val removedFaces = smartDao.getFacesForPerson(personId).filter { it.itemId in photoIdSet }
                 smartDao.excludePhotosFromPerson(photoIds.toList(), personId)
                 recalculateClusterAfterRemoval(personId)
+
+                if (personBefore != null && removedFaces.isNotEmpty()) {
+                    val personStillExists = smartDao.getPersonById(personId) != null
+                    val memId = personBefore.memoryId?.takeIf { it.isNotBlank() }
+                        ?: if (personStillExists) newMemoryId() else null
+                    if (memId != null) {
+                        val existingMem = smartDao.getSavedPersonMemoryById(memId)
+                        val clearCover = existingMem?.coverItemId in photoIdSet
+                        val updatedMem = (existingMem ?: SavedPersonMemoryEntity(
+                            memoryId = memId,
+                            name = personBefore.name.trim(),
+                            isFavorite = personBefore.isFavorite,
+                            isHidden = personBefore.isHidden,
+                            updatedAtEpochMs = now
+                        )).copy(
+                            coverItemId = if (clearCover) null else existingMem?.coverItemId,
+                            coverBboxLeft = if (clearCover) null else existingMem?.coverBboxLeft,
+                            coverBboxTop = if (clearCover) null else existingMem?.coverBboxTop,
+                            coverBboxRight = if (clearCover) null else existingMem?.coverBboxRight,
+                            coverBboxBottom = if (clearCover) null else existingMem?.coverBboxBottom,
+                            updatedAtEpochMs = now
+                        )
+                        smartDao.upsertSavedPersonMemory(updatedMem)
+                        if (personStillExists && personBefore.memoryId != memId) {
+                            smartDao.updatePersonMemoryId(personId, memId, now)
+                        }
+                        val remainingAnchors = if (personStillExists) {
+                            smartDao.getFacesForPerson(personId).map {
+                                it.toSavedAnchor(memId, personId, isUserAssigned = false, isExcluded = false, now = now)
+                            }
+                        } else {
+                            emptyList()
+                        }
+                        val exclusionAnchors = removedFaces.map {
+                            it.toSavedAnchor(memId, personId, isUserAssigned = true, isExcluded = true, now = now)
+                        }
+                        mergeAnchorsForMemoryLocked(memId, updatedMem, remainingAnchors + exclusionAnchors)
+                    }
+                }
             }
         }
 
     /**
      * Moves a single detected face to another person cluster (or creates a brand-new person if
-     * [targetPersonId] is null) and recalculates both clusters' centroids.
+     * [targetPersonId] is null), recalculates both clusters' centroids, and durably remembers
+     * both the exclusion from the old person and the assignment to the destination person.
      */
     suspend fun reassignFaceToPerson(faceId: String, targetPersonId: String?) =
         withContext(Dispatchers.IO) {
+            val now = System.currentTimeMillis()
             database.withTransaction {
                 val face = smartDao.getFaceById(faceId) ?: return@withTransaction
                 val oldPersonId = face.personId
+                val oldPersonBefore = oldPersonId?.let { smartDao.getPersonById(it) }
                 val destId = targetPersonId ?: run {
                     val createdId = "person_${UUID.randomUUID().toString().take(12)}"
                     smartDao.upsertPerson(
@@ -1443,7 +2098,7 @@ class SmartRecognitionManager(
                             coverCropPath = face.cropPath,
                             centroidBlob = face.embeddingBlob,
                             sampleCount = 1,
-                            updatedAtEpochMs = System.currentTimeMillis()
+                            updatedAtEpochMs = now
                         )
                     )
                     createdId
@@ -1451,8 +2106,84 @@ class SmartRecognitionManager(
                 smartDao.reassignSingleFace(faceId, destId)
                 if (oldPersonId != null && oldPersonId != destId) {
                     recalculateClusterAfterRemoval(oldPersonId)
+                    if (oldPersonBefore != null) {
+                        val oldStillExists = smartDao.getPersonById(oldPersonId) != null
+                        val oldMemId = oldPersonBefore.memoryId?.takeIf { it.isNotBlank() }
+                            ?: if (oldStillExists) newMemoryId() else null
+                        if (oldMemId != null) {
+                            val existingOldMem = smartDao.getSavedPersonMemoryById(oldMemId)
+                            val updatedOldMem = (existingOldMem ?: SavedPersonMemoryEntity(
+                                memoryId = oldMemId,
+                                name = oldPersonBefore.name.trim(),
+                                isFavorite = oldPersonBefore.isFavorite,
+                                isHidden = oldPersonBefore.isHidden,
+                                updatedAtEpochMs = now
+                            )).copy(updatedAtEpochMs = now)
+                            smartDao.upsertSavedPersonMemory(updatedOldMem)
+                            if (oldStillExists && oldPersonBefore.memoryId != oldMemId) {
+                                smartDao.updatePersonMemoryId(oldPersonId, oldMemId, now)
+                            }
+                            val remainingOldAnchors = if (oldStillExists) {
+                                smartDao.getFacesForPerson(oldPersonId).map {
+                                    it.toSavedAnchor(oldMemId, oldPersonId, isUserAssigned = false, isExcluded = false, now = now)
+                                }
+                            } else emptyList()
+                            val excl = face.toSavedAnchor(oldMemId, oldPersonId, isUserAssigned = true, isExcluded = true, now = now)
+                            mergeAnchorsForMemoryLocked(oldMemId, updatedOldMem, remainingOldAnchors + excl)
+                        }
+                    }
                 }
                 recalculateClusterAfterRemoval(destId)
+
+                // Durably remember this face's positive assignment to destId
+                val destPerson = smartDao.getPersonById(destId)
+                if (destPerson != null) {
+                    val destMemId = destPerson.memoryId?.takeIf { it.isNotBlank() } ?: newMemoryId()
+                    val existingDestMem = smartDao.getSavedPersonMemoryById(destMemId)
+                    val updatedDestMem = SavedPersonMemoryEntity(
+                        memoryId = destMemId,
+                        name = destPerson.name.trim().ifBlank { existingDestMem?.name.orEmpty() },
+                        isFavorite = destPerson.isFavorite || existingDestMem?.isFavorite == true,
+                        isHidden = destPerson.isHidden,
+                        isUserMerged = (targetPersonId != null) || (existingDestMem?.isUserMerged == true),
+                        coverItemId = existingDestMem?.coverItemId,
+                        coverBboxLeft = existingDestMem?.coverBboxLeft,
+                        coverBboxTop = existingDestMem?.coverBboxTop,
+                        coverBboxRight = existingDestMem?.coverBboxRight,
+                        coverBboxBottom = existingDestMem?.coverBboxBottom,
+                        updatedAtEpochMs = now
+                    )
+                    smartDao.upsertSavedPersonMemory(updatedDestMem)
+                    if (destPerson.memoryId != destMemId) {
+                        smartDao.updatePersonMemoryId(destId, destMemId, now)
+                    }
+                    // Drop any stale exclusion on destMemId for this exact face
+                    val existingDestAnchors = smartDao.getAnchorsForMemory(destMemId).filterNot { anc ->
+                        anc.isExcluded && anc.itemId == face.itemId && PersonMemoryEngine.isSameFaceLocation(
+                            PersonMemoryEngine.FaceBox(face.bboxLeft, face.bboxTop, face.bboxRight, face.bboxBottom),
+                            anc.toFaceBox(),
+                            singleFaceInPhoto = false
+                        )
+                    }
+                    val destFaceAnchors = smartDao.getFacesForPerson(destId).map { f ->
+                        f.toSavedAnchor(
+                            memoryId = destMemId,
+                            originGroupId = if (f.faceId == face.faceId) "reassigned_${face.faceId}" else destId,
+                            isUserAssigned = f.faceId == face.faceId,
+                            isExcluded = false,
+                            now = now
+                        )
+                    }
+                    val prunedDest = PersonMemoryEngine.pruneAndDeduplicateAnchors(
+                        anchors = existingDestAnchors + destFaceAnchors,
+                        coverItemId = updatedDestMem.coverItemId,
+                        coverBox = updatedDestMem.coverBoxOrNull()
+                    )
+                    smartDao.deleteAnchorsForMemory(destMemId)
+                    if (prunedDest.isNotEmpty()) {
+                        smartDao.upsertSavedPersonAnchors(prunedDest)
+                    }
+                }
             }
         }
 
@@ -1511,6 +2242,7 @@ class SmartRecognitionManager(
             if (blockedItemIds.isEmpty()) return@withContext
 
             val affectedPersonIds = HashSet<String>()
+            val now = System.currentTimeMillis()
             for (chunk in blockedItemIds.chunked(400)) {
                 val faces = smartDao.getFacesForPhotos(chunk)
                 for (f in faces) {
@@ -1520,6 +2252,8 @@ class SmartRecognitionManager(
                 database.withTransaction {
                     smartDao.deleteFacesForPhotos(chunk)
                     smartDao.deleteSmartIndexForPhotos(chunk)
+                    smartDao.deleteAnchorsForItems(chunk)
+                    smartDao.clearSavedCoverForItems(chunk, now)
                 }
             }
             if (affectedPersonIds.isNotEmpty()) {
@@ -1908,6 +2642,15 @@ class SmartRecognitionManager(
         }
     }
 
+    private data class SavedMemoryLookup(
+        val memoriesById: Map<String, SavedPersonMemoryEntity>,
+        val anchorsByItemId: Map<String, List<SavedPersonAnchorEntity>>
+    ) {
+        companion object {
+            val EMPTY = SavedMemoryLookup(emptyMap(), emptyMap())
+        }
+    }
+
     private data class MutableClusterState(
         var entity: PersonClusterEntity,
         var centroid: FloatArray,
@@ -1918,10 +2661,12 @@ class SmartRecognitionManager(
         private const val PREFS_NAME = "lumina_smart_ai_meta"
         private const val KEY_AI_INDEX_VERSION = "smart_ai_index_version"
         private const val KEY_AVATAR_CROP_VERSION = "smart_avatar_crop_version"
+        private const val KEY_PERSON_MEMORY_MIGRATED = "smart_person_memory_migrated_v"
         private const val KEY_REJECTED_MERGE_PAIRS = "rejected_merge_pairs"
         private const val KEY_PRESERVED_PROFILES = "preserved_person_profiles_json"
         private const val CURRENT_AI_INDEX_VERSION = 4
         private const val CURRENT_AVATAR_CROP_VERSION = 2
+        private const val CURRENT_PERSON_MEMORY_VERSION = 1
 
         /** High-precision ML Kit portrait cues specific to humans (excludes eye/nose/mouth shared with animals). */
         private val MLKIT_STRONG_HUMAN_PORTRAIT_LABELS: Set<String> = setOf(

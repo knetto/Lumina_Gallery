@@ -132,6 +132,10 @@ class UiSafetyAuditTest {
             "GalleryDatabase must define explicit MIGRATION_10_11",
             dbText.contains("MIGRATION_10_11")
         )
+        assertTrue(
+            "GalleryDatabase must define explicit MIGRATION_12_13",
+            dbText.contains("MIGRATION_12_13")
+        )
         assertFalse(
             "GalleryDatabase must never use fallbackToDestructiveMigration",
             dbText.contains("fallbackToDestructiveMigration")

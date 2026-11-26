@@ -30,6 +30,9 @@ import com.luminagallery.drive.data.local.entity.PhotoLocationEntity
 import com.luminagallery.drive.data.local.entity.PhotoOcrEntity
 import com.luminagallery.drive.data.local.entity.PhotoSmartIndexEntity
 import com.luminagallery.drive.data.local.entity.PinnedRootEntity
+import com.luminagallery.drive.data.local.entity.SavedPersonAnchorEntity
+import com.luminagallery.drive.data.local.entity.SavedPersonMemoryEntity
+import com.luminagallery.drive.data.local.entity.SavedRejectedMergeEntity
 import com.luminagallery.drive.data.local.entity.SyncStateEntity
 
 @Database(
@@ -52,9 +55,12 @@ import com.luminagallery.drive.data.local.entity.SyncStateEntity
         LockedAlbumEntity::class,
         PersonClusterEntity::class,
         DetectedFaceEntity::class,
-        PhotoSmartIndexEntity::class
+        PhotoSmartIndexEntity::class,
+        SavedPersonMemoryEntity::class,
+        SavedPersonAnchorEntity::class,
+        SavedRejectedMergeEntity::class
     ],
-    version = 12,
+    version = 13,
     exportSchema = true
 )
 abstract class GalleryDatabase : RoomDatabase() {
@@ -339,6 +345,64 @@ abstract class GalleryDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `person_clusters` ADD COLUMN `memoryId` TEXT")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_person_clusters_memoryId` ON `person_clusters` (`memoryId`)")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `saved_person_memory` (
+                        `memoryId` TEXT NOT NULL,
+                        `name` TEXT NOT NULL,
+                        `isFavorite` INTEGER NOT NULL,
+                        `isHidden` INTEGER NOT NULL,
+                        `isUserMerged` INTEGER NOT NULL,
+                        `coverItemId` TEXT,
+                        `coverBboxLeft` REAL,
+                        `coverBboxTop` REAL,
+                        `coverBboxRight` REAL,
+                        `coverBboxBottom` REAL,
+                        `updatedAtEpochMs` INTEGER NOT NULL,
+                        PRIMARY KEY(`memoryId`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_saved_person_memory_name` ON `saved_person_memory` (`name`)")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `saved_person_anchors` (
+                        `anchorId` TEXT NOT NULL,
+                        `memoryId` TEXT NOT NULL,
+                        `itemId` TEXT NOT NULL,
+                        `bboxLeft` REAL NOT NULL,
+                        `bboxTop` REAL NOT NULL,
+                        `bboxRight` REAL NOT NULL,
+                        `bboxBottom` REAL NOT NULL,
+                        `originGroupId` TEXT NOT NULL,
+                        `isUserAssigned` INTEGER NOT NULL,
+                        `isExcluded` INTEGER NOT NULL,
+                        `qualityScore` REAL NOT NULL,
+                        `updatedAtEpochMs` INTEGER NOT NULL,
+                        PRIMARY KEY(`anchorId`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_saved_person_anchors_memoryId` ON `saved_person_anchors` (`memoryId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_saved_person_anchors_itemId` ON `saved_person_anchors` (`itemId`)")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `saved_rejected_merges` (
+                        `pairKey` TEXT NOT NULL,
+                        `memoryIdA` TEXT NOT NULL,
+                        `memoryIdB` TEXT NOT NULL,
+                        `createdAtEpochMs` INTEGER NOT NULL,
+                        PRIMARY KEY(`pairKey`)
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
         fun build(context: Context): GalleryDatabase =
             Room.databaseBuilder(
                 context.applicationContext,
@@ -356,7 +420,8 @@ abstract class GalleryDatabase : RoomDatabase() {
                     MIGRATION_8_9,
                     MIGRATION_9_10,
                     MIGRATION_10_11,
-                    MIGRATION_11_12
+                    MIGRATION_11_12,
+                    MIGRATION_12_13
                 )
                 .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
                 .build()

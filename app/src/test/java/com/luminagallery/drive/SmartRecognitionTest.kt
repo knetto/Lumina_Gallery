@@ -1,7 +1,10 @@
 package com.luminagallery.drive
 
+import com.luminagallery.drive.data.local.entity.SavedPersonAnchorEntity
+import com.luminagallery.drive.data.local.entity.SavedPersonMemoryEntity
 import com.luminagallery.drive.data.repository.ai.FaceClusteringEngine
 import com.luminagallery.drive.data.repository.ai.FaceEmbeddingEngine
+import com.luminagallery.drive.data.repository.ai.PersonMemoryEngine
 import com.luminagallery.drive.data.repository.ai.SmartObjectVocabulary
 import com.luminagallery.drive.data.repository.ai.SmartRecognitionManager
 import com.luminagallery.drive.domain.model.ExifMetadata
@@ -429,5 +432,228 @@ class SmartRecognitionTest {
         assertTrue(labels.contains("macaw"))
         assertTrue(labels.contains("African grey"))
         assertTrue(labels.contains("sulphur-crested cockatoo"))
+    }
+
+    @Test
+    fun personMemoryEngine_matchesGroupPhotoFacesByLocationAndRespectsExclusions() {
+        val validMemIds = setOf("mem_mom", "mem_dad")
+        val anchors = listOf(
+            SavedPersonAnchorEntity(
+                anchorId = "a_mom",
+                memoryId = "mem_mom",
+                itemId = "group_photo_1",
+                bboxLeft = 0.10f,
+                bboxTop = 0.20f,
+                bboxRight = 0.28f,
+                bboxBottom = 0.45f,
+                originGroupId = "orig_mom",
+                updatedAtEpochMs = 100L
+            ),
+            SavedPersonAnchorEntity(
+                anchorId = "a_dad",
+                memoryId = "mem_dad",
+                itemId = "group_photo_1",
+                bboxLeft = 0.65f,
+                bboxTop = 0.18f,
+                bboxRight = 0.84f,
+                bboxBottom = 0.44f,
+                originGroupId = "orig_dad",
+                updatedAtEpochMs = 100L
+            ),
+            SavedPersonAnchorEntity(
+                anchorId = "a_excl_stranger",
+                memoryId = "mem_mom",
+                itemId = "group_photo_1",
+                bboxLeft = 0.40f,
+                bboxTop = 0.22f,
+                bboxRight = 0.56f,
+                bboxBottom = 0.44f,
+                originGroupId = "orig_mom",
+                isUserAssigned = true,
+                isExcluded = true,
+                updatedAtEpochMs = 200L
+            )
+        )
+
+        // New detector produces slightly looser box around Mom and slightly tighter box around Dad
+        val momNewBox = PersonMemoryEngine.FaceBox(0.08f, 0.17f, 0.30f, 0.48f)
+        val dadNewBox = PersonMemoryEngine.FaceBox(0.67f, 0.21f, 0.82f, 0.41f)
+        val strangerBox = PersonMemoryEngine.FaceBox(0.41f, 0.23f, 0.55f, 0.43f)
+
+        assertEquals(
+            "mem_mom",
+            PersonMemoryEngine.findBestPositiveMemoryId(momNewBox, anchors, validMemIds, singleFaceInPhoto = false)
+        )
+        assertEquals(
+            "mem_dad",
+            PersonMemoryEngine.findBestPositiveMemoryId(dadNewBox, anchors, validMemIds, singleFaceInPhoto = false)
+        )
+        assertEquals(
+            setOf("mem_mom"),
+            PersonMemoryEngine.findExcludedMemoryIds(strangerBox, anchors, singleFaceInPhoto = false)
+        )
+        assertNull(
+            PersonMemoryEngine.findBestPositiveMemoryId(
+                detected = strangerBox,
+                anchorsForItem = anchors,
+                validMemoryIds = validMemIds,
+                excludedMemoryIds = setOf("mem_mom"),
+                singleFaceInPhoto = false
+            )
+        )
+    }
+
+    @Test
+    fun personMemoryEngine_reconciliationRestoresNamesCoversAndAutoRecombinesMergedGroups() {
+        val memories = listOf(
+            SavedPersonMemoryEntity(
+                memoryId = "mem_alex",
+                name = "Alex",
+                isFavorite = true,
+                isHidden = false,
+                isUserMerged = true,
+                coverItemId = "p2",
+                coverBboxLeft = 0.20f,
+                coverBboxTop = 0.20f,
+                coverBboxRight = 0.50f,
+                coverBboxBottom = 0.55f,
+                updatedAtEpochMs = 1_000L
+            ),
+            SavedPersonMemoryEntity(
+                memoryId = "mem_unnamed_combo",
+                name = "",
+                isFavorite = false,
+                isHidden = false,
+                isUserMerged = true,
+                updatedAtEpochMs = 1_000L
+            )
+        )
+        val box = PersonMemoryEngine.FaceBox(0.20f, 0.20f, 0.50f, 0.55f)
+        val anchors = listOf(
+            SavedPersonAnchorEntity("a1", "mem_alex", "p1", box.left, box.top, box.right, box.bottom, "g_normal", updatedAtEpochMs = 100L),
+            SavedPersonAnchorEntity("a2", "mem_alex", "p2", box.left, box.top, box.right, box.bottom, "g_normal", updatedAtEpochMs = 100L),
+            SavedPersonAnchorEntity("a3", "mem_alex", "p3", box.left, box.top, box.right, box.bottom, "g_sunglasses", updatedAtEpochMs = 100L),
+            SavedPersonAnchorEntity("a4", "mem_unnamed_combo", "p10", box.left, box.top, box.right, box.bottom, "g_u1", updatedAtEpochMs = 100L),
+            SavedPersonAnchorEntity("a5", "mem_unnamed_combo", "p11", box.left, box.top, box.right, box.bottom, "g_u2", updatedAtEpochMs = 100L)
+        )
+
+        // After changing detection/embeddings, Alex split into new_alex_1 & new_alex_sunglasses,
+        // and the unnamed user-merged pair split into new_u1 & new_u2
+        val clusters = listOf(
+            PersonMemoryEngine.ActiveClusterSnapshot("new_alex_1", null, "", false, false, "f1", "p1", 2, setOf("p1", "p2")),
+            PersonMemoryEngine.ActiveClusterSnapshot("new_alex_sunglasses", null, "", false, false, "f3", "p3", 1, setOf("p3")),
+            PersonMemoryEngine.ActiveClusterSnapshot("new_u1", null, "", false, false, "f10", "p10", 1, setOf("p10")),
+            PersonMemoryEngine.ActiveClusterSnapshot("new_u2", null, "", false, false, "f11", "p11", 1, setOf("p11"))
+        )
+        val faces = listOf(
+            PersonMemoryEngine.ActiveFaceSnapshot("f1", "p1", "new_alex_1", box, 0.8f, "/tmp/f1.jpg"),
+            PersonMemoryEngine.ActiveFaceSnapshot("f2", "p2", "new_alex_1", box, 0.7f, "/tmp/f2.jpg"),
+            PersonMemoryEngine.ActiveFaceSnapshot("f3", "p3", "new_alex_sunglasses", box, 0.6f, "/tmp/f3.jpg"),
+            PersonMemoryEngine.ActiveFaceSnapshot("f10", "p10", "new_u1", box, 0.7f, "/tmp/f10.jpg"),
+            PersonMemoryEngine.ActiveFaceSnapshot("f11", "p11", "new_u2", box, 0.7f, "/tmp/f11.jpg")
+        )
+
+        val plan = PersonMemoryEngine.planReconciliation(memories, anchors, clusters, faces)
+
+        // Alex is linked & named, his sunglasses split is scheduled to auto-merge back, and custom cover p2 is restored
+        val alexLink = plan.links.firstOrNull { it.personId == "new_alex_1" }
+        assertNotNull(alexLink)
+        assertEquals("Alex", alexLink?.memory?.name)
+        assertTrue(alexLink?.memory?.isFavorite == true)
+        assertTrue(plan.merges.any { it.targetPersonId == "new_alex_1" && it.sourcePersonId == "new_alex_sunglasses" })
+        assertTrue(plan.coverRestores.any { it.personId == "new_alex_1" && it.faceId == "f2" && it.itemId == "p2" })
+
+        // Unnamed combined pair is ALSO auto-recombined!
+        assertTrue(
+            plan.merges.any {
+                (it.targetPersonId == "new_u1" && it.sourcePersonId == "new_u2") ||
+                    (it.targetPersonId == "new_u2" && it.sourcePersonId == "new_u1")
+            }
+        )
+    }
+
+    @Test
+    fun personMemoryEngine_balancedPruningPreservesSmallCombinedSubgroupsAndCover() {
+        val bigGroup = (1..200).map { idx ->
+            SavedPersonAnchorEntity(
+                anchorId = "big_$idx",
+                memoryId = "mem_1",
+                itemId = "photo_big_$idx",
+                bboxLeft = 0.2f,
+                bboxTop = 0.2f,
+                bboxRight = 0.4f,
+                bboxBottom = 0.4f,
+                originGroupId = "group_big",
+                qualityScore = 0.9f,
+                updatedAtEpochMs = idx.toLong()
+            )
+        }
+        val sunglassesGroup = (1..3).map { idx ->
+            SavedPersonAnchorEntity(
+                anchorId = "sun_$idx",
+                memoryId = "mem_1",
+                itemId = "photo_sun_$idx",
+                bboxLeft = 0.2f,
+                bboxTop = 0.2f,
+                bboxRight = 0.4f,
+                bboxBottom = 0.4f,
+                originGroupId = "group_sunglasses",
+                qualityScore = 0.4f,
+                updatedAtEpochMs = 500L + idx
+            )
+        }
+        val childhoodGroup = (1..2).map { idx ->
+            SavedPersonAnchorEntity(
+                anchorId = "child_$idx",
+                memoryId = "mem_1",
+                itemId = "photo_child_$idx",
+                bboxLeft = 0.2f,
+                bboxTop = 0.2f,
+                bboxRight = 0.4f,
+                bboxBottom = 0.4f,
+                originGroupId = "group_childhood",
+                qualityScore = 0.3f,
+                updatedAtEpochMs = 600L + idx
+            )
+        }
+        val manualPin = SavedPersonAnchorEntity(
+            anchorId = "manual_1",
+            memoryId = "mem_1",
+            itemId = "photo_manual",
+            bboxLeft = 0.2f,
+            bboxTop = 0.2f,
+            bboxRight = 0.4f,
+            bboxBottom = 0.4f,
+            originGroupId = "reassigned",
+            isUserAssigned = true,
+            qualityScore = 0.2f,
+            updatedAtEpochMs = 700L
+        )
+
+        val kept = PersonMemoryEngine.pruneAndDeduplicateAnchors(
+            anchors = bigGroup + sunglassesGroup + childhoodGroup + manualPin,
+            maxPositiveCount = 30,
+            coverItemId = "photo_big_1",
+            coverBox = PersonMemoryEngine.FaceBox(0.2f, 0.2f, 0.4f, 0.4f)
+        )
+        assertEquals(30, kept.size)
+        val keptIds = kept.map { it.anchorId }.toSet()
+        assertTrue("Saved cover must survive pruning", "big_1" in keptIds)
+        assertTrue("User-reassigned face must survive pruning", "manual_1" in keptIds)
+        assertTrue("All 3 sunglasses subgroup anchors must survive", sunglassesGroup.all { it.anchorId in keptIds })
+        assertTrue("All 2 childhood subgroup anchors must survive", childhoodGroup.all { it.anchorId in keptIds })
+    }
+
+    @Test
+    fun durableMemoryRejection_blocksSuggestionsAndConsolidationEvenWithNewPersonIds() {
+        val vecA = FaceClusteringEngine.l2Normalize(floatArrayOf(1f, 0.08f, 0f, 0f))
+        val vecB = FaceClusteringEngine.l2Normalize(floatArrayOf(0.98f, 0.19f, 0f, 0f))
+        val rebuiltClusters = listOf(
+            FaceClusteringEngine.ClusterCandidate("brand_new_p1", vecA, sampleCount = 4, isNamed = true, photoIds = setOf("a"), memoryId = "mem_twin_a"),
+            FaceClusteringEngine.ClusterCandidate("brand_new_p2", vecB, sampleCount = 4, isNamed = false, photoIds = setOf("b"), memoryId = "mem_twin_b")
+        )
+        val rejected = setOf(FaceClusteringEngine.canonicalPairKey("mem_twin_a", "mem_twin_b"))
+        assertTrue(FaceClusteringEngine.findAutoConsolidationPairs(rebuiltClusters, rejectedPairs = rejected).isEmpty())
+        assertTrue(FaceClusteringEngine.findInteractiveMergeSuggestions(rebuiltClusters, rejectedPairs = rejected).isEmpty())
     }
 }

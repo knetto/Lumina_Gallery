@@ -17,10 +17,17 @@ import com.luminagallery.drive.data.local.entity.HiddenAlbumEntity
 import com.luminagallery.drive.data.local.entity.LockedAlbumEntity
 import com.luminagallery.drive.data.local.entity.MediaAnnotationEntity
 import com.luminagallery.drive.data.local.entity.PinnedRootEntity
+import com.luminagallery.drive.data.local.entity.SavedPersonAnchorEntity
+import com.luminagallery.drive.data.local.entity.SavedPersonMemoryEntity
+import com.luminagallery.drive.data.local.entity.SavedRejectedMergeEntity
 import com.luminagallery.drive.data.remote.DriveConstants
 import com.luminagallery.drive.data.remote.NetworkMonitor
 import com.luminagallery.drive.data.remote.auth.CredentialStore
 import com.luminagallery.drive.data.remote.auth.ServiceAccountTokenManager
+import com.luminagallery.drive.data.repository.ai.FaceClusteringEngine
+import com.luminagallery.drive.data.repository.ai.PersonMemoryEngine
+import com.luminagallery.drive.data.repository.ai.PersonMemoryEngine.coverBoxOrNull
+import com.luminagallery.drive.data.repository.ai.PersonMemoryEngine.toFaceBox
 import com.luminagallery.drive.domain.model.AlbumGridItem
 import com.luminagallery.drive.domain.model.AlbumSortMode
 import com.luminagallery.drive.domain.model.DriveFolder
@@ -76,7 +83,9 @@ data class CloudProfileSnapshot(
     val favoriteStoryIds: List<String> = emptyList(),
     val customAlbumCovers: List<CloudCustomAlbumCover> = emptyList(),
     val mediaAnnotations: List<CloudMediaAnnotation> = emptyList(),
-    val albumViewPrefs: List<CloudAlbumViewPref> = emptyList()
+    val albumViewPrefs: List<CloudAlbumViewPref> = emptyList(),
+    val savedPeople: List<CloudSavedPerson> = emptyList(),
+    val savedPersonRejections: List<CloudRejectedPersonPair> = emptyList()
 ) {
     /**
      * Canonical SHA-256 fingerprint of all meaningful profile data (excluding `updatedAtEpochMs`
@@ -99,7 +108,29 @@ data class CloudProfileSnapshot(
             favoriteStoryIds = favoriteStoryIds.distinct().sorted(),
             customAlbumCovers = customAlbumCovers.sortedBy { it.albumId },
             mediaAnnotations = mediaAnnotations.sortedBy { it.itemId },
-            albumViewPrefs = albumViewPrefs.sortedBy { it.albumId }
+            albumViewPrefs = albumViewPrefs.sortedBy { it.albumId },
+            savedPeople = savedPeople
+                .map { person ->
+                    person.copy(
+                        anchors = person.anchors.sortedWith(
+                            compareBy<CloudPersonFaceAnchor> { it.itemId }
+                                .thenBy { it.isExcluded }
+                                .thenBy { it.bboxLeft }
+                                .thenBy { it.bboxTop }
+                                .thenBy { it.originGroupId }
+                        )
+                    )
+                }
+                .sortedBy { it.memoryId },
+            savedPersonRejections = savedPersonRejections
+                .map { pair ->
+                    CloudRejectedPersonPair(
+                        memoryIdA = minOf(pair.memoryIdA, pair.memoryIdB),
+                        memoryIdB = maxOf(pair.memoryIdA, pair.memoryIdB)
+                    )
+                }
+                .distinct()
+                .sortedWith(compareBy<CloudRejectedPersonPair> { it.memoryIdA }.thenBy { it.memoryIdB })
         )
         val encoded = json.encodeToString(canonical).toByteArray(Charsets.UTF_8)
         val digest = MessageDigest.getInstance("SHA-256").digest(encoded)
@@ -107,7 +138,7 @@ data class CloudProfileSnapshot(
     }
 
     companion object {
-        const val CURRENT_SCHEMA_VERSION = 2
+        const val CURRENT_SCHEMA_VERSION = 3
     }
 }
 
@@ -209,13 +240,48 @@ data class CloudAlbumViewPref(
 )
 
 @Serializable
+data class CloudPersonFaceAnchor(
+    val itemId: String,
+    val isLocal: Boolean = false,
+    val localFileName: String? = null,
+    val localRelativePath: String? = null,
+    val localSizeBytes: Long = 0L,
+    val bboxLeft: Float,
+    val bboxTop: Float,
+    val bboxRight: Float,
+    val bboxBottom: Float,
+    val originGroupId: String = "",
+    val isUserAssigned: Boolean = false,
+    val isExcluded: Boolean = false,
+    val qualityScore: Float = 0.5f
+)
+
+@Serializable
+data class CloudSavedPerson(
+    val memoryId: String,
+    val name: String = "",
+    val isFavorite: Boolean = false,
+    val isHidden: Boolean = false,
+    val isUserMerged: Boolean = false,
+    val coverAnchor: CloudPersonFaceAnchor? = null,
+    val anchors: List<CloudPersonFaceAnchor> = emptyList()
+)
+
+@Serializable
+data class CloudRejectedPersonPair(
+    val memoryIdA: String,
+    val memoryIdB: String
+)
+
+@Serializable
 data class PendingLocalCloudRules(
     val layouts: List<CloudAlbumLayout> = emptyList(),
     val hiddenAlbums: List<CloudHiddenAlbum> = emptyList(),
     val lockedAlbums: List<CloudHiddenAlbum> = emptyList(),
     val customAlbumCovers: List<CloudCustomAlbumCover> = emptyList(),
     val mediaAnnotations: List<CloudMediaAnnotation> = emptyList(),
-    val albumViewPrefs: List<CloudAlbumViewPref> = emptyList()
+    val albumViewPrefs: List<CloudAlbumViewPref> = emptyList(),
+    val savedPeople: List<CloudSavedPerson> = emptyList()
 )
 
 @Immutable
@@ -341,7 +407,8 @@ class CloudProfileSyncManager(
     private val okHttpClient: OkHttpClient,
     private val json: Json,
     private val onPinnedRootsRestored: suspend () -> Unit = {},
-    private val onPreferencesRestored: suspend (UserPreferences) -> Unit = {}
+    private val onPreferencesRestored: suspend (UserPreferences) -> Unit = {},
+    private val onSavedPeopleRestored: suspend () -> Unit = {}
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val syncMutex = Mutex()
@@ -350,6 +417,7 @@ class CloudProfileSyncManager(
     private val pinnedRootDao = database.pinnedRootDao()
     private val collectionDao = database.albumCollectionDao()
     private val extrasDao = database.galleryExtrasDao()
+    private val smartDao = database.smartRecognitionDao()
 
     private val _status = MutableStateFlow(CloudProfileSyncStatus())
     val status: StateFlow<CloudProfileSyncStatus> = _status.asStateFlow()
@@ -432,7 +500,8 @@ class CloudProfileSyncManager(
                         collectionDao.getAllCollections().isNotEmpty() ||
                         collectionDao.getAllLayouts().isNotEmpty() ||
                         extrasDao.getAllCustomAlbumCovers().isNotEmpty() ||
-                        extrasDao.getAllAnnotations().isNotEmpty()
+                        extrasDao.getAllAnnotations().isNotEmpty() ||
+                        smartDao.getAllSavedPersonMemories().isNotEmpty()
                     val effectiveSnapshot = if (hasPreSignInLocalData) {
                         mergeSnapshots(local = buildLocalSnapshot(), remote = snapshot, preferLocalConflicts = false)
                     } else {
@@ -689,8 +758,10 @@ class CloudProfileSyncManager(
                     combine(
                         extrasDao.observeAllAnnotations(),
                         extrasDao.observeAllAlbumViewPrefs(),
-                        extrasDao.observeLockedAlbumIds()
-                    ) { anns, viewPrefs, locked -> Triple(anns, viewPrefs, locked) }
+                        extrasDao.observeLockedAlbumIds(),
+                        smartDao.observeAllSavedPersonMemories(),
+                        smartDao.observeAllRejectedMerges()
+                    ) { _, _, _, _, _ -> Unit }
                 ) { _, _, _, _, _ -> Unit }
             ) { _, _, _, _, _ -> Unit }
 
@@ -807,7 +878,8 @@ class CloudProfileSyncManager(
                         pending.lockedAlbums.isEmpty() &&
                         pending.customAlbumCovers.isEmpty() &&
                         pending.mediaAnnotations.isEmpty() &&
-                        pending.albumViewPrefs.isEmpty()
+                        pending.albumViewPrefs.isEmpty() &&
+                        pending.savedPeople.isEmpty()
                     ) return@collect
 
                     reconcilePendingLocalRules(pending, localAlbums)
@@ -972,12 +1044,85 @@ class CloudProfileSyncManager(
             }
         }
 
+        val savedAnchorsToInsert = mutableListOf<SavedPersonAnchorEntity>()
+        val savedCoversToUpdate = mutableListOf<SavedPersonMemoryEntity>()
+        if (pending.savedPeople.isNotEmpty() && localMedia.isNotEmpty()) {
+            val existingMemoriesById = smartDao.getAllSavedPersonMemories().associateBy { it.memoryId }
+            val existingAnchorsByMemory = smartDao.getAllSavedPersonAnchors().groupBy { it.memoryId }
+            for (savedPerson in pending.savedPeople) {
+                val mem = existingMemoriesById[savedPerson.memoryId] ?: continue
+                val existingForMem = existingAnchorsByMemory[savedPerson.memoryId].orEmpty()
+                val existingByItem = existingForMem.groupBy { it.itemId }
+
+                for (anchor in savedPerson.anchors) {
+                    if (!anchor.isLocal && !anchor.itemId.startsWith(LocalMediaRepository.LOCAL_ITEM_PREFIX)) continue
+                    val matchedMedia = LocalAlbumCloudMatcher.resolveTargetLocalMediaItem(
+                        savedItemId = anchor.itemId,
+                        savedFileName = anchor.localFileName,
+                        savedRelativePath = anchor.localRelativePath,
+                        savedSizeBytes = anchor.localSizeBytes,
+                        localMedia = localMedia
+                    ) ?: continue
+                    val box = PersonMemoryEngine.FaceBox(anchor.bboxLeft, anchor.bboxTop, anchor.bboxRight, anchor.bboxBottom)
+                    val alreadyHas = existingByItem[matchedMedia.id].orEmpty().any { ex ->
+                        ex.isExcluded == anchor.isExcluded &&
+                            (box.isLegacyWholePhotoPlaceholder ||
+                                PersonMemoryEngine.isSameFaceLocation(box, ex.toFaceBox(), singleFaceInPhoto = false))
+                    }
+                    if (!alreadyHas) {
+                        savedAnchorsToInsert.add(
+                            SavedPersonAnchorEntity(
+                                anchorId = "anc_${UUID.randomUUID().toString().take(16)}",
+                                memoryId = savedPerson.memoryId,
+                                itemId = matchedMedia.id,
+                                bboxLeft = anchor.bboxLeft,
+                                bboxTop = anchor.bboxTop,
+                                bboxRight = anchor.bboxRight,
+                                bboxBottom = anchor.bboxBottom,
+                                originGroupId = anchor.originGroupId.ifBlank { "cloud_restored" },
+                                isUserAssigned = anchor.isUserAssigned,
+                                isExcluded = anchor.isExcluded,
+                                qualityScore = anchor.qualityScore,
+                                updatedAtEpochMs = now
+                            )
+                        )
+                    }
+                }
+                val coverRule = savedPerson.coverAnchor
+                if (mem.coverItemId.isNullOrBlank() && coverRule != null &&
+                    (coverRule.isLocal || coverRule.itemId.startsWith(LocalMediaRepository.LOCAL_ITEM_PREFIX))
+                ) {
+                    val matchedCover = LocalAlbumCloudMatcher.resolveTargetLocalMediaItem(
+                        savedItemId = coverRule.itemId,
+                        savedFileName = coverRule.localFileName,
+                        savedRelativePath = coverRule.localRelativePath,
+                        savedSizeBytes = coverRule.localSizeBytes,
+                        localMedia = localMedia
+                    )
+                    if (matchedCover != null) {
+                        savedCoversToUpdate.add(
+                            mem.copy(
+                                coverItemId = matchedCover.id,
+                                coverBboxLeft = coverRule.bboxLeft,
+                                coverBboxTop = coverRule.bboxTop,
+                                coverBboxRight = coverRule.bboxRight,
+                                coverBboxBottom = coverRule.bboxBottom,
+                                updatedAtEpochMs = now
+                            )
+                        )
+                    }
+                }
+            }
+        }
+
         if (layoutsToInsert.isNotEmpty() ||
             hiddenToInsert.isNotEmpty() ||
             lockedToInsert.isNotEmpty() ||
             coversToInsert.isNotEmpty() ||
             annotationsToInsert.isNotEmpty() ||
-            viewPrefsToInsert.isNotEmpty()
+            viewPrefsToInsert.isNotEmpty() ||
+            savedAnchorsToInsert.isNotEmpty() ||
+            savedCoversToUpdate.isNotEmpty()
         ) {
             val wasClean = !preferencesManager.getCloudProfileDirty()
             database.withTransaction {
@@ -987,6 +1132,11 @@ class CloudProfileSyncManager(
                 if (coversToInsert.isNotEmpty()) extrasDao.upsertCustomAlbumCovers(coversToInsert)
                 if (annotationsToInsert.isNotEmpty()) extrasDao.upsertAnnotations(annotationsToInsert)
                 if (viewPrefsToInsert.isNotEmpty()) extrasDao.upsertAlbumViewPrefs(viewPrefsToInsert)
+                if (savedCoversToUpdate.isNotEmpty()) smartDao.upsertSavedPersonMemories(savedCoversToUpdate)
+                if (savedAnchorsToInsert.isNotEmpty()) smartDao.upsertSavedPersonAnchors(savedAnchorsToInsert)
+            }
+            if (savedAnchorsToInsert.isNotEmpty() || savedCoversToUpdate.isNotEmpty()) {
+                runCatching { onSavedPeopleRestored() }
             }
             if (wasClean) {
                 lastSyncedFingerprint = runCatching {
@@ -1248,6 +1398,113 @@ class CloudProfileSyncManager(
             cloudViewPrefs.add(oldPref)
         }
 
+        // 10. Durable saved People memories (names, user-combined groups, favorites, hidden, covers, exclusions)
+        val blockedFolderIds = (hiddenIds + lockedIds).toHashSet()
+        val prevPendingPeopleById = previousPending.savedPeople.associateBy { it.memoryId }
+        val allSavedMemories = smartDao.getAllSavedPersonMemories()
+        val anchorsByMemory = smartDao.getAllSavedPersonAnchors().groupBy { it.memoryId }
+        val cloudSavedPeople = mutableListOf<CloudSavedPerson>()
+        for (mem in allSavedMemories) {
+            val rawAnchors = anchorsByMemory[mem.memoryId].orEmpty().filter { anc ->
+                val localItem = localMediaById[anc.itemId]
+                localItem == null || localItem.parentId !in blockedFolderIds
+            }
+            val positiveSelected = PersonMemoryEngine.selectBalancedPositiveAnchors(
+                anchors = rawAnchors.filterNot { it.isExcluded },
+                limit = PersonMemoryEngine.MAX_CLOUD_ANCHORS_PER_MEMORY,
+                coverItemId = mem.coverItemId,
+                coverBox = mem.coverBoxOrNull()
+            )
+            val excludedSelected = rawAnchors
+                .filter { it.isExcluded }
+                .sortedByDescending { it.updatedAtEpochMs }
+                .take(PersonMemoryEngine.MAX_CLOUD_ANCHORS_PER_MEMORY)
+
+            val localCloudAnchors = (positiveSelected + excludedSelected).map { anc ->
+                val isLocal = anc.itemId.startsWith(LocalMediaRepository.LOCAL_ITEM_PREFIX)
+                val mediaMeta = if (isLocal) localMediaById[anc.itemId] else null
+                CloudPersonFaceAnchor(
+                    itemId = anc.itemId,
+                    isLocal = isLocal,
+                    localFileName = mediaMeta?.name,
+                    localRelativePath = mediaMeta?.storagePath ?: mediaMeta?.relativePath,
+                    localSizeBytes = mediaMeta?.sizeBytes ?: 0L,
+                    bboxLeft = anc.bboxLeft,
+                    bboxTop = anc.bboxTop,
+                    bboxRight = anc.bboxRight,
+                    bboxBottom = anc.bboxBottom,
+                    originGroupId = anc.originGroupId,
+                    isUserAssigned = anc.isUserAssigned,
+                    isExcluded = anc.isExcluded,
+                    qualityScore = anc.qualityScore
+                )
+            }.toMutableList()
+
+            // Preserve unmatched local anchors from another phone whose photos aren't on this device yet
+            val pendingForMem = prevPendingPeopleById[mem.memoryId]
+            if (pendingForMem != null) {
+                val coveredIds = localCloudAnchors.mapTo(HashSet()) { it.itemId }
+                for (oldAnc in pendingForMem.anchors) {
+                    if (!oldAnc.isLocal && !oldAnc.itemId.startsWith(LocalMediaRepository.LOCAL_ITEM_PREFIX)) continue
+                    if (oldAnc.itemId in coveredIds) continue
+                    val matchedHere = LocalAlbumCloudMatcher.resolveTargetLocalMediaItem(
+                        savedItemId = oldAnc.itemId,
+                        savedFileName = oldAnc.localFileName,
+                        savedRelativePath = oldAnc.localRelativePath,
+                        savedSizeBytes = oldAnc.localSizeBytes,
+                        localMedia = localMediaList
+                    )
+                    if (matchedHere != null) continue
+                    if (localCloudAnchors.size < PersonMemoryEngine.MAX_CLOUD_ANCHORS_PER_MEMORY * 2) {
+                        localCloudAnchors.add(oldAnc)
+                    }
+                }
+            }
+
+            val coverItemId = mem.coverItemId
+            val coverAnchor = if (!coverItemId.isNullOrBlank()) {
+                val isLocal = coverItemId.startsWith(LocalMediaRepository.LOCAL_ITEM_PREFIX)
+                val mediaMeta = if (isLocal) localMediaById[coverItemId] else null
+                if (mediaMeta != null && mediaMeta.parentId in blockedFolderIds) {
+                    null
+                } else {
+                    CloudPersonFaceAnchor(
+                        itemId = coverItemId,
+                        isLocal = isLocal,
+                        localFileName = mediaMeta?.name,
+                        localRelativePath = mediaMeta?.storagePath ?: mediaMeta?.relativePath,
+                        localSizeBytes = mediaMeta?.sizeBytes ?: 0L,
+                        bboxLeft = mem.coverBboxLeft ?: 0f,
+                        bboxTop = mem.coverBboxTop ?: 0f,
+                        bboxRight = mem.coverBboxRight ?: 1f,
+                        bboxBottom = mem.coverBboxBottom ?: 1f,
+                        originGroupId = "cover",
+                        isUserAssigned = true,
+                        isExcluded = false,
+                        qualityScore = 1f
+                    )
+                }
+            } else {
+                pendingForMem?.coverAnchor
+            }
+
+            cloudSavedPeople.add(
+                CloudSavedPerson(
+                    memoryId = mem.memoryId,
+                    name = mem.name,
+                    isFavorite = mem.isFavorite,
+                    isHidden = mem.isHidden,
+                    isUserMerged = mem.isUserMerged,
+                    coverAnchor = coverAnchor,
+                    anchors = localCloudAnchors
+                )
+            )
+        }
+        val validMemIds = cloudSavedPeople.mapTo(HashSet()) { it.memoryId }
+        val cloudRejections = smartDao.getAllRejectedMerges()
+            .filter { it.memoryIdA in validMemIds && it.memoryIdB in validMemIds }
+            .map { CloudRejectedPersonPair(it.memoryIdA, it.memoryIdB) }
+
         return CloudProfileSnapshot(
             schemaVersion = CloudProfileSnapshot.CURRENT_SCHEMA_VERSION,
             updatedAtEpochMs = System.currentTimeMillis(),
@@ -1275,7 +1532,9 @@ class CloudProfileSyncManager(
             favoriteStoryIds = favStories,
             customAlbumCovers = cloudCovers,
             mediaAnnotations = cloudAnnotations,
-            albumViewPrefs = cloudViewPrefs
+            albumViewPrefs = cloudViewPrefs,
+            savedPeople = cloudSavedPeople,
+            savedPersonRejections = cloudRejections
         )
     }
 
@@ -1298,6 +1557,10 @@ class CloudProfileSyncManager(
         val localCoverRules = mutableListOf<CloudCustomAlbumCover>()
         val localAnnotationRules = mutableListOf<CloudMediaAnnotation>()
         val localViewPrefRules = mutableListOf<CloudAlbumViewPref>()
+        val localSavedPeopleRules = mutableListOf<CloudSavedPerson>()
+        val hasSavedPeopleSection = snapshot.schemaVersion >= 3 ||
+            snapshot.savedPeople.isNotEmpty() ||
+            snapshot.savedPersonRejections.isNotEmpty()
 
         database.withTransaction {
             // 2. Authoritatively sync pinned Google Drive album links (propagates unpins too)
@@ -1563,6 +1826,120 @@ class CloudProfileSyncManager(
             if (prefsToUpsert.isNotEmpty()) {
                 extrasDao.upsertAlbumViewPrefs(prefsToUpsert)
             }
+
+            // 10. Sync durable saved People memories (names, combines, favorites, hidden, covers, exclusions)
+            // Backward-compatible: never wipe local people memories when restoring a pre-v3 cloud backup.
+            if (hasSavedPeopleSection) {
+                smartDao.clearAllSavedPersonMemories()
+                smartDao.clearAllSavedPersonAnchors()
+                smartDao.clearAllRejectedMerges()
+
+                val memoriesToUpsert = mutableListOf<SavedPersonMemoryEntity>()
+                val anchorsToUpsert = mutableListOf<SavedPersonAnchorEntity>()
+                for (person in snapshot.savedPeople) {
+                    if (person.memoryId.isBlank()) continue
+                    val localAnchorsForPending = person.anchors.filter {
+                        it.isLocal || it.itemId.startsWith(LocalMediaRepository.LOCAL_ITEM_PREFIX)
+                    }
+                    val coverIsLocal = person.coverAnchor?.let {
+                        it.isLocal || it.itemId.startsWith(LocalMediaRepository.LOCAL_ITEM_PREFIX)
+                    } == true
+                    if (localAnchorsForPending.isNotEmpty() || coverIsLocal) {
+                        localSavedPeopleRules.add(
+                            person.copy(
+                                coverAnchor = if (coverIsLocal) person.coverAnchor else null,
+                                anchors = localAnchorsForPending
+                            )
+                        )
+                    }
+
+                    val resolvedCoverItemId = person.coverAnchor?.let { cov ->
+                        if (cov.isLocal || cov.itemId.startsWith(LocalMediaRepository.LOCAL_ITEM_PREFIX)) {
+                            LocalAlbumCloudMatcher.resolveTargetLocalMediaItem(
+                                savedItemId = cov.itemId,
+                                savedFileName = cov.localFileName,
+                                savedRelativePath = cov.localRelativePath,
+                                savedSizeBytes = cov.localSizeBytes,
+                                localMedia = localMedia
+                            )?.id
+                        } else {
+                            cov.itemId
+                        }
+                    }
+
+                    val coverRule = person.coverAnchor
+                    memoriesToUpsert.add(
+                        SavedPersonMemoryEntity(
+                            memoryId = person.memoryId,
+                            name = person.name,
+                            isFavorite = person.isFavorite,
+                            isHidden = person.isHidden,
+                            isUserMerged = person.isUserMerged,
+                            coverItemId = resolvedCoverItemId,
+                            coverBboxLeft = if (resolvedCoverItemId != null && coverRule != null) coverRule.bboxLeft else null,
+                            coverBboxTop = if (resolvedCoverItemId != null && coverRule != null) coverRule.bboxTop else null,
+                            coverBboxRight = if (resolvedCoverItemId != null && coverRule != null) coverRule.bboxRight else null,
+                            coverBboxBottom = if (resolvedCoverItemId != null && coverRule != null) coverRule.bboxBottom else null,
+                            updatedAtEpochMs = now
+                        )
+                    )
+
+                    for (anc in person.anchors) {
+                        val resolvedItemId = if (anc.isLocal || anc.itemId.startsWith(LocalMediaRepository.LOCAL_ITEM_PREFIX)) {
+                            LocalAlbumCloudMatcher.resolveTargetLocalMediaItem(
+                                savedItemId = anc.itemId,
+                                savedFileName = anc.localFileName,
+                                savedRelativePath = anc.localRelativePath,
+                                savedSizeBytes = anc.localSizeBytes,
+                                localMedia = localMedia
+                            )?.id ?: continue
+                        } else {
+                            anc.itemId
+                        }
+                        anchorsToUpsert.add(
+                            SavedPersonAnchorEntity(
+                                anchorId = "anc_${UUID.randomUUID().toString().take(16)}",
+                                memoryId = person.memoryId,
+                                itemId = resolvedItemId,
+                                bboxLeft = anc.bboxLeft,
+                                bboxTop = anc.bboxTop,
+                                bboxRight = anc.bboxRight,
+                                bboxBottom = anc.bboxBottom,
+                                originGroupId = anc.originGroupId.ifBlank { "cloud_restored" },
+                                isUserAssigned = anc.isUserAssigned,
+                                isExcluded = anc.isExcluded,
+                                qualityScore = anc.qualityScore,
+                                updatedAtEpochMs = now
+                            )
+                        )
+                    }
+                }
+                if (memoriesToUpsert.isNotEmpty()) {
+                    smartDao.upsertSavedPersonMemories(memoriesToUpsert)
+                }
+                if (anchorsToUpsert.isNotEmpty()) {
+                    smartDao.upsertSavedPersonAnchors(anchorsToUpsert)
+                }
+                val rejectionsToUpsert = snapshot.savedPersonRejections
+                    .filter { it.memoryIdA.isNotBlank() && it.memoryIdB.isNotBlank() && it.memoryIdA != it.memoryIdB }
+                    .map { pair ->
+                        val a = minOf(pair.memoryIdA, pair.memoryIdB)
+                        val b = maxOf(pair.memoryIdA, pair.memoryIdB)
+                        SavedRejectedMergeEntity(
+                            pairKey = FaceClusteringEngine.canonicalPairKey(a, b),
+                            memoryIdA = a,
+                            memoryIdB = b,
+                            createdAtEpochMs = now
+                        )
+                    }
+                if (rejectionsToUpsert.isNotEmpty()) {
+                    smartDao.upsertRejectedMerges(rejectionsToUpsert)
+                }
+            }
+        }
+
+        if (hasSavedPeopleSection && snapshot.savedPeople.isNotEmpty()) {
+            runCatching { onSavedPeopleRestored() }
         }
 
         // Persist local DCIM path rules so folders/photos copied later onto a new phone auto-slot into place!
@@ -1572,7 +1949,8 @@ class CloudProfileSyncManager(
             lockedAlbums = localLockedRules,
             customAlbumCovers = localCoverRules,
             mediaAnnotations = localAnnotationRules,
-            albumViewPrefs = localViewPrefRules
+            albumViewPrefs = localViewPrefRules,
+            savedPeople = localSavedPeopleRules
         )
         preferencesManager.setPendingLocalCloudRulesJson(json.encodeToString(pendingRules))
 
@@ -1619,6 +1997,16 @@ class CloudProfileSyncManager(
             },
             albumViewPrefs = snapshot.albumViewPrefs.filter {
                 it.isLocal || LocalMediaRepository.isLocalFolderId(it.albumId)
+            },
+            savedPeople = snapshot.savedPeople.mapNotNull { person ->
+                val localAnchors = person.anchors.filter {
+                    it.isLocal || it.itemId.startsWith(LocalMediaRepository.LOCAL_ITEM_PREFIX)
+                }
+                val localCover = person.coverAnchor?.takeIf {
+                    it.isLocal || it.itemId.startsWith(LocalMediaRepository.LOCAL_ITEM_PREFIX)
+                }
+                if (localAnchors.isEmpty() && localCover == null) null
+                else person.copy(coverAnchor = localCover, anchors = localAnchors)
             }
         )
         preferencesManager.setPendingLocalCloudRulesJson(json.encodeToString(refreshedPending))
@@ -1767,6 +2155,32 @@ class CloudProfileSyncManager(
                 return map.values.toList()
             }
 
+            val mergedPeople = run {
+                val byId = LinkedHashMap<String, CloudSavedPerson>(primary.savedPeople.size + secondary.savedPeople.size)
+                for (p in secondary.savedPeople) byId[p.memoryId] = p
+                for (p in primary.savedPeople) {
+                    val existing = byId[p.memoryId]
+                    byId[p.memoryId] = if (existing == null) {
+                        p
+                    } else {
+                        val mergedAnchors = unionByKey(p.anchors, existing.anchors) { anc ->
+                            "${anc.itemId}|${anc.isExcluded}|${(anc.bboxLeft * 20).toInt()}_${(anc.bboxTop * 20).toInt()}"
+                        }
+                        p.copy(
+                            name = p.name.ifBlank { existing.name },
+                            isFavorite = p.isFavorite || existing.isFavorite,
+                            isUserMerged = p.isUserMerged || existing.isUserMerged,
+                            coverAnchor = p.coverAnchor ?: existing.coverAnchor,
+                            anchors = mergedAnchors
+                        )
+                    }
+                }
+                byId.values.toList()
+            }
+            val mergedRejections = unionByKey(primary.savedPersonRejections, secondary.savedPersonRejections) { pair ->
+                FaceClusteringEngine.canonicalPairKey(pair.memoryIdA, pair.memoryIdB)
+            }
+
             return CloudProfileSnapshot(
                 schemaVersion = CloudProfileSnapshot.CURRENT_SCHEMA_VERSION,
                 updatedAtEpochMs = System.currentTimeMillis(),
@@ -1780,7 +2194,9 @@ class CloudProfileSyncManager(
                 favoriteStoryIds = (primary.favoriteStoryIds + secondary.favoriteStoryIds).distinct(),
                 customAlbumCovers = unionByKey(primary.customAlbumCovers, secondary.customAlbumCovers) { it.albumId },
                 mediaAnnotations = unionByKey(primary.mediaAnnotations, secondary.mediaAnnotations) { it.itemId },
-                albumViewPrefs = unionByKey(primary.albumViewPrefs, secondary.albumViewPrefs) { it.albumId }
+                albumViewPrefs = unionByKey(primary.albumViewPrefs, secondary.albumViewPrefs) { it.albumId },
+                savedPeople = mergedPeople,
+                savedPersonRejections = mergedRejections
             )
         }
 

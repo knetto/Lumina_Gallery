@@ -87,7 +87,8 @@ object FaceClusteringEngine {
         val centroid: FloatArray,
         val sampleCount: Int,
         val isNamed: Boolean = false,
-        val photoIds: Set<String> = emptySet()
+        val photoIds: Set<String> = emptySet(),
+        val memoryId: String? = null
     ) {
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
@@ -96,7 +97,8 @@ object FaceClusteringEngine {
                 centroid.contentEquals(other.centroid) &&
                 sampleCount == other.sampleCount &&
                 isNamed == other.isNamed &&
-                photoIds == other.photoIds
+                photoIds == other.photoIds &&
+                memoryId == other.memoryId
         }
 
         override fun hashCode(): Int {
@@ -105,6 +107,7 @@ object FaceClusteringEngine {
             result = 31 * result + sampleCount
             result = 31 * result + isNamed.hashCode()
             result = 31 * result + photoIds.hashCode()
+            result = 31 * result + (memoryId?.hashCode() ?: 0)
             return result
         }
     }
@@ -360,6 +363,21 @@ object FaceClusteringEngine {
         return bestId?.let { MatchResult(personId = it, similarity = bestSim) }
     }
 
+    private fun isRejectedPair(
+        a: ClusterCandidate,
+        b: ClusterCandidate,
+        rejectedPairs: Set<String>
+    ): Boolean {
+        if (rejectedPairs.isEmpty()) return false
+        if (canonicalPairKey(a.personId, b.personId) in rejectedPairs) return true
+        val memA = a.memoryId
+        val memB = b.memoryId
+        if (!memA.isNullOrBlank() && !memB.isNullOrBlank() && memA != memB) {
+            if (canonicalPairKey(memA, memB) in rejectedPairs) return true
+        }
+        return false
+    }
+
     /**
      * Finds high-confidence split cluster pairs that belong to the same person (never merging
      * two differently-named people, never merging user-rejected pairs, and never merging clusters
@@ -384,7 +402,7 @@ object FaceClusteringEngine {
                 val source = sorted[j]
                 if (source.personId in absorbed) continue
                 if (target.isNamed && source.isNamed) continue
-                if (canonicalPairKey(target.personId, source.personId) in rejectedPairs) continue
+                if (isRejectedPair(target, source, rejectedPairs)) continue
                 if (target.centroid.size != source.centroid.size) continue
                 if (target.photoIds.isNotEmpty() && source.photoIds.any { it in target.photoIds }) continue
 
@@ -430,7 +448,7 @@ object FaceClusteringEngine {
             for (j in (i + 1) until sorted.size) {
                 val b = sorted[j]
                 if (a.isNamed && b.isNamed) continue
-                if (canonicalPairKey(a.personId, b.personId) in rejectedPairs) continue
+                if (isRejectedPair(a, b, rejectedPairs)) continue
                 if (a.centroid.size != b.centroid.size) continue
                 if (a.photoIds.isNotEmpty() && b.photoIds.any { it in a.photoIds }) continue
                 val sim = cosineSimilarity(a.centroid, b.centroid)

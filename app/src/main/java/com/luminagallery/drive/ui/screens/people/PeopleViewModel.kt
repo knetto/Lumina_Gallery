@@ -85,18 +85,18 @@ class PeopleViewModel(
         val visible = summaries.filterNot { it.isHidden }
         if (visible.size < 2) return@combine emptyList()
         val summaryById = visible.associateBy { it.personId }
-        val centroidById = rawEntities.associate {
-            it.personId to FaceClusteringEngine.decodeEmbedding(it.centroidBlob)
-        }
+        val entityById = rawEntities.associateBy { it.personId }
         val candidates = visible.mapNotNull { s ->
-            val centroid = centroidById[s.personId] ?: return@mapNotNull null
+            val entity = entityById[s.personId] ?: return@mapNotNull null
+            val centroid = FaceClusteringEngine.decodeEmbedding(entity.centroidBlob)
             if (centroid.isEmpty()) return@mapNotNull null
             FaceClusteringEngine.ClusterCandidate(
                 personId = s.personId,
                 centroid = centroid,
                 sampleCount = s.photoCount,
                 isNamed = s.isNamed,
-                photoIds = s.photoIds
+                photoIds = s.photoIds,
+                memoryId = entity.memoryId
             )
         }
         FaceClusteringEngine.findInteractiveMergeSuggestions(
@@ -197,7 +197,7 @@ class PeopleViewModel(
             clearSelection()
             smartRecognitionManager.pauseActiveScan()
             SmartScanScheduler.cancelActiveScan(appContext)
-            snackbarFlow.value = "Rebuilding People & Objects in background (keeping saved names)…"
+            snackbarFlow.value = "Rebuilding People & Objects in background (keeping saved names & combines)…"
             smartRecognitionManager.resetAllIndexData(preserveNames = true)
             val onWifi = networkMonitor.networkState.value.isUnmeteredWifi
             SmartScanScheduler.startBackgroundLibraryScan(appContext, wifiOnly = onWifi)

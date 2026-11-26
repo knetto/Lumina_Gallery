@@ -186,6 +186,9 @@ class AppContainer(context: Context) {
         onPreferencesRestored = { restored ->
             coilCacheManager.updateMaxCacheSizeMb(restored.maxCacheSizeMb)
             DriveSyncScheduler.setBackgroundSyncEnabled(appContext, restored.backgroundSyncEnabled)
+        },
+        onSavedPeopleRestored = {
+            smartRecognitionManager.reconcileSavedMemoriesNow()
         }
     )
 
