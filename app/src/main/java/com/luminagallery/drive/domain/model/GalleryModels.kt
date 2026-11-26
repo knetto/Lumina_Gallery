@@ -256,7 +256,8 @@ data class ExifMetadata(
     val videoFrameRate: Float? = null,
     val videoBitrateBps: Long? = null,
     val videoCodec: String? = null,
-    val audioSummary: String? = null
+    val audioSummary: String? = null,
+    val exposureMode: String? = null
 ) {
     val hasCameraDetails: Boolean
         get() = !cameraMake.isNullOrBlank() ||

@@ -24,6 +24,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -203,6 +204,12 @@ class AlbumOrganizationRepository(
     )
 
     fun observeSidebarTree(): StateFlow<List<SidebarAlbumNode>> = sharedSidebarTreeState
+
+    fun warmCaches() {
+        repoScope.launch {
+            sharedSidebarTreeState.collect {}
+        }
+    }
 
     suspend fun getCollectionBreadcrumbs(collectionId: String): List<BreadcrumbItem> =
         withContext(Dispatchers.IO) {

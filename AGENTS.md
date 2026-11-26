@@ -28,6 +28,14 @@ The installed app on the user's phone checks `apk/Lumina-Gallery.apk` on `origin
 5. **Commit code changes and `apk/Lumina-Gallery.apk` together** in a single commit on `main` using a clear, human-readable commit message (this message is displayed inside the in-app update dialog on the phone).
 6. **Push to `origin main`** (`git push origin main`) so the phone receives the update prompt immediately.
 
+## Local Emulator Auto-Refresh Workflow
+
+Whenever you finish making app code changes under `app/src/main` (or `app/build.gradle.kts` / `gradle/libs.versions.toml`), check if the local Android emulator is already running (`& "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe" devices` lists an `emulator-*` device in `device` state):
+
+- **If an emulator is running:** automatically run `.\tools\dev-emulator.ps1 -SkipPhotos` so the lightweight `x86_64` debug APK is rebuilt, installed onto the emulator (never onto a USB-connected phone), and relaunched automatically for the user to see immediately.
+- **If no emulator is running** (or the changes only touch unit tests, docs, or tooling scripts, or the user explicitly asks to skip it): do **not** launch the emulator unprompted.
+- When the user asks to commit, still follow the **Mandatory Commit & Phone Auto-Update Workflow** above (`assembleRelease` with `arm64-v8a` + `armeabi-v7a`).
+
 ## Project Guardrails & Conventions
 
 - **Shell environment:** Windows PowerShell 5.1 — use `;` (not `&&`) to chain commands, and set `$env:JAVA_HOME = 'C:\Users\corne\.jdks\jdk-21.0.13.1+2'` before invoking `.\gradlew.bat`.

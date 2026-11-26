@@ -405,15 +405,43 @@ class HomeViewModel(
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000L),
-        initialValue = HomeUiState(
+        initialValue = buildInstantInitialState(networkMonitor)
+    )
+
+    private fun buildInstantInitialState(networkMonitor: NetworkMonitor): HomeUiState {
+        val prefs = preferencesManager.latestPreferences
+        val excluded = extrasRepository.latestLockedAlbumIds + extrasRepository.latestHiddenAlbumIds
+        val cachedPics = localMediaRepository.getCachedAllMedia().let { list ->
+            if (excluded.isEmpty()) list else list.filterNot { it.parentId in excluded }
+        }
+        val cachedLocProgress = extrasRepository.locationProgressFlow.value
+        val cachedTimeline = if (cachedPics.isNotEmpty()) {
+            buildTimelineEntries(
+                items = cachedPics,
+                dayLocations = if (prefs.showDayLocationHeaders) cachedLocProgress.dayLocations else emptyMap()
+            )
+        } else emptyList()
+        return HomeUiState(
+            selectedTab = prefs.defaultStartTab,
             hasLocalMediaPermission = localMediaRepository.hasMediaPermission(),
             hasPartialMediaPermission = localMediaRepository.hasPartialMediaPermission(),
-            gridColumns = preferencesManager.latestPreferences.gridColumns,
-            albumGridColumns = preferencesManager.latestPreferences.albumGridColumns,
+            localPictures = cachedPics,
+            timelineEntries = cachedTimeline,
+            localAlbums = localMediaRepository.getCachedLocalAlbums(),
+            unifiedAlbumGridItems = organizationRepository.getCachedGridItems(null),
+            pinnedRoots = repository.getCachedPinnedRoots(),
+            favoriteItemIds = extrasRepository.latestFavoriteItemIds,
+            hiddenAlbumIds = extrasRepository.latestHiddenAlbumIds,
+            albumSortMode = prefs.albumSortMode,
+            gridColumns = prefs.gridColumns,
+            albumGridColumns = prefs.albumGridColumns,
+            showCloudBadges = prefs.showCloudBadges,
+            lockHiddenAlbums = prefs.lockHiddenAlbums,
+            highResThumbnailsAllowed = networkMonitor.networkState.value.isUnmeteredWifi || !prefs.wifiOnlyHighRes,
             serviceAccountState = credentialStore.state.value,
             networkState = networkMonitor.networkState.value
         )
-    )
+    }
 
     init {
         viewModelScope.launch {

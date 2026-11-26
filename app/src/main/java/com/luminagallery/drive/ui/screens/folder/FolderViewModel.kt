@@ -25,6 +25,7 @@ import com.luminagallery.drive.domain.usecase.ExportMediaUseCase
 import com.luminagallery.drive.domain.usecase.SyncGalleryUseCase
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -134,11 +135,19 @@ class FolderViewModel(
 ) : ViewModel() {
 
     private val initialPrefs = preferencesManager.latestPreferences
+    private val initialSavedViewPref = extrasRepository.getCachedAlbumViewPref(initialFolderId)
+    private val initialSavedSort = initialSavedViewPref?.sortName?.let {
+        runCatching { AlbumMediaSort.valueOf(it) }.getOrNull()
+    } ?: AlbumMediaSort.DATE_DESC
+    private val initialSavedGroupBy = initialSavedViewPref?.groupByName?.let {
+        runCatching { AlbumMediaGroupBy.valueOf(it) }.getOrNull()
+    } ?: AlbumMediaGroupBy.NONE
+
     private val activeFolderFlow = MutableStateFlow(initialFolderId to initialFolderName)
     private val viewModeFlow = MutableStateFlow(FolderViewMode.HIERARCHY)
     private val mediaFilterFlow = MutableStateFlow(AlbumMediaFilter.ALL)
-    private val mediaGroupByFlow = MutableStateFlow(AlbumMediaGroupBy.NONE)
-    private val mediaSortFlow = MutableStateFlow(AlbumMediaSort.DATE_DESC)
+    private val mediaGroupByFlow = MutableStateFlow(initialSavedGroupBy)
+    private val mediaSortFlow = MutableStateFlow(initialSavedSort)
     private val showSidebarFlow = MutableStateFlow(initialPrefs.showAlbumSidebarDefault)
     private val breadcrumbsFlow = MutableStateFlow(listOf(BreadcrumbItem(initialFolderId, initialFolderName)))
     private val isRefreshingFlow = MutableStateFlow(false)
@@ -407,18 +416,20 @@ class FolderViewModel(
     ): FolderUiState {
         val isLocal = LocalMediaRepository.isLocalFolderId(initialFolderId)
         val cachedSubfolders = if (isLocal) emptyList() else repository.getCachedSubfolders(initialFolderId).orEmpty()
-        val cachedMedia = if (isLocal) {
+        val rawCachedMedia = if (isLocal) {
             localMediaRepository.getCachedAlbumMedia(initialFolderId)
         } else {
             repository.getCachedFolderMedia(initialFolderId).orEmpty()
         }
-        val initialEntries = if (cachedSubfolders.isNotEmpty() || cachedMedia.isNotEmpty()) {
+        val favIds = extrasRepository.latestFavoriteItemIds
+        val sortedMedia = applyFilterAndSort(rawCachedMedia, AlbumMediaFilter.ALL, initialSavedSort, favIds)
+        val initialEntries = if (cachedSubfolders.isNotEmpty() || sortedMedia.isNotEmpty()) {
             buildGroupedEntries(
                 mode = FolderViewMode.HIERARCHY,
                 subfolders = cachedSubfolders,
-                mediaItems = cachedMedia,
-                groupBy = AlbumMediaGroupBy.NONE,
-                sort = AlbumMediaSort.DATE_DESC,
+                mediaItems = sortedMedia,
+                groupBy = initialSavedGroupBy,
+                sort = initialSavedSort,
                 subfolderColumns = initialPrefs.albumGridColumns
             )
         } else {
@@ -428,29 +439,45 @@ class FolderViewModel(
             folderId = initialFolderId,
             folderName = initialFolderName,
             isLocalAlbum = isLocal,
+            mediaGroupBy = initialSavedGroupBy,
+            mediaSort = initialSavedSort,
             showSidebar = initialPrefs.showAlbumSidebarDefault,
             sidebarNodes = organizationRepository.currentSidebarTree(),
             breadcrumbs = listOf(BreadcrumbItem(initialFolderId, initialFolderName)),
             subfolders = cachedSubfolders,
-            mediaItems = cachedMedia,
-            unfilteredMediaItems = cachedMedia,
-            unfilteredItemCount = cachedMedia.size,
+            mediaItems = sortedMedia,
+            unfilteredMediaItems = rawCachedMedia,
+            unfilteredItemCount = rawCachedMedia.size,
             gridEntries = initialEntries,
             gridColumns = initialPrefs.gridColumns,
             albumGridColumns = initialPrefs.albumGridColumns,
             showCloudBadges = initialPrefs.showCloudBadges,
-            hasCompletedInitialLoad = isLocal || cachedSubfolders.isNotEmpty() || cachedMedia.isNotEmpty(),
+            hasCompletedInitialLoad = isLocal || cachedSubfolders.isNotEmpty() || rawCachedMedia.isNotEmpty(),
             isOnline = initialNet.isOnline,
             isUnmeteredWifi = initialNet.isUnmeteredWifi || !initialPrefs.wifiOnlyHighRes,
-            favoriteItemIds = extrasRepository.latestFavoriteItemIds
+            favoriteItemIds = favIds
         )
     }
 
     init {
-        loadSavedAlbumViewPref(initialFolderId)
+        if (initialSavedViewPref == null) {
+            loadSavedAlbumViewPref(initialFolderId)
+        }
         if (!LocalMediaRepository.isLocalFolderId(initialFolderId)) {
             loadBreadcrumbs(initialFolderId)
-            refreshFolder(silent = true)
+            val hasWarmCache = !repository.getCachedFolderMedia(initialFolderId).isNullOrEmpty() ||
+                !repository.getCachedSubfolders(initialFolderId).isNullOrEmpty()
+            if (hasWarmCache) {
+                // Defer silent network refresh briefly so folder morph + thumbnail decode run at 120fps
+                viewModelScope.launch {
+                    delay(650L)
+                    if (activeFolderFlow.value.first == initialFolderId) {
+                        refreshFolder(silent = true)
+                    }
+                }
+            } else {
+                refreshFolder(silent = true)
+            }
         }
     }
 
@@ -475,17 +502,39 @@ class FolderViewModel(
     fun switchToAlbum(folderId: String, folderName: String) {
         if (activeFolderFlow.value.first == folderId) return
         val local = LocalMediaRepository.isLocalFolderId(folderId)
+        val cachedPref = extrasRepository.getCachedAlbumViewPref(folderId)
+        if (cachedPref != null) {
+            mediaSortFlow.value = runCatching { AlbumMediaSort.valueOf(cachedPref.sortName) }
+                .getOrDefault(AlbumMediaSort.DATE_DESC)
+            mediaGroupByFlow.value = runCatching { AlbumMediaGroupBy.valueOf(cachedPref.groupByName) }
+                .getOrDefault(AlbumMediaGroupBy.NONE)
+        }
         activeFolderFlow.value = folderId to folderName
         selectedIdsFlow.value = emptySet()
         forceSelectionFlow.value = false
         mediaFilterFlow.value = AlbumMediaFilter.ALL
         viewModeFlow.value = FolderViewMode.HIERARCHY
         breadcrumbsFlow.value = listOf(BreadcrumbItem(folderId, folderName))
-        hasLoadedOnceFlow.value = local
-        loadSavedAlbumViewPref(folderId)
+        val hasWarmDrive = !local && (
+            !repository.getCachedFolderMedia(folderId).isNullOrEmpty() ||
+                !repository.getCachedSubfolders(folderId).isNullOrEmpty()
+            )
+        hasLoadedOnceFlow.value = local || hasWarmDrive
+        if (cachedPref == null) {
+            loadSavedAlbumViewPref(folderId)
+        }
         if (!local) {
             loadBreadcrumbs(folderId)
-            refreshFolder(silent = true)
+            if (hasWarmDrive) {
+                viewModelScope.launch {
+                    delay(650L)
+                    if (activeFolderFlow.value.first == folderId) {
+                        refreshFolder(silent = true)
+                    }
+                }
+            } else {
+                refreshFolder(silent = true)
+            }
         }
     }
 

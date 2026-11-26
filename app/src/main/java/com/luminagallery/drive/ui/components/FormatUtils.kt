@@ -54,23 +54,104 @@ object FormatUtils {
     }
 
     fun formatShutterSpeed(exposureTime: Float?): String? {
-        if (exposureTime == null || exposureTime <= 0f) return null
-        return if (exposureTime >= 1f) {
-            String.format(Locale.US, "%.1fs", exposureTime)
-        } else {
-            val reciprocal = (1f / exposureTime).roundToInt().coerceAtLeast(1)
-            "1/${reciprocal}s"
+        if (exposureTime == null || !exposureTime.isFinite() || exposureTime <= 0f) return null
+        return when {
+            exposureTime >= 1f -> {
+                val rounded = exposureTime.roundToInt()
+                if (kotlin.math.abs(exposureTime - rounded) < 0.05f) {
+                    "${rounded}s"
+                } else {
+                    String.format(Locale.US, "%.1fs", exposureTime)
+                }
+            }
+            kotlin.math.abs(exposureTime - 0.5f) < 0.02f -> "1/2s"
+            exposureTime >= 0.3f -> String.format(Locale.US, "%.1fs", exposureTime)
+            else -> {
+                val reciprocal = (1f / exposureTime).roundToInt().coerceAtLeast(1)
+                "1/${reciprocal}s"
+            }
         }
     }
 
     fun formatAperture(aperture: Float?): String? {
-        if (aperture == null || aperture <= 0f) return null
-        return String.format(Locale.US, "f/%.1f", aperture)
+        if (aperture == null || !aperture.isFinite() || aperture <= 0f) return null
+        val rounded = aperture.roundToInt()
+        return if (kotlin.math.abs(aperture - rounded) < 0.05f) {
+            "f/$rounded"
+        } else {
+            String.format(Locale.US, "f/%.1f", aperture)
+        }
     }
 
     fun formatFocalLength(focalLength: Float?): String? {
-        if (focalLength == null || focalLength <= 0f) return null
-        return "${focalLength.roundToInt()} mm"
+        if (focalLength == null || !focalLength.isFinite() || focalLength <= 0f) return null
+        val rounded = focalLength.roundToInt()
+        return if (focalLength < 10f && kotlin.math.abs(focalLength - rounded) >= 0.05f) {
+            String.format(Locale.US, "%.1f mm", focalLength)
+        } else {
+            "$rounded mm"
+        }
+    }
+
+    /**
+     * Strips a redundant leading camera make prefix from the lens string when the camera body
+     * already displays that brand (e.g. "FUJIFILM XF70-300mm..." under "FUJIFILM X-T5"
+     * becomes "XF70-300mm..."). Third-party lenses (e.g. SIGMA on a FUJIFILM body) stay intact.
+     */
+    fun formatLensName(lens: String?, cameraMake: String?, cameraModel: String?): String? {
+        val cleanLens = lens?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val make = cameraMake?.trim()?.takeIf { it.isNotEmpty() }
+        val model = cameraModel?.trim()?.takeIf { it.isNotEmpty() }
+        var result = cleanLens
+        if (make != null && result.startsWith("$make ", ignoreCase = true)) {
+            val stripped = result.substring(make.length).trim()
+            if (stripped.length >= 3) result = stripped
+        }
+        if (model != null && result.startsWith("$model ", ignoreCase = true)) {
+            val stripped = result.substring(model.length).trim()
+            if (stripped.length >= 3) {
+                result = stripped.replaceFirstChar { it.uppercase() }
+            }
+        }
+        return result
+    }
+
+    /**
+     * Decodes EXIF ExposureProgram (preferred) and ExposureMode tags into a concise shooting mode.
+     * Omits plain generic "Auto" exposure mode so smartphone snapshots stay uncluttered.
+     */
+    fun decodeExifExposureMode(programRaw: Int, modeRaw: Int): String? {
+        if (modeRaw == 2) return "Auto bracket"
+        val fromProgram = when (programRaw) {
+            1 -> "Manual"
+            2 -> "Program"
+            3 -> "Aperture priority"
+            4 -> "Shutter priority"
+            5 -> "Creative"
+            6 -> "Action"
+            7 -> "Portrait"
+            8 -> "Landscape"
+            else -> null
+        }
+        if (fromProgram != null) return fromProgram
+        return when (modeRaw) {
+            1 -> "Manual"
+            else -> null
+        }
+    }
+
+    /**
+     * Removes redundant "On Device / " or "Google Drive / " prefixes from display folder paths
+     * because the sheet header already shows the storage origin icon.
+     */
+    fun formatDisplayFolderPath(rawPath: String): String {
+        val trimmed = rawPath.trim()
+        val stripped = when {
+            trimmed.startsWith("On Device / ", ignoreCase = true) -> trimmed.substring("On Device / ".length)
+            trimmed.startsWith("Google Drive / ", ignoreCase = true) -> trimmed.substring("Google Drive / ".length)
+            else -> trimmed
+        }.trim()
+        return stripped.ifBlank { trimmed }
     }
 
     fun formatMegapixels(width: Int?, height: Int?): String? {

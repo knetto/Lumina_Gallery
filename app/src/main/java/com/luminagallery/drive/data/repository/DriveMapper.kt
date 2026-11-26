@@ -109,8 +109,32 @@ object DriveMapper {
         )
     }
 
-    fun entityToMediaItem(entity: DriveItemEntity): MediaItem {
+    fun mapEntitiesToMediaItems(entities: List<DriveItemEntity>): List<MediaItem> {
+        if (entities.isEmpty()) return emptyList()
         val zone = ZoneId.systemDefault()
+        val nowEpochMs = System.currentTimeMillis()
+        val monthCache = HashMap<Long, String>(128)
+        val result = ArrayList<MediaItem>(entities.size)
+        for (entity in entities) {
+            result.add(entityToMediaItemFast(entity, zone, nowEpochMs, monthCache))
+        }
+        return result
+    }
+
+    fun entityToMediaItem(entity: DriveItemEntity): MediaItem =
+        entityToMediaItemFast(
+            entity = entity,
+            zone = ZoneId.systemDefault(),
+            nowEpochMs = System.currentTimeMillis(),
+            monthCache = null
+        )
+
+    private fun entityToMediaItemFast(
+        entity: DriveItemEntity,
+        zone: ZoneId,
+        nowEpochMs: Long,
+        monthCache: HashMap<Long, String>?
+    ): MediaItem {
         val hasRealExifDate = !entity.dateTakenIso.isNullOrBlank() &&
             entity.dateTakenIso != entity.createdTimeIso
         val rawUploadMs = parseIsoTimestamp(entity.createdTimeIso)
@@ -120,12 +144,19 @@ object DriveMapper {
             fileName = entity.name,
             mediaStoreDateTakenMs = if (hasRealExifDate) entity.createdTimeEpochMs else 0L,
             fileModifiedMs = rawUploadMs,
-            zone = zone
+            zone = zone,
+            nowEpochMs = nowEpochMs
         )
         val epoch = resolved.epochMs.takeIf { it > 0L } ?: entity.createdTimeEpochMs
         val (monthYear, fullDate) = if (epoch > 0L) {
             val zdt = Instant.ofEpochMilli(epoch).atZone(zone)
-            MONTH_YEAR_FORMATTER.format(zdt) to FULL_DATE_FORMATTER.format(zdt)
+            val epochDay = zdt.toLocalDate().toEpochDay()
+            val m = if (monthCache != null) {
+                monthCache.getOrPut(epochDay) { MONTH_YEAR_FORMATTER.format(zdt) }
+            } else {
+                MONTH_YEAR_FORMATTER.format(zdt)
+            }
+            m to FULL_DATE_FORMATTER.format(zdt)
         } else {
             "Unknown Date" to "Unknown Date"
         }

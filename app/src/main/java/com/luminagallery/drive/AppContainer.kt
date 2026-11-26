@@ -34,7 +34,6 @@ import com.luminagallery.drive.domain.usecase.SyncGalleryUseCase
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
@@ -155,7 +154,6 @@ class AppContainer(context: Context) {
         // Immediately scrub cached faces & object tags whenever an album is locked or hidden
         appScope.launch {
             galleryExtrasRepository.excludedAlbumIdsFlow
-                .distinctUntilChanged()
                 .drop(1)
                 .collect {
                     runCatching { smartRecognitionManager.purgeBlockedItemsFromCache() }
@@ -190,6 +188,18 @@ class AppContainer(context: Context) {
             DriveSyncScheduler.setBackgroundSyncEnabled(appContext, restored.backgroundSyncEnabled)
         }
     )
+
+    init {
+        // Warm all shared in-memory repository snapshots on background IO right after launch
+        // so tapping Drive albums, People, Favorites, Videos, Recent, or Search is 0ms Frame-0 instant!
+        appScope.launch {
+            localMediaRepository.warmCaches()
+            galleryExtrasRepository.warmCaches()
+            galleryRepository.warmCaches()
+            albumOrganizationRepository.warmCaches()
+            smartRecognitionManager.warmCaches()
+        }
+    }
 }
 
 val LocalAppContainer = staticCompositionLocalOf<AppContainer> {

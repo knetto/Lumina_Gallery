@@ -27,10 +27,14 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.shareIn
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
@@ -84,69 +88,63 @@ class GalleryRepository(
         val previewCovers: List<AlbumCoverPreview>
     )
 
+    private data class DriveMediaSnapshot(
+        val isLoaded: Boolean = false,
+        val allMedia: List<MediaItem> = emptyList(),
+        val byParentId: Map<String, List<MediaItem>> = emptyMap(),
+        val byId: Map<String, MediaItem> = emptyMap(),
+        val videos: List<MediaItem> = emptyList()
+    )
+
     private val repoScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val folderMediaCache = ConcurrentHashMap<String, List<MediaItem>>()
     private val subfoldersCache = ConcurrentHashMap<String, List<DriveFolder>>()
     private val lastFolderSyncEpochMs = ConcurrentHashMap<String, Long>()
     private val driveRichExifCache = ConcurrentHashMap<String, ExifMetadata>()
 
-    suspend fun fetchRichDriveExif(item: MediaItem): ExifMetadata? = withContext(Dispatchers.IO) {
-        if (item.isLocal) return@withContext null
-        driveRichExifCache[item.id]?.let { return@withContext it }
-        if (!networkMonitor.networkState.value.isOnline) return@withContext null
-        val dto = runCatching {
-            driveApi.getFile(fileId = item.id, fields = DriveConstants.DETAIL_FILE_FIELDS)
-        }.getOrNull() ?: return@withContext null
-        val img = dto.imageMediaMetadata ?: return@withContext null
-        val loc = img.location
-        val lat = loc?.latitude?.takeIf { it.isFinite() && it in -90.0..90.0 }
-        val lon = loc?.longitude?.takeIf { it.isFinite() && it in -180.0..180.0 }
-        val hasCoords = lat != null && lon != null && (lat != 0.0 || lon != 0.0)
-        val alt = if (hasCoords) loc?.altitude?.takeIf { it.isFinite() && it in -500.0..15_000.0 } else null
-        val flashDesc = img.flashUsed?.let { if (it) "Fired" else "Off" }
-        val wb = img.whiteBalance?.trim()?.takeIf { it.isNotEmpty() }
-            ?.replaceFirstChar { it.uppercase() }
-        val metering = img.meteringMode?.trim()?.takeIf { it.isNotEmpty() }
-            ?.replaceFirstChar { it.uppercase() }
-        val colorSpace = img.colorSpace?.trim()?.takeIf { it.isNotEmpty() }
-        val ew = item.effectiveWidth
-        val eh = item.effectiveHeight
-        val orientation = if (ew != null && eh != null) {
-            when {
-                ew > eh -> "Landscape"
-                eh > ew -> "Portrait"
-                else -> "Square"
+    /**
+     * Single shared, hot in-memory index of all cached Google Drive media.
+     * Eliminates repeated full-table SQLite scans when opening Drive albums, Favorites,
+     * Videos, Recent, People, PersonDetail, Search, Stories, or Viewer — every screen gets
+     * instant O(1) Frame-0 data!
+     */
+    private val sharedDriveMediaSnapshot: StateFlow<DriveMediaSnapshot> =
+        itemDao.observeAllNonTrashedMedia()
+            .map { entities ->
+                val mapped = DriveMapper.mapEntitiesToMediaItems(entities)
+                val byParent = HashMap<String, MutableList<MediaItem>>(128)
+                val byId = HashMap<String, MediaItem>(mapped.size)
+                val videos = ArrayList<MediaItem>(64)
+                for (item in mapped) {
+                    byId[item.id] = item
+                    val pid = item.parentId
+                    if (pid != null) {
+                        byParent.getOrPut(pid) { mutableListOf() }.add(item)
+                    }
+                    if (item.isVideo) {
+                        videos.add(item)
+                    }
+                }
+                DriveMediaSnapshot(
+                    isLoaded = true,
+                    allMedia = mapped,
+                    byParentId = byParent,
+                    byId = byId,
+                    videos = videos
+                )
             }
-        } else null
-        val enriched = item.exif.copy(
-            cameraMake = img.cameraMake?.trim()?.takeIf { it.isNotEmpty() } ?: item.exif.cameraMake,
-            cameraModel = img.cameraModel?.trim()?.takeIf { it.isNotEmpty() } ?: item.exif.cameraModel,
-            lens = img.lens?.trim()?.takeIf { it.isNotEmpty() } ?: item.exif.lens,
-            aperture = img.aperture ?: item.exif.aperture,
-            exposureTime = img.exposureTime ?: item.exif.exposureTime,
-            isoSpeed = img.isoSpeed ?: item.exif.isoSpeed,
-            focalLength = img.focalLength ?: item.exif.focalLength,
-            exposureBiasEv = img.exposureBias ?: item.exif.exposureBiasEv,
-            flashDescription = flashDesc ?: item.exif.flashDescription,
-            whiteBalance = wb ?: item.exif.whiteBalance,
-            meteringMode = metering ?: item.exif.meteringMode,
-            colorSpace = colorSpace ?: item.exif.colorSpace,
-            orientationLabel = orientation ?: item.exif.orientationLabel,
-            exifDateOriginal = img.time?.trim()?.takeIf { it.isNotEmpty() } ?: item.exif.exifDateOriginal,
-            latitude = if (hasCoords) lat else item.exif.latitude,
-            longitude = if (hasCoords) lon else item.exif.longitude,
-            altitudeMeters = alt ?: item.exif.altitudeMeters
-        )
-        if (driveRichExifCache.size > 400) driveRichExifCache.clear()
-        driveRichExifCache[item.id] = enriched
-        enriched
-    }
+            .flowOn(Dispatchers.Default)
+            .stateIn(
+                scope = repoScope,
+                started = SharingStarted.Lazily,
+                initialValue = DriveMediaSnapshot()
+            )
+
+    @Volatile
+    private var latestPinnedRoots: List<DriveFolder> = emptyList()
 
     @Volatile
     private var latestFolderParentById: Map<String, String?> = emptyMap()
-
-    fun getCachedFolderMedia(parentId: String): List<MediaItem>? = folderMediaCache[parentId]
-    fun getCachedSubfolders(parentId: String): List<DriveFolder>? = subfoldersCache[parentId]
 
     /**
      * Expands a set of locked/hidden folder IDs to include all nested Drive descendant folders
@@ -174,6 +172,121 @@ class GalleryRepository(
         return expanded
     }
 
+    fun getCachedAllMedia(): List<MediaItem> = sharedDriveMediaSnapshot.value.allMedia
+
+    fun getCachedAllVideos(): List<MediaItem> = sharedDriveMediaSnapshot.value.videos
+
+    fun getCachedMediaById(): Map<String, MediaItem> = sharedDriveMediaSnapshot.value.byId
+
+    fun getCachedPinnedRoots(): List<DriveFolder> = latestPinnedRoots
+
+    fun getCachedFolderMedia(parentId: String): List<MediaItem>? {
+        val snap = sharedDriveMediaSnapshot.value
+        if (snap.isLoaded) return snap.byParentId[parentId].orEmpty()
+        return folderMediaCache[parentId]
+    }
+
+    fun getCachedSubfolders(parentId: String): List<DriveFolder>? {
+        val warm = sharedDriveSubfoldersByParent.value[parentId]
+        if (warm != null) return warm
+        return subfoldersCache[parentId]
+    }
+
+    /** Instant in-memory recursive flattened media lookup for Frame-0 Drive flattened views & Viewer. */
+    fun getCachedFlattenedMedia(rootFolderId: String): List<MediaItem> {
+        val snap = sharedDriveMediaSnapshot.value
+        if (!snap.isLoaded) return emptyList()
+        val parentMap = latestFolderParentById
+        val childrenByParent = HashMap<String, MutableList<String>>()
+        for ((id, parent) in parentMap) {
+            if (parent != null) childrenByParent.getOrPut(parent) { mutableListOf() }.add(id)
+        }
+        val descendants = LinkedHashSet<String>()
+        val queue = ArrayDeque<String>()
+        descendants.add(rootFolderId)
+        queue.add(rootFolderId)
+        while (queue.isNotEmpty()) {
+            val cur = queue.removeFirst()
+            for (child in childrenByParent[cur].orEmpty()) {
+                if (descendants.add(child)) queue.add(child)
+            }
+        }
+        val out = ArrayList<MediaItem>()
+        for (folderId in descendants) {
+            snap.byParentId[folderId]?.let { out.addAll(it) }
+        }
+        out.sortByDescending { it.createdTimeEpochMs }
+        return out
+    }
+
+    /** Pre-warms Drive media snapshot, folder rollups, and subfolder tree on a background thread at launch. */
+    fun warmCaches() {
+        repoScope.launch {
+            launch { sharedDriveMediaSnapshot.collect {} }
+            launch { sharedDriveSubfoldersByParent.collect {} }
+            launch { sharedPinnedRoots.collect {} }
+        }
+    }
+
+    suspend fun fetchRichDriveExif(item: MediaItem): ExifMetadata? = withContext(Dispatchers.IO) {
+        if (item.isLocal) return@withContext null
+        driveRichExifCache[item.id]?.let { return@withContext it }
+        if (!networkMonitor.networkState.value.isOnline) return@withContext null
+        val dto = runCatching {
+            driveApi.getFile(fileId = item.id, fields = DriveConstants.DETAIL_FILE_FIELDS)
+        }.getOrNull() ?: return@withContext null
+        val img = dto.imageMediaMetadata ?: return@withContext null
+        val loc = img.location
+        val lat = loc?.latitude?.takeIf { it.isFinite() && it in -90.0..90.0 }
+        val lon = loc?.longitude?.takeIf { it.isFinite() && it in -180.0..180.0 }
+        val hasCoords = lat != null && lon != null && (lat != 0.0 || lon != 0.0)
+        val alt = if (hasCoords && loc != null) loc.altitude?.takeIf { it.isFinite() && it in -500.0..15_000.0 } else null
+        val flashDesc = img.flashUsed?.let { if (it) "Fired" else "Off" }
+        val wb = img.whiteBalance?.trim()?.takeIf { it.isNotEmpty() }
+            ?.replaceFirstChar { it.uppercase() }
+        val metering = img.meteringMode?.trim()?.takeIf { it.isNotEmpty() }
+            ?.let { raw ->
+                if (raw.equals("Pattern", ignoreCase = true)) "Multi"
+                else raw.replaceFirstChar { it.uppercase() }
+            }
+        val exposureMode = img.exposureMode?.trim()?.takeIf { it.isNotEmpty() }
+            ?.takeUnless { it.equals("Auto", ignoreCase = true) }
+            ?.replaceFirstChar { it.uppercase() }
+        val colorSpace = img.colorSpace?.trim()?.takeIf { it.isNotEmpty() }
+        val ew = item.effectiveWidth
+        val eh = item.effectiveHeight
+        val orientation = if (ew != null && eh != null) {
+            when {
+                ew > eh -> "Landscape"
+                eh > ew -> "Portrait"
+                else -> "Square"
+            }
+        } else null
+        val enriched = item.exif.copy(
+            cameraMake = img.cameraMake?.trim()?.takeIf { it.isNotEmpty() } ?: item.exif.cameraMake,
+            cameraModel = img.cameraModel?.trim()?.takeIf { it.isNotEmpty() } ?: item.exif.cameraModel,
+            lens = img.lens?.trim()?.takeIf { it.isNotEmpty() } ?: item.exif.lens,
+            aperture = img.aperture ?: item.exif.aperture,
+            exposureTime = img.exposureTime ?: item.exif.exposureTime,
+            isoSpeed = img.isoSpeed ?: item.exif.isoSpeed,
+            focalLength = img.focalLength ?: item.exif.focalLength,
+            exposureBiasEv = img.exposureBias ?: item.exif.exposureBiasEv,
+            flashDescription = flashDesc ?: item.exif.flashDescription,
+            whiteBalance = wb ?: item.exif.whiteBalance,
+            meteringMode = metering ?: item.exif.meteringMode,
+            exposureMode = exposureMode ?: item.exif.exposureMode,
+            colorSpace = colorSpace ?: item.exif.colorSpace,
+            orientationLabel = orientation ?: item.exif.orientationLabel,
+            exifDateOriginal = img.time?.trim()?.takeIf { it.isNotEmpty() } ?: item.exif.exifDateOriginal,
+            latitude = if (hasCoords) lat else item.exif.latitude,
+            longitude = if (hasCoords) lon else item.exif.longitude,
+            altitudeMeters = alt ?: item.exif.altitudeMeters
+        )
+        if (driveRichExifCache.size > 400) driveRichExifCache.clear()
+        driveRichExifCache[item.id] = enriched
+        enriched
+    }
+
     private val folderRollupsFlow: Flow<Map<String, FolderRollup>> = combine(
         itemDao.observeAllFoldersLight(),
         itemDao.observeParentCoverSummaries()
@@ -184,11 +297,11 @@ class GalleryRepository(
         computeRecursiveRollups(allFolders, mediaSummaries)
     }.flowOn(Dispatchers.Default).shareIn(
         scope = repoScope,
-        started = SharingStarted.WhileSubscribed(stopTimeoutMillis = 10_000L, replayExpirationMillis = 30_000L),
+        started = SharingStarted.Lazily,
         replay = 1
     )
 
-    fun observePinnedRoots(): Flow<List<DriveFolder>> = combine(
+    private val sharedPinnedRoots: StateFlow<List<DriveFolder>> = combine(
         pinnedRootDao.observePinnedRootsWithStats(),
         folderRollupsFlow
     ) { rows, rollups ->
@@ -209,20 +322,29 @@ class GalleryRepository(
                 coverSizeBytes = rollup?.coverSizeBytes ?: 0L,
                 previewCovers = rollup?.previewCovers.orEmpty()
             )
-        }
-    }.flowOn(Dispatchers.Default)
+        }.also { latestPinnedRoots = it }
+    }.flowOn(Dispatchers.Default).stateIn(
+        scope = repoScope,
+        started = SharingStarted.Lazily,
+        initialValue = emptyList()
+    )
+
+    fun observePinnedRoots(): Flow<List<DriveFolder>> = sharedPinnedRoots
 
     fun observePinnedRootIds(): Flow<Set<String>> =
         pinnedRootDao.observePinnedIds().map { it.toSet() }
 
     /**
      * Full parentId -> direct child DriveFolders map with recursive rollups & collage covers,
-     * powering Samsung-style expandable Drive folders in the left album sidebar.
+     * powering Samsung-style expandable Drive folders in the left album sidebar AND instant
+     * O(1) subfolder navigation without re-querying SQLite on every folder tap!
      */
-    private val sharedDriveSubfoldersByParent: Flow<Map<String, List<DriveFolder>>> = combine(
+    private val sharedDriveSubfoldersByParent: StateFlow<Map<String, List<DriveFolder>>> = combine(
         itemDao.observeAllFoldersLight(),
-        folderRollupsFlow
-    ) { allFolders, rollups ->
+        folderRollupsFlow,
+        pinnedRootDao.observePinnedIds()
+    ) { allFolders, rollups, pinnedIds ->
+        val pinnedSet = pinnedIds.toHashSet()
         val byParent = HashMap<String, MutableList<DriveFolder>>()
         for (row in allFolders) {
             val parent = row.parentId ?: continue
@@ -236,7 +358,7 @@ class GalleryRepository(
                 coverThumbnailLink = rollup?.coverThumbnailLink,
                 coverItemId = rollup?.coverItemId,
                 modifiedTimeEpochMs = row.modifiedTimeEpochMs,
-                isPinned = false,
+                isPinned = row.id in pinnedSet,
                 isLocal = false,
                 coverIsVideo = rollup?.coverIsVideo ?: false,
                 coverSizeBytes = rollup?.coverSizeBytes ?: 0L,
@@ -247,38 +369,19 @@ class GalleryRepository(
         byParent.values.forEach { list -> list.sortBy { it.name.lowercase() } }
         byParent.forEach { (parentId, list) -> subfoldersCache[parentId] = list }
         byParent
-    }.flowOn(Dispatchers.Default).shareIn(
+    }.flowOn(Dispatchers.Default).stateIn(
         scope = repoScope,
-        started = SharingStarted.WhileSubscribed(stopTimeoutMillis = 10_000L, replayExpirationMillis = 30_000L),
-        replay = 1
+        started = SharingStarted.Lazily,
+        initialValue = emptyMap()
     )
 
     fun observeAllDriveSubfoldersByParent(): Flow<Map<String, List<DriveFolder>>> =
         sharedDriveSubfoldersByParent
 
-    fun observeSubfolders(parentId: String): Flow<List<DriveFolder>> = combine(
-        itemDao.observeSubfoldersWithStats(parentId),
-        folderRollupsFlow
-    ) { rows, rollups ->
-        rows.map { row ->
-            val rollup = rollups[row.id]
-            DriveFolder(
-                id = row.id,
-                parentId = row.parentId,
-                name = row.name,
-                subfolderCount = rollup?.directSubfolderCount ?: row.subfolderCount,
-                mediaCount = rollup?.totalMediaCount ?: row.mediaCount,
-                coverThumbnailLink = rollup?.coverThumbnailLink ?: row.coverThumbnailLink,
-                coverItemId = rollup?.coverItemId ?: row.coverItemId,
-                modifiedTimeEpochMs = row.modifiedTimeEpochMs,
-                isPinned = row.isPinned,
-                isLocal = false,
-                coverIsVideo = rollup?.coverIsVideo ?: false,
-                coverSizeBytes = rollup?.coverSizeBytes ?: 0L,
-                previewCovers = rollup?.previewCovers.orEmpty()
-            )
-        }.also { subfoldersCache[parentId] = it }
-    }.flowOn(Dispatchers.Default)
+    fun observeSubfolders(parentId: String): Flow<List<DriveFolder>> =
+        sharedDriveSubfoldersByParent
+            .map { byParent -> byParent[parentId].orEmpty() }
+            .distinctUntilChanged()
 
     /**
      * Computes deep recursive cover thumbnails, up-to-4 Samsung collage covers, & total media counts
@@ -402,16 +505,14 @@ class GalleryRepository(
     }
 
     fun observeMediaInFolder(parentId: String): Flow<List<MediaItem>> =
-        itemDao.observeMediaInFolder(parentId).map { entities ->
-            entities.map(DriveMapper::entityToMediaItem).also {
-                if (folderMediaCache.size > 120) folderMediaCache.clear()
-                folderMediaCache[parentId] = it
-            }
-        }.flowOn(Dispatchers.Default)
+        sharedDriveMediaSnapshot
+            .filter { it.isLoaded }
+            .map { snap -> snap.byParentId[parentId].orEmpty() }
+            .distinctUntilChanged()
 
     fun observeFlattenedMedia(rootFolderId: String): Flow<List<MediaItem>> =
         itemDao.observeFlattenedMediaRecursive(rootFolderId).map { entities ->
-            entities.map(DriveMapper::entityToMediaItem)
+            DriveMapper.mapEntitiesToMediaItems(entities)
         }.flowOn(Dispatchers.Default)
 
     fun searchMedia(
@@ -419,15 +520,29 @@ class GalleryRepository(
         mediaType: MediaType?,
         fromEpochMs: Long?,
         toEpochMs: Long?
-    ): Flow<List<MediaItem>> =
-        itemDao.searchMedia(
-            query = query.trim(),
+    ): Flow<List<MediaItem>> {
+        val cleanQuery = query.trim()
+        if (cleanQuery.isEmpty() && fromEpochMs == null && toEpochMs == null) {
+            return sharedDriveMediaSnapshot
+                .filter { it.isLoaded }
+                .map { snap ->
+                    when (mediaType) {
+                        null -> snap.allMedia
+                        MediaType.VIDEO -> snap.videos
+                        else -> snap.allMedia.filter { it.mediaType == mediaType }
+                    }
+                }
+                .distinctUntilChanged()
+        }
+        return itemDao.searchMedia(
+            query = cleanQuery,
             mediaType = mediaType?.name,
             fromEpochMs = fromEpochMs,
             toEpochMs = toEpochMs
         ).map { entities ->
-            entities.map(DriveMapper::entityToMediaItem)
-        }
+            DriveMapper.mapEntitiesToMediaItems(entities)
+        }.flowOn(Dispatchers.Default)
+    }
 
     fun observeCachedMediaCount(): Flow<Int> = itemDao.observeCachedMediaCount()
 
@@ -1097,7 +1212,7 @@ class GalleryRepository(
         const val FOLDER_DB_FLUSH_BATCH_SIZE = 10
         const val MAX_FOLDER_DEPTH = 32
         const val SQLITE_MAX_BIND_PARAMS = 450
-        const val SILENT_FOLDER_SYNC_COOLDOWN_MS = 25_000L
+        const val SILENT_FOLDER_SYNC_COOLDOWN_MS = 120_000L
 
         internal fun shouldUseDeltaSync(
             forceFullRescan: Boolean,

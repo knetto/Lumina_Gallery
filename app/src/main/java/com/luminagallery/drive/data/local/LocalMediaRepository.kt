@@ -45,6 +45,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.shareIn
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.security.MessageDigest
 import java.time.Instant
@@ -76,6 +77,9 @@ class LocalMediaRepository(
     private var latestAllMedia: List<MediaItem> = emptyList()
 
     @Volatile
+    private var latestMediaById: Map<String, MediaItem> = emptyMap()
+
+    @Volatile
     private var latestVideosMedia: List<MediaItem> = emptyList()
 
     @Volatile
@@ -88,10 +92,19 @@ class LocalMediaRepository(
 
     fun getCachedAllMedia(): List<MediaItem> = latestAllMedia
 
+    fun getCachedMediaById(): Map<String, MediaItem> = latestMediaById
+
     fun getCachedAlbumMedia(bucketId: String): List<MediaItem> = when (bucketId) {
         LOCAL_BUCKET_ALL -> latestAllMedia
         LOCAL_BUCKET_VIDEOS -> latestVideosMedia
         else -> latestMediaByBucket[bucketId].orEmpty()
+    }
+
+    fun warmCaches() {
+        repoScope.launch {
+            launch { sharedIndexedLocalMedia.collect {} }
+            launch { sharedSystemFavoriteIds.collect {} }
+        }
     }
 
     // Single shared ContentObserver & MediaStore change stream (immediate first tick, 250ms burst coalescing)
@@ -102,7 +115,7 @@ class LocalMediaRepository(
         .conflate()
         .shareIn(
             scope = repoScope,
-            started = SharingStarted.WhileSubscribed(stopTimeoutMillis = 5_000L, replayExpirationMillis = 0L),
+            started = SharingStarted.Lazily,
             replay = 1
         )
 
@@ -129,6 +142,7 @@ class LocalMediaRepository(
 
             if (allItems.isEmpty() && diskHiddenAlbums.isEmpty()) {
                 latestAllMedia = emptyList()
+                latestMediaById = emptyMap()
                 latestVideosMedia = emptyList()
                 latestMediaByBucket = emptyMap()
                 latestLocalAlbums = emptyList()
@@ -137,7 +151,9 @@ class LocalMediaRepository(
 
             val grouped = LinkedHashMap<String, MutableList<MediaItem>>()
             val videos = ArrayList<MediaItem>(64)
+            val byId = HashMap<String, MediaItem>(allItems.size)
             for (item in allItems) {
+                byId[item.id] = item
                 val bucketId = item.parentId ?: LOCAL_BUCKET_UNKNOWN
                 grouped.getOrPut(bucketId) { mutableListOf() }.add(item)
                 if (item.isVideo) videos.add(item)
@@ -188,6 +204,7 @@ class LocalMediaRepository(
             )
 
             latestAllMedia = allItems
+            latestMediaById = byId
             latestVideosMedia = videos
             latestMediaByBucket = grouped
             latestLocalAlbums = albums
@@ -202,7 +219,7 @@ class LocalMediaRepository(
         .flowOn(Dispatchers.IO)
         .shareIn(
             scope = repoScope,
-            started = SharingStarted.WhileSubscribed(stopTimeoutMillis = 5_000L, replayExpirationMillis = 15_000L),
+            started = SharingStarted.Lazily,
             replay = 1
         )
 
@@ -220,7 +237,7 @@ class LocalMediaRepository(
         .flowOn(Dispatchers.IO)
         .shareIn(
             scope = repoScope,
-            started = SharingStarted.WhileSubscribed(stopTimeoutMillis = 5_000L, replayExpirationMillis = 15_000L),
+            started = SharingStarted.Lazily,
             replay = 1
         )
 
@@ -401,6 +418,12 @@ class LocalMediaRepository(
                     }
                     val meteringRaw = exif.getAttributeInt(ExifInterface.TAG_METERING_MODE, -1)
                     val meteringMode = decodeMeteringMode(meteringRaw)
+                    val exposureProgramRaw = exif.getAttributeInt(ExifInterface.TAG_EXPOSURE_PROGRAM, -1)
+                    val exposureModeRaw = exif.getAttributeInt(ExifInterface.TAG_EXPOSURE_MODE, -1)
+                    val exposureMode = com.luminagallery.drive.ui.components.FormatUtils.decodeExifExposureMode(
+                        programRaw = exposureProgramRaw,
+                        modeRaw = exposureModeRaw
+                    )
                     val colorSpaceRaw = exif.getAttributeInt(ExifInterface.TAG_COLOR_SPACE, -1)
                     val colorSpace = when (colorSpaceRaw) {
                         ExifInterface.COLOR_SPACE_S_RGB -> "sRGB"
@@ -446,7 +469,8 @@ class LocalMediaRepository(
                         latitude = if (hasValidCoords) lat else null,
                         longitude = if (hasValidCoords) lon else null,
                         altitudeMeters = altitude,
-                        locationAddress = address
+                        locationAddress = address,
+                        exposureMode = exposureMode
                     )
                 }
             }.getOrNull() ?: item.exif
@@ -594,7 +618,7 @@ class LocalMediaRepository(
         ExifInterface.METERING_MODE_CENTER_WEIGHT_AVERAGE.toInt() -> "Center-weighted"
         ExifInterface.METERING_MODE_SPOT.toInt() -> "Spot"
         ExifInterface.METERING_MODE_MULTI_SPOT.toInt() -> "Multi-spot"
-        ExifInterface.METERING_MODE_PATTERN.toInt() -> "Pattern"
+        ExifInterface.METERING_MODE_PATTERN.toInt() -> "Multi"
         ExifInterface.METERING_MODE_PARTIAL.toInt() -> "Partial"
         else -> null
     }

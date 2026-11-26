@@ -174,7 +174,7 @@ fun MediaGridItem(
                     }
                 }
                 .diskCacheKey(DriveConstants.stableThumbDiskKey(item.id))
-                .crossfade(80)
+                .crossfade(false)
                 .build()
         }
     }

@@ -96,7 +96,7 @@ class ViewerViewModel(
         launchContext.personIds.isNotEmpty() && !launchContext.isSearchMode -> combine(
             localMediaRepository.observeAllLocalMedia(),
             repository.searchMedia("", null, null, null),
-            smartRecognitionManager.allActiveFacesFlow,
+            smartRecognitionManager.allActiveLightFacesFlow,
             excludedAlbumIdsFlow
         ) { local, drive, allFaces, excluded ->
             val targetSet = launchContext.personIds.toSet()
@@ -168,7 +168,7 @@ class ViewerViewModel(
         launchContext.isSearchMode -> {
             val smartFlow = combine(
                 smartRecognitionManager.allPersonsFlow,
-                smartRecognitionManager.allActiveFacesFlow,
+                smartRecognitionManager.allActiveLightFacesFlow,
                 smartRecognitionManager.smartIndexMapFlow
             ) { persons, faces, smartMap -> Triple(persons, faces, smartMap) }
             val enrichmentFlow = combine(
@@ -392,14 +392,60 @@ class ViewerViewModel(
             extrasRepository.latestLockedAlbumIds + extrasRepository.latestHiddenAlbumIds
         )
         val cached = when {
-            launchContext.personIds.isNotEmpty() || !launchContext.locationKey.isNullOrBlank() -> emptyList()
+            launchContext.personIds.isNotEmpty() && !launchContext.isSearchMode -> {
+                val targetSet = launchContext.personIds.toSet()
+                val faces = smartRecognitionManager.getCachedActiveLightFaces()
+                val photosByPerson = HashMap<String, MutableSet<String>>(targetSet.size)
+                for (face in faces) {
+                    val pid = face.personId
+                    if (pid != null && pid in targetSet) {
+                        photosByPerson.getOrPut(pid) { HashSet() }.add(face.itemId)
+                    }
+                }
+                val intersected = if (photosByPerson.size < targetSet.size) {
+                    emptySet()
+                } else {
+                    var acc: Set<String>? = null
+                    for (ids in photosByPerson.values) {
+                        acc = if (acc == null) ids else acc.intersect(ids)
+                    }
+                    acc.orEmpty()
+                }
+                val localById = localMediaRepository.getCachedMediaById()
+                val driveById = repository.getCachedMediaById()
+                intersected.mapNotNull { id ->
+                    val item = localById[id] ?: driveById[id]
+                    if (item != null && item.parentId !in excluded) item else null
+                }.sortedByDescending { it.createdTimeEpochMs }
+            }
+            !launchContext.locationKey.isNullOrBlank() -> {
+                val group = extrasRepository.locationProgressFlow.value.groups
+                    .firstOrNull { it.locationKey == launchContext.locationKey }
+                group?.items.orEmpty().filterNot { it.parentId in excluded }
+            }
+            launchContext.specialFilter == SpecialGalleryFilter.FAVORITES -> {
+                val favIds = extrasRepository.latestFavoriteItemIds
+                val localById = localMediaRepository.getCachedMediaById()
+                val driveById = repository.getCachedMediaById()
+                favIds.mapNotNull { id ->
+                    val item = localById[id] ?: driveById[id]
+                    if (item != null && item.parentId !in excluded) item else null
+                }.sortedByDescending { it.createdTimeEpochMs }
+            }
             launchContext.specialFilter == SpecialGalleryFilter.VIDEOS ->
-                localMediaRepository.getCachedAlbumMedia(LocalMediaRepository.LOCAL_BUCKET_VIDEOS)
+                (localMediaRepository.getCachedAlbumMedia(LocalMediaRepository.LOCAL_BUCKET_VIDEOS) +
+                    repository.getCachedAllVideos())
                     .filterNot { it.parentId in excluded }
-            launchContext.specialFilter == SpecialGalleryFilter.RECENT ->
-                localMediaRepository.getCachedAlbumMedia(LocalMediaRepository.LOCAL_BUCKET_ALL)
-                    .filterNot { it.parentId in excluded }
+                    .sortedByDescending { it.createdTimeEpochMs }
+            launchContext.specialFilter == SpecialGalleryFilter.RECENT -> {
+                val localTop = localMediaRepository.getCachedAlbumMedia(LocalMediaRepository.LOCAL_BUCKET_ALL)
+                    .asSequence().filterNot { it.parentId in excluded }.take(300).toList()
+                val driveTop = repository.getCachedAllMedia()
+                    .asSequence().filterNot { it.parentId in excluded }.take(300).toList()
+                (localTop + driveTop)
+                    .sortedByDescending { it.createdTimeEpochMs }
                     .take(300)
+            }
             launchContext.specialFilter != null || launchContext.isSearchMode -> emptyList()
             launchContext.folderId == LocalMediaRepository.LOCAL_BUCKET_ALL ->
                 localMediaRepository.getCachedAlbumMedia(LocalMediaRepository.LOCAL_BUCKET_ALL)
@@ -411,6 +457,15 @@ class ViewerViewModel(
                     launchContext.albumFilter,
                     launchContext.albumSort
                 )
+            launchContext.isFlattened && launchContext.folderId.isNotBlank() -> {
+                val blocked = excluded - launchContext.folderId
+                applyAlbumFilterAndSort(
+                    repository.getCachedFlattenedMedia(launchContext.folderId).filterNot { it.parentId in blocked },
+                    extrasRepository.latestFavoriteItemIds,
+                    launchContext.albumFilter,
+                    launchContext.albumSort
+                )
+            }
             !launchContext.isFlattened && launchContext.folderId.isNotBlank() ->
                 applyAlbumFilterAndSort(
                     repository.getCachedFolderMedia(launchContext.folderId).orEmpty(),
@@ -586,7 +641,7 @@ class ViewerViewModel(
         val ocrById: Map<String, com.luminagallery.drive.data.local.entity.PhotoOcrEntity>,
         val excludedIds: Set<String>,
         val persons: List<com.luminagallery.drive.data.local.entity.PersonClusterEntity>,
-        val faces: List<com.luminagallery.drive.data.local.entity.DetectedFaceEntity>,
+        val faces: List<com.luminagallery.drive.data.local.dao.LightFaceRow>,
         val smartById: Map<String, com.luminagallery.drive.data.local.entity.PhotoSmartIndexEntity>
     )
 

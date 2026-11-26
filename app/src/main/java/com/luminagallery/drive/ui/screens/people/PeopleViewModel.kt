@@ -9,7 +9,7 @@ import androidx.lifecycle.viewModelScope
 import com.luminagallery.drive.AppContainer
 import com.luminagallery.drive.data.local.LocalMediaRepository
 import com.luminagallery.drive.data.local.PreferencesManager
-import com.luminagallery.drive.data.local.entity.DetectedFaceEntity
+import com.luminagallery.drive.data.local.dao.LightFaceRow
 import com.luminagallery.drive.data.remote.NetworkMonitor
 import com.luminagallery.drive.data.repository.GalleryExtrasRepository
 import com.luminagallery.drive.data.repository.GalleryRepository
@@ -22,12 +22,14 @@ import com.luminagallery.drive.data.repository.sync.SmartScanScheduler
 import com.luminagallery.drive.domain.model.MediaItem
 import com.luminagallery.drive.domain.usecase.ExportMediaUseCase
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -106,7 +108,7 @@ class PeopleViewModel(
             val source = summaryById[m.sourcePersonId] ?: return@mapNotNull null
             PersonMergeSuggestionUi(target = target, source = source, similarity = m.similarity)
         }
-    }.flowOn(Dispatchers.Default)
+    }.flowOn(Dispatchers.Default).onStart { emit(emptyList()) }
 
     val uiState: StateFlow<PeopleUiState> = combine(
         combine(allPersonsWithHiddenFlow, mergeSuggestionsFlow) { persons, suggs -> persons to suggs },
@@ -130,11 +132,39 @@ class PeopleViewModel(
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000L),
-        initialValue = PeopleUiState()
+        initialValue = buildInstantInitialState()
     )
 
+    private fun buildInstantInitialState(): PeopleUiState {
+        val blocked = repository.expandBlockedFolderIds(
+            extrasRepository.latestLockedAlbumIds + extrasRepository.latestHiddenAlbumIds
+        )
+        val local = localMediaRepository.getCachedAllMedia()
+        val drive = repository.getCachedAllMedia()
+        val visibleIds = HashSet<String>(local.size + drive.size)
+        for (item in local) if (item.parentId !in blocked) visibleIds.add(item.id)
+        for (item in drive) if (item.parentId !in blocked) visibleIds.add(item.id)
+        val allPersons = smartRecognitionManager.computeVisiblePersonsSync(
+            visibleIds = visibleIds,
+            includeHidden = true
+        )
+        return PeopleUiState(
+            visiblePersons = allPersons.filterNot { it.isHidden },
+            hiddenPersons = allPersons.filter { it.isHidden },
+            progress = smartRecognitionManager.progress.value
+        )
+    }
+
     init {
-        triggerScan(maxNewItems = 140)
+        viewModelScope.launch(Dispatchers.IO) {
+            // Defer incremental AI scan briefly so the entrance transition & avatars paint at 120fps
+            delay(800L)
+            smartRecognitionManager.syncSmartIndex(
+                maxNewItemsPerRun = 140,
+                includeDrive = true,
+                respectWifiOnlyForDrive = true
+            )
+        }
     }
 
     fun triggerScan(maxNewItems: Int = 600) {
@@ -339,7 +369,7 @@ class PeopleViewModel(
 data class PersonDetailUiState(
     val person: PersonSummary? = null,
     val photos: List<MediaItem> = emptyList(),
-    val personFaces: List<DetectedFaceEntity> = emptyList(),
+    val personFaces: List<LightFaceRow> = emptyList(),
     val otherPersons: List<PersonSummary> = emptyList(),
     val frequentCompanions: List<PersonSummary> = emptyList(),
     val selectedCompanion: PersonSummary? = null,
@@ -377,20 +407,24 @@ class PersonDetailViewModel(
     private val snackbarFlow = MutableStateFlow<String?>(null)
     private val mergedAwayFlow = MutableStateFlow(false)
 
-    private val visibleMediaFlow = combine(
+    private val visibleMediaIndexFlow = combine(
         localMediaRepository.observeAllLocalMedia(),
         repository.searchMedia("", null, null, null),
         extrasRepository.excludedAlbumIdsFlow
     ) { local, drive, excluded ->
         val blocked = repository.expandBlockedFolderIds(excluded)
-        (local + drive)
-            .filterNot { it.parentId in blocked }
-            .sortedByDescending { it.createdTimeEpochMs }
+        val byId = HashMap<String, MediaItem>(local.size + drive.size)
+        for (item in local) {
+            if (item.parentId !in blocked) byId[item.id] = item
+        }
+        for (item in drive) {
+            if (item.parentId !in blocked) byId[item.id] = item
+        }
+        byId
     }.flowOn(Dispatchers.Default)
 
-    private val visibleMediaIdsFlow = visibleMediaFlow
-        .map { list -> list.mapTo(HashSet(list.size)) { it.id } }
-        .flowOn(Dispatchers.Default)
+    private val visibleMediaIdsFlow = visibleMediaIndexFlow
+        .map { it.keys }
 
     private val allVisiblePersonsFlow = smartRecognitionManager.observeVisiblePersons(
         visibleItemIdsFlow = visibleMediaIdsFlow,
@@ -399,14 +433,13 @@ class PersonDetailViewModel(
 
     private val personContentFlow = combine(
         allVisiblePersonsFlow,
-        visibleMediaFlow,
-        smartRecognitionManager.observeFacesForPerson(personId),
+        visibleMediaIndexFlow,
+        smartRecognitionManager.observeLightFacesForPerson(personId),
         selectedCompanionIdFlow
-    ) { allPersons, allMedia, faces, companionId ->
+    ) { allPersons, mediaById, faces, companionId ->
         val current = allPersons.firstOrNull { it.personId == personId }
         val others = allPersons.filter { it.personId != personId && !it.isHidden }
-        val visibleIds = allMedia.mapTo(HashSet(allMedia.size)) { it.id }
-        val safeFaces = faces.filter { it.itemId in visibleIds && !it.cropPath.isNullOrBlank() }
+        val safeFaces = faces.filter { it.itemId in mediaById && !it.cropPath.isNullOrBlank() }
 
         val companions = if (current != null) {
             others.mapNotNull { other ->
@@ -418,9 +451,11 @@ class PersonDetailViewModel(
         }
         val activeCompanion = companionId?.let { cid -> companions.firstOrNull { it.personId == cid } }
 
+        // O(K log K) on just this person's photos instead of sorting the entire 20k-item library!
         val personPhotos = if (current != null) {
             val targetIds = if (activeCompanion != null) activeCompanion.photoIds else current.photoIds
-            allMedia.filter { it.id in targetIds }
+            targetIds.mapNotNull { mediaById[it] }
+                .sortedByDescending { it.createdTimeEpochMs }
         } else {
             emptyList()
         }
@@ -473,8 +508,46 @@ class PersonDetailViewModel(
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000L),
-        initialValue = PersonDetailUiState()
+        initialValue = buildInstantInitialState(networkMonitor)
     )
+
+    private fun buildInstantInitialState(networkMonitor: NetworkMonitor): PersonDetailUiState {
+        val prefs = preferencesManager.latestPreferences
+        val net = networkMonitor.networkState.value
+        val blocked = repository.expandBlockedFolderIds(
+            extrasRepository.latestLockedAlbumIds + extrasRepository.latestHiddenAlbumIds
+        )
+        val localById = localMediaRepository.getCachedMediaById()
+        val driveById = repository.getCachedMediaById()
+        val visibleIds = HashSet<String>(localById.size + driveById.size)
+        for ((id, item) in localById) if (item.parentId !in blocked) visibleIds.add(id)
+        for ((id, item) in driveById) if (item.parentId !in blocked) visibleIds.add(id)
+        val allPersons = smartRecognitionManager.computeVisiblePersonsSync(visibleIds, includeHidden = true)
+        val current = allPersons.firstOrNull { it.personId == personId }
+        val others = allPersons.filter { it.personId != personId && !it.isHidden }
+        val companions = if (current != null) {
+            others.mapNotNull { other ->
+                val shared = current.photoIds.intersect(other.photoIds)
+                if (shared.isEmpty()) null else other.copy(photoCount = shared.size, photoIds = shared)
+            }.sortedByDescending { it.photoCount }.take(12)
+        } else emptyList()
+        val photos = if (current != null) {
+            current.photoIds.mapNotNull { id ->
+                val item = localById[id] ?: driveById[id]
+                if (item != null && item.parentId !in blocked) item else null
+            }.sortedByDescending { it.createdTimeEpochMs }
+        } else emptyList()
+        val faces = smartRecognitionManager.getCachedLightFacesForPerson(personId, visibleIds)
+        return PersonDetailUiState(
+            person = current,
+            photos = photos,
+            personFaces = faces,
+            otherPersons = others,
+            frequentCompanions = companions,
+            gridColumns = prefs.gridColumns,
+            isUnmeteredWifi = net.isUnmeteredWifi || !prefs.wifiOnlyHighRes
+        )
+    }
 
     fun setGridColumns(columns: Int) {
         viewModelScope.launch { preferencesManager.setGridColumns(columns) }
@@ -647,7 +720,7 @@ class PersonDetailViewModel(
     private data class PersonDetailContent(
         val person: PersonSummary?,
         val photos: List<MediaItem>,
-        val faces: List<DetectedFaceEntity>,
+        val faces: List<LightFaceRow>,
         val otherPersons: List<PersonSummary>,
         val frequentCompanions: List<PersonSummary>,
         val selectedCompanion: PersonSummary?

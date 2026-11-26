@@ -196,6 +196,15 @@ interface DriveItemDao {
 
     @Query(
         """
+        SELECT * FROM drive_items
+        WHERE isFolder = 0 AND trashed = 0
+        ORDER BY createdTimeEpochMs DESC, name COLLATE NOCASE ASC
+        """
+    )
+    fun observeAllNonTrashedMedia(): Flow<List<DriveItemEntity>>
+
+    @Query(
+        """
         SELECT
             parentId,
             COUNT(*) AS mediaCount,

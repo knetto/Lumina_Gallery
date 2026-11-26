@@ -32,11 +32,13 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -45,6 +47,7 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 
 @Immutable
 data class LocationScanProgress(
@@ -74,17 +77,23 @@ class GalleryExtrasRepository(
     // cleared immediately without a system prompt, so unfavoriting system-favorited photos always works.
     private val suppressedSystemFavoriteIds = MutableStateFlow<Set<String>>(emptySet())
 
+    private val albumViewPrefCache = ConcurrentHashMap<String, AlbumViewPrefEntity>()
+
     @Volatile
     var latestFavoriteItemIds: Set<String> = emptySet()
         private set
 
-    val favoriteItemIdsFlow: Flow<Set<String>> = combine(
+    val favoriteItemIdsFlow: StateFlow<Set<String>> = combine(
         extrasDao.observeFavoriteItemIds(),
         localMediaRepository.observeSystemFavoriteLocalIds(),
         suppressedSystemFavoriteIds
     ) { dbFavs, sysFavs, suppressed ->
         ((dbFavs + sysFavs) - suppressed).toSet().also { latestFavoriteItemIds = it }
-    }.flowOn(Dispatchers.Default)
+    }.flowOn(Dispatchers.Default).stateIn(
+        scope = repoIoScope,
+        started = SharingStarted.Lazily,
+        initialValue = emptySet()
+    )
 
     @Volatile
     var latestHiddenAlbumIds: Set<String> = emptySet()
@@ -94,17 +103,32 @@ class GalleryExtrasRepository(
     var latestLockedAlbumIds: Set<String> = emptySet()
         private set
 
-    val hiddenAlbumIdsFlow: Flow<Set<String>> = extrasDao.observeHiddenAlbumIds()
+    val hiddenAlbumIdsFlow: StateFlow<Set<String>> = extrasDao.observeHiddenAlbumIds()
         .map { list -> list.toSet().also { latestHiddenAlbumIds = it } }
+        .stateIn(
+            scope = repoIoScope,
+            started = SharingStarted.Lazily,
+            initialValue = emptySet()
+        )
 
-    val lockedAlbumIdsFlow: Flow<Set<String>> = extrasDao.observeLockedAlbumIds()
+    val lockedAlbumIdsFlow: StateFlow<Set<String>> = extrasDao.observeLockedAlbumIds()
         .map { list -> list.toSet().also { latestLockedAlbumIds = it } }
+        .stateIn(
+            scope = repoIoScope,
+            started = SharingStarted.Lazily,
+            initialValue = emptySet()
+        )
 
     /** Combined set of album IDs that must never leak into Pictures, Search, Stories, Clean Out, or Widget. */
-    val excludedAlbumIdsFlow: Flow<Set<String>> = combine(
+    val excludedAlbumIdsFlow: StateFlow<Set<String>> = combine(
         lockedAlbumIdsFlow,
         hiddenAlbumIdsFlow
     ) { locked, hidden -> locked + hidden }
+        .stateIn(
+            scope = repoIoScope,
+            started = SharingStarted.Lazily,
+            initialValue = emptySet()
+        )
 
     val favoriteStoryIdsFlow: Flow<Set<String>> = extrasDao.observeFavoriteStoryIds()
         .map { it.toSet() }
@@ -112,45 +136,86 @@ class GalleryExtrasRepository(
     val ignoredCleanOutIdsFlow: Flow<Set<String>> = extrasDao.observeIgnoredCleanOutIds()
         .map { it.toSet() }
 
-    val customAlbumCoversFlow: Flow<Map<String, CustomAlbumCoverEntity>> =
+    val customAlbumCoversFlow: StateFlow<Map<String, CustomAlbumCoverEntity>> =
         extrasDao.observeCustomAlbumCovers()
             .map { list -> list.associateBy { it.albumId } }
             .flowOn(Dispatchers.Default)
+            .stateIn(
+                scope = repoIoScope,
+                started = SharingStarted.Lazily,
+                initialValue = emptyMap()
+            )
 
-    val mediaAnnotationsFlow: Flow<Map<String, MediaAnnotationEntity>> =
+    val mediaAnnotationsFlow: StateFlow<Map<String, MediaAnnotationEntity>> =
         extrasDao.observeAllAnnotations()
             .map { list -> list.associateBy { it.itemId } }
             .flowOn(Dispatchers.Default)
+            .stateIn(
+                scope = repoIoScope,
+                started = SharingStarted.Lazily,
+                initialValue = emptyMap()
+            )
 
-    val cachedLocationsMapFlow: Flow<Map<String, PhotoLocationEntity>> =
+    val cachedLocationsMapFlow: StateFlow<Map<String, PhotoLocationEntity>> =
         extrasDao.observeCachedLocations()
             .map { list -> list.associateBy { it.itemId } }
             .flowOn(Dispatchers.Default)
+            .stateIn(
+                scope = repoIoScope,
+                started = SharingStarted.Lazily,
+                initialValue = emptyMap()
+            )
 
-    val ocrTextMapFlow: Flow<Map<String, PhotoOcrEntity>> =
+    val ocrTextMapFlow: StateFlow<Map<String, PhotoOcrEntity>> =
         extrasDao.observeOcrTextEntries()
             .map { list -> list.associateBy { it.itemId } }
             .flowOn(Dispatchers.Default)
+            .stateIn(
+                scope = repoIoScope,
+                started = SharingStarted.Lazily,
+                initialValue = emptyMap()
+            )
+
+    fun getCachedAlbumViewPref(albumId: String): AlbumViewPrefEntity? = albumViewPrefCache[albumId]
+
+    /** Pre-warms frequently shared extras StateFlows & album view prefs in background at launch. */
+    fun warmCaches() {
+        repoIoScope.launch {
+            launch { favoriteItemIdsFlow.collect {} }
+            launch { excludedAlbumIdsFlow.collect {} }
+            launch { customAlbumCoversFlow.collect {} }
+            launch { mediaAnnotationsFlow.collect {} }
+            launch { cachedLocationsMapFlow.collect {} }
+            launch {
+                extrasDao.observeAllAlbumViewPrefs().collect { list ->
+                    albumViewPrefCache.clear()
+                    for (pref in list) albumViewPrefCache[pref.albumId] = pref
+                }
+            }
+        }
+    }
 
     fun observeAlbumViewPref(albumId: String): Flow<AlbumViewPrefEntity?> =
         extrasDao.observeAlbumViewPref(albumId)
 
     suspend fun getAlbumViewPref(albumId: String): AlbumViewPrefEntity? =
-        withContext(Dispatchers.IO) { extrasDao.getAlbumViewPref(albumId) }
+        albumViewPrefCache[albumId] ?: withContext(Dispatchers.IO) {
+            extrasDao.getAlbumViewPref(albumId)?.also { albumViewPrefCache[albumId] = it }
+        }
 
     suspend fun saveAlbumViewPref(
         albumId: String,
         sort: AlbumMediaSort,
         groupBy: AlbumMediaGroupBy
     ) = withContext(Dispatchers.IO) {
-        extrasDao.upsertAlbumViewPref(
-            AlbumViewPrefEntity(
-                albumId = albumId,
-                sortName = sort.name,
-                groupByName = groupBy.name,
-                updatedAtEpochMs = System.currentTimeMillis()
-            )
+        val pref = AlbumViewPrefEntity(
+            albumId = albumId,
+            sortName = sort.name,
+            groupByName = groupBy.name,
+            updatedAtEpochMs = System.currentTimeMillis()
         )
+        albumViewPrefCache[albumId] = pref
+        extrasDao.upsertAlbumViewPref(pref)
     }
 
     fun observeAnnotation(itemId: String): Flow<MediaAnnotationEntity?> =

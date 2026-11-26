@@ -26,6 +26,7 @@ import com.luminagallery.drive.data.local.GalleryDatabase
 import com.luminagallery.drive.data.local.HiddenLockedFolderManager
 import com.luminagallery.drive.data.local.LocalMediaRepository
 import com.luminagallery.drive.data.local.PreferencesManager
+import com.luminagallery.drive.data.local.dao.LightFaceRow
 import com.luminagallery.drive.data.local.entity.DetectedFaceEntity
 import com.luminagallery.drive.data.local.entity.PersonClusterEntity
 import com.luminagallery.drive.data.local.entity.PhotoSmartIndexEntity
@@ -38,15 +39,20 @@ import com.luminagallery.drive.data.repository.DriveThumbnailFetcher
 import com.luminagallery.drive.data.repository.OfflineMediaManager
 import com.luminagallery.drive.domain.model.MediaItem
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -179,18 +185,74 @@ class SmartRecognitionManager(
         ImageLabeling.getClient(options)
     }
 
-    val allPersonsFlow: Flow<List<PersonClusterEntity>> = smartDao.observeAllPersons()
+    private val managerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    val allPersonsFlow: StateFlow<List<PersonClusterEntity>> = smartDao.observeAllPersons()
+        .stateIn(
+            scope = managerScope,
+            started = SharingStarted.Lazily,
+            initialValue = emptyList()
+        )
+
+    /** Lightweight face stream omitting 768-byte embedding BLOBs for instant People/Search/Viewer loads. */
+    val allActiveLightFacesFlow: StateFlow<List<LightFaceRow>> = smartDao.observeAllActiveLightFaces()
+        .stateIn(
+            scope = managerScope,
+            started = SharingStarted.Lazily,
+            initialValue = emptyList()
+        )
+
     val allActiveFacesFlow: Flow<List<DetectedFaceEntity>> = smartDao.observeAllActiveFaces()
-    val smartIndexMapFlow: Flow<Map<String, PhotoSmartIndexEntity>> =
+
+    val smartIndexMapFlow: StateFlow<Map<String, PhotoSmartIndexEntity>> =
         smartDao.observeAllSmartIndex()
             .map { list -> list.associateBy { it.itemId } }
             .flowOn(Dispatchers.Default)
+            .stateIn(
+                scope = managerScope,
+                started = SharingStarted.Lazily,
+                initialValue = emptyMap()
+            )
+
+    fun warmCaches() {
+        managerScope.launch {
+            launch { allPersonsFlow.collect {} }
+            launch { allActiveLightFacesFlow.collect {} }
+            launch { smartIndexMapFlow.collect {} }
+        }
+    }
+
+    fun getCachedPersons(): List<PersonClusterEntity> = allPersonsFlow.value
+
+    fun getCachedActiveLightFaces(): List<LightFaceRow> = allActiveLightFacesFlow.value
+
+    fun getCachedSmartIndexMap(): Map<String, PhotoSmartIndexEntity> = smartIndexMapFlow.value
+
+    fun computeVisiblePersonsSync(
+        visibleIds: Set<String>,
+        includeHidden: Boolean = false
+    ): List<PersonSummary> = buildVisiblePersonSummaries(
+        persons = allPersonsFlow.value,
+        faces = allActiveLightFacesFlow.value,
+        visibleIds = visibleIds,
+        includeHidden = includeHidden
+    )
+
+    fun getCachedLightFacesForPerson(
+        personId: String,
+        visibleIds: Set<String>
+    ): List<LightFaceRow> = allActiveLightFacesFlow.value
+        .filter { it.personId == personId && it.itemId in visibleIds && !it.cropPath.isNullOrBlank() }
+        .sortedByDescending { it.qualityScore }
 
     fun observePersonById(personId: String): Flow<PersonClusterEntity?> =
         smartDao.observePersonById(personId)
 
     fun observeFacesForPerson(personId: String): Flow<List<DetectedFaceEntity>> =
         smartDao.observeFacesForPerson(personId)
+
+    fun observeLightFacesForPerson(personId: String): Flow<List<LightFaceRow>> =
+        smartDao.observeLightFacesForPerson(personId)
 
     fun observeFacesForPhoto(itemId: String): Flow<List<DetectedFaceEntity>> =
         smartDao.observeFacesForPhoto(itemId)
@@ -482,18 +544,27 @@ class SmartRecognitionManager(
         includeHidden: Boolean = false
     ): Flow<List<PersonSummary>> = combine(
         allPersonsFlow,
-        allActiveFacesFlow,
+        allActiveLightFacesFlow,
         visibleItemIdsFlow
     ) { persons, faces, visibleIds ->
-        if (persons.isEmpty() || visibleIds.isEmpty()) return@combine emptyList()
-        val facesByPerson = HashMap<String, MutableList<DetectedFaceEntity>>(persons.size)
+        buildVisiblePersonSummaries(persons, faces, visibleIds, includeHidden)
+    }.flowOn(Dispatchers.Default)
+
+    private fun buildVisiblePersonSummaries(
+        persons: List<PersonClusterEntity>,
+        faces: List<LightFaceRow>,
+        visibleIds: Set<String>,
+        includeHidden: Boolean
+    ): List<PersonSummary> {
+        if (persons.isEmpty() || visibleIds.isEmpty()) return emptyList()
+        val facesByPerson = HashMap<String, MutableList<LightFaceRow>>(persons.size)
         for (face in faces) {
             val pid = face.personId ?: continue
             if (face.itemId !in visibleIds) continue
             facesByPerson.getOrPut(pid) { mutableListOf() }.add(face)
         }
 
-        persons.mapNotNull { person ->
+        return persons.mapNotNull { person ->
             if (!includeHidden && person.isHidden) return@mapNotNull null
             val personFaces = facesByPerson[person.personId] ?: return@mapNotNull null
             if (personFaces.isEmpty()) return@mapNotNull null
@@ -520,7 +591,7 @@ class SmartRecognitionManager(
                 .thenByDescending { it.photoCount }
                 .thenBy { it.name.lowercase(Locale.US) }
         )
-    }.flowOn(Dispatchers.Default)
+    }
 
     /**
      * Incrementally scans ONLY unindexed or modified local & connected Google Drive photos/videos

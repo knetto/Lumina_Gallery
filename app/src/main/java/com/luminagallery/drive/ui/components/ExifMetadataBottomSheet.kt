@@ -16,10 +16,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -41,14 +39,21 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Label
+import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.Adjust
 import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.Camera
 import androidx.compose.material.icons.rounded.CameraAlt
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.Exposure
 import androidx.compose.material.icons.rounded.Face
+import androidx.compose.material.icons.rounded.FilterCenterFocus
+import androidx.compose.material.icons.rounded.FlashOn
 import androidx.compose.material.icons.rounded.Folder
+import androidx.compose.material.icons.rounded.Grain
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.LocationOn
@@ -57,8 +62,16 @@ import androidx.compose.material.icons.rounded.Movie
 import androidx.compose.material.icons.rounded.People
 import androidx.compose.material.icons.rounded.PersonRemove
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.ShutterSpeed
+import androidx.compose.material.icons.rounded.SlowMotionVideo
 import androidx.compose.material.icons.rounded.Smartphone
+import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.SwapHoriz
+import androidx.compose.material.icons.rounded.Timer
+import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material.icons.rounded.Videocam
+import androidx.compose.material.icons.rounded.WbSunny
+import androidx.compose.material.icons.rounded.ZoomIn
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -70,7 +83,6 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.VerticalDivider
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -83,9 +95,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -97,17 +112,20 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.luminagallery.drive.LocalAppContainer
 import com.luminagallery.drive.data.remote.DriveConstants
 import com.luminagallery.drive.data.repository.ai.SmartObjectVocabulary
+import com.luminagallery.drive.domain.model.ExifMetadata
 import com.luminagallery.drive.domain.model.MediaItem
 import kotlinx.coroutines.launch
 import java.util.Locale
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 /**
- * Flagship Details Sheet inspired by Apple Photos, Xiaomi HyperOS Gallery, and Samsung One UI 8:
- *  - Large crisp date header with filename, format pill, and device/cloud badge
- *  - Pro Camera & EXIF telemetry card (tabular f-stop / shutter / ISO / focal length strip)
- *  - Unified media resolution, megapixels, file size & storage card with one-tap copy
- *  - Clean inline caption/note editor & pill tag manager (zero cluttered box borders)
+ * Photographer-first Details Sheet:
+ *  - Crisp date & filename header with an icon-only storage origin badge (device / Google Drive)
+ *  - Hero Camera & Shooting Settings card: clean camera/lens header, 2×2 exposure & optics bento
+ *    tiles (aperture, shutter, ISO, focal + 35mm equiv.), focused shooting chips (EV, mode,
+ *    metering, WB, flash when fired), and a quiet resolution/size footer
+ *  - Location mini-map, People & Detected tags, clean storage path, and inline caption & tags
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -278,89 +296,94 @@ fun ExifMetadataBottomSheet(
                 .padding(bottom = 26.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // 1. Apple Photos-style Hero Date + Filename Header
+            // 1. Clean Hero Date + Filename Header with Icon-Only Origin Badge
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 4.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = item.fullDateLabel,
-                        style = MaterialTheme.typography.titleLarge.copy(
-                            fontSize = 20.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            letterSpacing = (-0.3).sp
-                        ),
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    // Origin badge (On device / Google Drive)
-                    Surface(
-                        shape = RoundedCornerShape(50),
-                        color = MaterialTheme.colorScheme.surfaceContainerHighest
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(5.dp)
                     ) {
+                        Text(
+                            text = item.fullDateLabel,
+                            style = MaterialTheme.typography.titleLarge.copy(
+                                fontSize = 20.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                letterSpacing = (-0.3).sp
+                            ),
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                         Row(
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                            horizontalArrangement = Arrangement.spacedBy(7.dp)
                         ) {
-                            if (item.isLocal) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Smartphone,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(13.dp)
-                                )
-                            } else {
-                                GoogleDriveGlyph(
-                                    size = 13.dp,
-                                    primaryColor = MaterialTheme.colorScheme.primary
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                            ) {
+                                Text(
+                                    text = extBadge,
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 10.sp,
+                                        letterSpacing = 0.5.sp
+                                    ),
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                                 )
                             }
                             Text(
-                                text = if (item.isLocal) "On device" else "Drive",
-                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
-                                color = MaterialTheme.colorScheme.onSurface
+                                text = item.name,
+                                style = MaterialTheme.typography.bodySmall.copy(fontSize = 13.sp),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
-                }
 
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
+                    // Icon-only origin indicator (phone for local, Google Drive glyph for cloud)
                     Surface(
-                        shape = RoundedCornerShape(6.dp),
-                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                        modifier = Modifier
+                            .size(38.dp)
+                            .border(0.7.dp, hairlineBorder, CircleShape)
+                            .clip(CircleShape)
+                            .clickable {
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                onCopiedMessage(
+                                    if (item.isLocal) "Saved on this device" else "Stored in Google Drive"
+                                )
+                            }
                     ) {
-                        Text(
-                            text = extBadge,
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 10.5.sp,
-                                letterSpacing = 0.4.sp
-                            ),
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.5.dp)
-                        )
+                        Box(contentAlignment = Alignment.Center) {
+                            if (item.isLocal) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Smartphone,
+                                    contentDescription = "On device",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            } else {
+                                GoogleDriveGlyph(
+                                    size = 17.dp,
+                                    primaryColor = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.semantics { contentDescription = "Google Drive" }
+                                )
+                            }
+                        }
                     }
-                    Text(
-                        text = item.name,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
                 }
 
                 if (item.dateRecoveredFromFilename) {
@@ -392,7 +415,203 @@ fun ExifMetadataBottomSheet(
                 }
             }
 
-            // 2. Recognized People & Animal / Object / Scene Tags Card (prominently near top!)
+            // 2. Hero Camera & Shooting Settings Card (immediately visible on swipe-up)
+            CameraSettingsCard(
+                item = item,
+                liveExif = liveExif,
+                cardColor = cardColor,
+                hairlineBorder = hairlineBorder
+            )
+
+            // 3. Location & Photo Mini-Map Card (when GPS coordinates exist in EXIF, video, Drive, or Room cache)
+            val resolvedLat = if (liveExif.hasLocation) {
+                liveExif.latitude
+            } else if (cachedLocation != null && cachedLocation.hasLocation) {
+                cachedLocation.latitude
+            } else null
+            val resolvedLon = if (liveExif.hasLocation) {
+                liveExif.longitude
+            } else if (cachedLocation != null && cachedLocation.hasLocation) {
+                cachedLocation.longitude
+            } else null
+
+            if (resolvedLat != null && resolvedLon != null) {
+                val cachedCityCountry = cachedLocation?.let { loc ->
+                    listOf(loc.city, loc.country)
+                        .filter { it.isNotBlank() && it != "Other" && !it.contains("°") }
+                        .distinct()
+                        .joinToString(", ")
+                        .takeIf { it.isNotBlank() }
+                }
+                val locationTitle = liveExif.locationAddress?.takeIf { it.isNotBlank() }
+                    ?: cachedDetailedAddress?.takeIf { it.isNotBlank() }
+                    ?: cachedCityCountry
+                    ?: "Photo location"
+                val coordText = buildString {
+                    append(FormatUtils.formatCoordinates(resolvedLat, resolvedLon))
+                    FormatUtils.formatAltitude(liveExif.altitudeMeters)?.let { alt ->
+                        append(" · ")
+                        append(alt)
+                    }
+                }
+                val thumbData: Any? = if (item.isLocal) {
+                    item.localContentUri
+                } else {
+                    DriveConstants.buildThumbnailUrl(
+                        thumbnailLink = item.thumbnailLink,
+                        fileId = item.id,
+                        isUnmeteredWifi = true,
+                        isVideo = item.isVideo,
+                        sizeBytes = item.sizeBytes,
+                        requestedMaxPx = 256
+                    )
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(24.dp),
+                    color = cardColor,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(0.7.dp, hairlineBorder, RoundedCornerShape(24.dp))
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        PhotoLocationMiniMap(
+                            latitude = resolvedLat,
+                            longitude = resolvedLon,
+                            thumbnailData = thumbData,
+                            thumbnailMemoryKey = DriveConstants.stableThumbMemoryKey(item.id),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(172.dp)
+                                .clip(RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
+                        )
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 13.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(34.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.LocationOn,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(19.dp)
+                                    )
+                                }
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = locationTitle,
+                                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = coordText,
+                                        style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"),
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(50))
+                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f))
+                                        .clickable {
+                                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                            val labelEncoded = Uri.encode(locationTitle)
+                                            val geoUri = Uri.parse(
+                                                String.format(
+                                                    Locale.US,
+                                                    "geo:%.6f,%.6f?q=%.6f,%.6f(%s)",
+                                                    resolvedLat,
+                                                    resolvedLon,
+                                                    resolvedLat,
+                                                    resolvedLon,
+                                                    labelEncoded
+                                                )
+                                            )
+                                            val launched = runCatching {
+                                                context.startActivity(
+                                                    Intent(Intent.ACTION_VIEW, geoUri).apply {
+                                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                                    }
+                                                )
+                                            }.isSuccess
+                                            if (!launched) {
+                                                onCopiedMessage("No maps app installed")
+                                            }
+                                        }
+                                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Map,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Text(
+                                        text = "Open in Maps",
+                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(50))
+                                        .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+                                        .clickable {
+                                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                            val clipboard =
+                                                context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                            val rawCoord = String.format(Locale.US, "%.6f, %.6f", resolvedLat, resolvedLon)
+                                            clipboard.setPrimaryClip(ClipData.newPlainText("Location", rawCoord))
+                                            onCopiedMessage("Copied coordinates")
+                                        }
+                                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.ContentCopy,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Text(
+                                        text = "Copy coords",
+                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 4. Recognized People & Animal / Object / Scene Tags Card
             val photoPersons = remember(detectedFaces, allPersons) {
                 val byId = allPersons.associateBy { it.personId }
                 detectedFaces.mapNotNull { face ->
@@ -408,13 +627,13 @@ fun ExifMetadataBottomSheet(
                     .filter { it.isNotEmpty() }
                 if (indexed.isNotEmpty()) indexed else onDemandLabels
             }
-            if (photoPersons.isNotEmpty() || detectedLabels.isNotEmpty() || isAnalyzingSmart) {
+            if (photoPersons.isNotEmpty() || detectedLabels.isNotEmpty()) {
                 Surface(
-                    shape = RoundedCornerShape(22.dp),
+                    shape = RoundedCornerShape(24.dp),
                     color = cardColor,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .border(0.7.dp, hairlineBorder, RoundedCornerShape(22.dp))
+                        .border(0.7.dp, hairlineBorder, RoundedCornerShape(24.dp))
                 ) {
                     Column(
                         modifier = Modifier
@@ -565,454 +784,53 @@ fun ExifMetadataBottomSheet(
                                     }
                                 }
                             }
-                        } else if (isAnalyzingSmart && photoPersons.isEmpty()) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(15.dp),
-                                    strokeWidth = 2.dp,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
-                                Text(
-                                    text = "Detecting people, animals & scenes…",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
                         }
                     }
                 }
-            }
-
-            // 3. Location & Photo Mini-Map Card (when GPS coordinates exist in EXIF, video, Drive, or Room cache)
-            val resolvedLat = if (liveExif.hasLocation) {
-                liveExif.latitude
-            } else if (cachedLocation != null && cachedLocation.hasLocation) {
-                cachedLocation.latitude
-            } else null
-            val resolvedLon = if (liveExif.hasLocation) {
-                liveExif.longitude
-            } else if (cachedLocation != null && cachedLocation.hasLocation) {
-                cachedLocation.longitude
-            } else null
-
-            if (resolvedLat != null && resolvedLon != null) {
-                val cachedCityCountry = cachedLocation?.let { loc ->
-                    listOf(loc.city, loc.country)
-                        .filter { it.isNotBlank() && it != "Other" && !it.contains("°") }
-                        .distinct()
-                        .joinToString(", ")
-                        .takeIf { it.isNotBlank() }
-                }
-                val locationTitle = liveExif.locationAddress?.takeIf { it.isNotBlank() }
-                    ?: cachedDetailedAddress?.takeIf { it.isNotBlank() }
-                    ?: cachedCityCountry
-                    ?: "Photo location"
-                val coordText = buildString {
-                    append(FormatUtils.formatCoordinates(resolvedLat, resolvedLon))
-                    FormatUtils.formatAltitude(liveExif.altitudeMeters)?.let { alt ->
-                        append(" · ")
-                        append(alt)
-                    }
-                }
-                val thumbData: Any? = if (item.isLocal) {
-                    item.localContentUri
-                } else {
-                    DriveConstants.buildThumbnailUrl(
-                        thumbnailLink = item.thumbnailLink,
-                        fileId = item.id,
-                        isUnmeteredWifi = true,
-                        isVideo = item.isVideo,
-                        sizeBytes = item.sizeBytes,
-                        requestedMaxPx = 256
-                    )
-                }
-
-                Surface(
-                    shape = RoundedCornerShape(22.dp),
-                    color = cardColor,
+            } else if (isAnalyzingSmart) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .border(0.7.dp, hairlineBorder, RoundedCornerShape(22.dp))
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(cardColor.copy(alpha = 0.7f))
+                        .border(0.7.dp, hairlineBorder, RoundedCornerShape(16.dp))
+                        .padding(horizontal = 14.dp, vertical = 10.dp)
                 ) {
-                    Column(modifier = Modifier.fillMaxWidth()) {
-                        PhotoLocationMiniMap(
-                            latitude = resolvedLat,
-                            longitude = resolvedLon,
-                            thumbnailData = thumbData,
-                            thumbnailMemoryKey = DriveConstants.stableThumbMemoryKey(item.id),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(172.dp)
-                                .clip(RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp))
-                        )
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 13.dp),
-                            verticalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(34.dp)
-                                        .clip(RoundedCornerShape(10.dp))
-                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.LocationOn,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.size(19.dp)
-                                    )
-                                }
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = locationTitle,
-                                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
-                                        color = MaterialTheme.colorScheme.onSurface,
-                                        maxLines = 2,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    Text(
-                                        text = coordText,
-                                        style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"),
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                            }
-
-                            Row(
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(50))
-                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f))
-                                        .clickable {
-                                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                            val labelEncoded = Uri.encode(locationTitle)
-                                            val geoUri = Uri.parse(
-                                                String.format(
-                                                    Locale.US,
-                                                    "geo:%.6f,%.6f?q=%.6f,%.6f(%s)",
-                                                    resolvedLat,
-                                                    resolvedLon,
-                                                    resolvedLat,
-                                                    resolvedLon,
-                                                    labelEncoded
-                                                )
-                                            )
-                                            val launched = runCatching {
-                                                context.startActivity(
-                                                    Intent(Intent.ACTION_VIEW, geoUri).apply {
-                                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                                    }
-                                                )
-                                            }.isSuccess
-                                            if (!launched) {
-                                                onCopiedMessage("No maps app installed")
-                                            }
-                                        }
-                                        .padding(horizontal = 12.dp, vertical = 6.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Map,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.size(15.dp)
-                                    )
-                                    Text(
-                                        text = "Open in Maps",
-                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
-                                }
-
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(5.dp),
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(50))
-                                        .background(MaterialTheme.colorScheme.surfaceContainerHighest)
-                                        .clickable {
-                                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                            val clipboard =
-                                                context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                            val rawCoord = String.format(Locale.US, "%.6f, %.6f", resolvedLat, resolvedLon)
-                                            clipboard.setPrimaryClip(ClipData.newPlainText("Location", rawCoord))
-                                            onCopiedMessage("Copied coordinates")
-                                        }
-                                        .padding(horizontal = 12.dp, vertical = 6.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.ContentCopy,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.size(14.dp)
-                                    )
-                                    Text(
-                                        text = "Copy coords",
-                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 4. Apple / Xiaomi / Samsung Pro Camera & Media Telemetry Card
-            Surface(
-                shape = RoundedCornerShape(22.dp),
-                color = cardColor,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .border(0.7.dp, hairlineBorder, RoundedCornerShape(22.dp))
-            ) {
-                Column(modifier = Modifier.fillMaxWidth()) {
-                    // Top header row inside card: Camera Model or Media Kind + MP badge
-                    val w = item.effectiveWidth
-                    val h = item.effectiveHeight
-                    val mpLabel = FormatUtils.formatMegapixels(w, h)
-                    val resLabel = if (w != null && h != null && w > 0 && h > 0) "$w × $h" else null
-                    val aspectLabel = FormatUtils.formatAspectRatio(w, h)
-
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(38.dp)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = when {
-                                    liveExif.hasCameraDetails -> Icons.Rounded.CameraAlt
-                                    item.isVideo -> Icons.Rounded.Movie
-                                    else -> Icons.Rounded.Image
-                                },
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = liveExif.cameraDisplayName
-                                    ?: if (item.isVideo) "Video recording" else if (item.isRaw) "RAW Photograph" else "Photograph",
-                                style = MaterialTheme.typography.titleSmall.copy(
-                                    fontWeight = FontWeight.SemiBold,
-                                    fontSize = 15.sp
-                                ),
-                                color = MaterialTheme.colorScheme.onSurface,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            val subline = buildList {
-                                liveExif.lens?.takeIf { it.isNotBlank() }?.let { add(it) }
-                                resLabel?.let { add(it) }
-                                aspectLabel?.let { add(it) }
-                                if (item.isVideo && item.durationMillis != null) {
-                                    add(FormatUtils.formatDuration(item.durationMillis))
-                                }
-                            }.joinToString(" · ").ifBlank { item.mimeType }
-                            Text(
-                                text = subline,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                        Column(horizontalAlignment = Alignment.End) {
-                            Text(
-                                text = FormatUtils.formatFileSize(item.sizeBytes),
-                                style = MaterialTheme.typography.labelLarge.copy(
-                                    fontWeight = FontWeight.SemiBold,
-                                    fontFeatureSettings = "tnum"
-                                ),
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            if (mpLabel != null) {
-                                Text(
-                                    text = mpLabel,
-                                    style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"),
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
-                    }
-
-                    // Pro EXIF 4-column telemetry strip (f-stop | shutter | ISO | focal length)
-                    val focalLabel = FormatUtils.formatFocalLength(liveExif.focalLength)
-                        ?: liveExif.focalLength35mm?.let { "$it mm" }
-                    val exifCells = buildList {
-                        FormatUtils.formatAperture(liveExif.aperture)?.let { add("Aperture" to it) }
-                        FormatUtils.formatShutterSpeed(liveExif.exposureTime)?.let { add("Shutter" to it) }
-                        liveExif.isoSpeed?.let { add("ISO" to "$it") }
-                        focalLabel?.let { add("Focal" to it) }
-                    }
-
-                    if (exifCells.isNotEmpty()) {
-                        HorizontalDivider(
-                            thickness = 0.6.dp,
-                            color = hairlineBorder
-                        )
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(IntrinsicSize.Min)
-                                .padding(vertical = 11.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            exifCells.forEachIndexed { idx, (label, value) ->
-                                Column(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .padding(horizontal = 4.dp),
-                                    horizontalAlignment = Alignment.CenterHorizontally,
-                                    verticalArrangement = Arrangement.spacedBy(2.dp)
-                                ) {
-                                    Text(
-                                        text = value,
-                                        style = TextStyle(
-                                            fontSize = 13.5.sp,
-                                            fontWeight = FontWeight.SemiBold,
-                                            fontFeatureSettings = "tnum",
-                                            color = MaterialTheme.colorScheme.onSurface
-                                        ),
-                                        maxLines = 1
-                                    )
-                                    Text(
-                                        text = label,
-                                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.5.sp),
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1
-                                    )
-                                }
-                                if (idx < exifCells.lastIndex) {
-                                    VerticalDivider(
-                                        modifier = Modifier
-                                            .fillMaxHeight()
-                                            .padding(vertical = 4.dp),
-                                        thickness = 0.6.dp,
-                                        color = hairlineBorder
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    // Additional camera, video & file technical specs (2-column compact grid)
-                    val extraSpecs = buildList<Pair<String, String>> {
-                        liveExif.focalLength35mm?.let { eq ->
-                            if (liveExif.focalLength != null) add("35mm equiv." to "$eq mm")
-                        }
-                        FormatUtils.formatExposureBias(liveExif.exposureBiasEv)?.let { add("Exposure" to it) }
-                        liveExif.flashDescription?.let { add("Flash" to it) }
-                        liveExif.whiteBalance?.let { add("White balance" to it) }
-                        liveExif.meteringMode?.let { add("Metering" to it) }
-                        liveExif.digitalZoomRatio?.let { zoom ->
-                            add("Digital zoom" to String.format(Locale.US, "%.1f×", zoom))
-                        }
-                        liveExif.colorSpace?.let { add("Color space" to it) }
-                        FormatUtils.formatFrameRate(liveExif.videoFrameRate)?.let { add("Frame rate" to it) }
-                        FormatUtils.formatBitrate(liveExif.videoBitrateBps)?.let { add("Bitrate" to it) }
-                        liveExif.videoCodec?.let { add("Codec" to it) }
-                        liveExif.audioSummary?.let { add("Audio" to it) }
-                        liveExif.orientationLabel?.let { add("Orientation" to it) }
-                        liveExif.software?.takeIf { it.isNotBlank() }?.let { add("Software" to it) }
-                        item.mimeType.takeIf { it.isNotBlank() }?.let { add("Format" to it) }
-                        if (item.fileModifiedEpochMs > 0L &&
-                            abs(item.fileModifiedEpochMs - item.createdTimeEpochMs) > 86_400_000L
-                        ) {
-                            add("File modified" to FormatUtils.formatCalendarDate(item.fileModifiedEpochMs))
-                        }
-                    }
-
-                    if (extraSpecs.isNotEmpty()) {
-                        HorizontalDivider(thickness = 0.6.dp, color = hairlineBorder)
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 12.dp),
-                            verticalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            extraSpecs.chunked(2).forEach { pairRow ->
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                                ) {
-                                    pairRow.forEach { (specLabel, specValue) ->
-                                        Column(
-                                            modifier = Modifier.weight(1f),
-                                            verticalArrangement = Arrangement.spacedBy(1.dp)
-                                        ) {
-                                            Text(
-                                                text = specLabel,
-                                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.5.sp),
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                            Text(
-                                                text = specValue,
-                                                style = MaterialTheme.typography.bodySmall.copy(
-                                                    fontWeight = FontWeight.Medium,
-                                                    fontFeatureSettings = "tnum"
-                                                ),
-                                                color = MaterialTheme.colorScheme.onSurface,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                        }
-                                    }
-                                    if (pairRow.size == 1) {
-                                        Spacer(modifier = Modifier.weight(1f))
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(14.dp),
+                        strokeWidth = 1.8.dp,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = "Detecting people, animals & scenes…",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
 
             // 5. Storage Location Card with One-Tap Copy
+            val cleanFolderPath = remember(driveFolderPath) {
+                FormatUtils.formatDisplayFolderPath(driveFolderPath)
+            }
             Surface(
-                shape = RoundedCornerShape(22.dp),
+                shape = RoundedCornerShape(24.dp),
                 color = cardColor,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .border(0.7.dp, hairlineBorder, RoundedCornerShape(22.dp))
-                    .clip(RoundedCornerShape(22.dp))
+                    .border(0.7.dp, hairlineBorder, RoundedCornerShape(24.dp))
+                    .clip(RoundedCornerShape(24.dp))
                     .clickable {
                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                         val clipboard =
                             context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                         val copyPath = if (item.isLocal) {
                             val rel = item.storagePath?.trim('/')?.takeIf { it.isNotBlank() }
-                            if (rel != null) "/storage/emulated/0/$rel/${item.name}" else "$driveFolderPath/${item.name}"
+                            if (rel != null) "/storage/emulated/0/$rel/${item.name}" else "$cleanFolderPath/${item.name}"
                         } else {
-                            "$driveFolderPath/${item.name}"
+                            "$cleanFolderPath/${item.name}"
                         }
                         clipboard.setPrimaryClip(ClipData.newPlainText("Path", copyPath))
                         onCopiedMessage("Copied path to clipboard")
@@ -1021,7 +839,7 @@ fun ExifMetadataBottomSheet(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                        .padding(horizontal = 16.dp, vertical = 13.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
@@ -1041,14 +859,14 @@ fun ExifMetadataBottomSheet(
                     }
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = driveFolderPath,
+                            text = cleanFolderPath,
                             style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
                             color = MaterialTheme.colorScheme.onSurface,
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            text = if (item.isLocal) "Internal storage · tap to copy path" else "Google Drive · tap to copy path",
+                            text = "Tap to copy path",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -1057,18 +875,18 @@ fun ExifMetadataBottomSheet(
                         imageVector = Icons.Rounded.ContentCopy,
                         contentDescription = "Copy path",
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(17.dp)
                     )
                 }
             }
 
-            // 4. Clean iOS-style Caption & Tags Card
+            // 6. Clean iOS-style Caption & Tags Card
             Surface(
-                shape = RoundedCornerShape(22.dp),
+                shape = RoundedCornerShape(24.dp),
                 color = cardColor,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .border(0.7.dp, hairlineBorder, RoundedCornerShape(22.dp))
+                    .border(0.7.dp, hairlineBorder, RoundedCornerShape(24.dp))
             ) {
                 Column(
                     modifier = Modifier
@@ -1430,6 +1248,457 @@ fun ExifMetadataBottomSheet(
             dismissButton = {
                 TextButton(onClick = { quickRenamePersonId = null }) { Text("Cancel") }
             }
+        )
+    }
+}
+
+private data class ShootingMetricTile(
+    val icon: ImageVector,
+    val label: String,
+    val value: String,
+    val secondary: String? = null
+)
+
+private data class ShootingChip(
+    val icon: ImageVector,
+    val label: String,
+    val highlighted: Boolean = false
+)
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun CameraSettingsCard(
+    item: MediaItem,
+    liveExif: ExifMetadata,
+    cardColor: androidx.compose.ui.graphics.Color,
+    hairlineBorder: androidx.compose.ui.graphics.Color
+) {
+    val w = item.effectiveWidth
+    val h = item.effectiveHeight
+    val mpLabel = FormatUtils.formatMegapixels(w, h)
+    val resLabel = if (w != null && h != null && w > 0 && h > 0) "$w × $h" else null
+    val aspectLabel = FormatUtils.formatAspectRatio(w, h)
+    val sizeLabel = FormatUtils.formatFileSize(item.sizeBytes)
+
+    val formattedLens = remember(liveExif.lens, liveExif.cameraMake, liveExif.cameraModel) {
+        FormatUtils.formatLensName(liveExif.lens, liveExif.cameraMake, liveExif.cameraModel)
+    }
+
+    val primaryTiles = remember(item.isVideo, item.durationMillis, liveExif) {
+        if (item.isVideo) {
+            buildList {
+                item.durationMillis?.takeIf { it > 0L }?.let {
+                    add(ShootingMetricTile(Icons.Rounded.Timer, "Duration", FormatUtils.formatDuration(it)))
+                }
+                FormatUtils.formatFrameRate(liveExif.videoFrameRate)?.let {
+                    add(ShootingMetricTile(Icons.Rounded.SlowMotionVideo, "Frame rate", it))
+                }
+                FormatUtils.formatBitrate(liveExif.videoBitrateBps)?.let {
+                    add(ShootingMetricTile(Icons.Rounded.Speed, "Bitrate", it))
+                }
+                liveExif.videoCodec?.takeIf { it.isNotBlank() }?.let {
+                    add(ShootingMetricTile(Icons.Rounded.Videocam, "Codec", it))
+                }
+            }
+        } else {
+            buildList {
+                FormatUtils.formatAperture(liveExif.aperture)?.let {
+                    add(ShootingMetricTile(Icons.Rounded.Camera, "Aperture", it))
+                }
+                FormatUtils.formatShutterSpeed(liveExif.exposureTime)?.let {
+                    add(ShootingMetricTile(Icons.Rounded.ShutterSpeed, "Shutter", it))
+                }
+                liveExif.isoSpeed?.let {
+                    add(ShootingMetricTile(Icons.Rounded.Grain, "ISO", "$it"))
+                }
+                val focalActual = FormatUtils.formatFocalLength(liveExif.focalLength)
+                val focal35 = liveExif.focalLength35mm
+                if (focalActual != null) {
+                    val eqSuffix = if (
+                        focal35 != null &&
+                        liveExif.focalLength != null &&
+                        abs(focal35 - liveExif.focalLength.roundToInt()) >= 2
+                    ) {
+                        "${focal35}mm eq"
+                    } else null
+                    add(ShootingMetricTile(Icons.Rounded.FilterCenterFocus, "Focal", focalActual, secondary = eqSuffix))
+                } else if (focal35 != null) {
+                    add(ShootingMetricTile(Icons.Rounded.FilterCenterFocus, "Focal", "$focal35 mm", secondary = "35mm eq"))
+                }
+            }
+        }
+    }
+
+    val shootingChips = remember(item.isVideo, liveExif) {
+        if (item.isVideo) {
+            buildList {
+                liveExif.audioSummary?.takeIf { it.isNotBlank() }?.let {
+                    add(ShootingChip(Icons.AutoMirrored.Rounded.VolumeUp, it))
+                }
+            }
+        } else {
+            buildList {
+                liveExif.exposureBiasEv?.takeIf { it.isFinite() && abs(it) >= 0.05f }?.let { ev ->
+                    FormatUtils.formatExposureBias(ev)?.let { formatted ->
+                        add(ShootingChip(Icons.Rounded.Exposure, formatted, highlighted = true))
+                    }
+                }
+                liveExif.exposureMode?.takeIf { it.isNotBlank() }?.let { mode ->
+                    add(ShootingChip(Icons.Rounded.Tune, mode))
+                }
+                liveExif.meteringMode?.takeIf { it.isNotBlank() }?.let { metering ->
+                    add(ShootingChip(Icons.Rounded.Adjust, metering))
+                }
+                liveExif.whiteBalance?.takeIf { it.isNotBlank() }?.let { wb ->
+                    add(
+                        ShootingChip(
+                            icon = Icons.Rounded.WbSunny,
+                            label = "WB · $wb",
+                            highlighted = wb.equals("Manual", ignoreCase = true)
+                        )
+                    )
+                }
+                liveExif.flashDescription?.takeIf { it.contains("Fired", ignoreCase = true) }?.let { flash ->
+                    val label = if (flash.equals("Fired", ignoreCase = true)) "Flash fired" else "Flash · $flash"
+                    add(ShootingChip(Icons.Rounded.FlashOn, label, highlighted = true))
+                }
+                liveExif.digitalZoomRatio?.let { zoom ->
+                    add(ShootingChip(Icons.Rounded.ZoomIn, String.format(Locale.US, "%.1f× zoom", zoom)))
+                }
+            }
+        }
+    }
+
+    val hasShootingTelemetry = primaryTiles.isNotEmpty() || shootingChips.isNotEmpty() || liveExif.hasCameraDetails
+    val fileSpecsLeft = remember(resLabel, mpLabel, aspectLabel, item.isVideo) {
+        buildList {
+            resLabel?.let { add(it) }
+            if (!item.isVideo) mpLabel?.let { add(it) }
+            aspectLabel?.let { add(it) }
+        }.joinToString(" · ")
+    }
+
+    Surface(
+        shape = RoundedCornerShape(24.dp),
+        color = cardColor,
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(0.7.dp, hairlineBorder, RoundedCornerShape(24.dp))
+    ) {
+        if (!hasShootingTelemetry) {
+            // Compact summary for screenshots / graphics without camera EXIF
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(38.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = if (item.isVideo) Icons.Rounded.Movie else Icons.Rounded.Image,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        text = when {
+                            item.isVideo -> "Video"
+                            item.isRaw -> "RAW Photograph"
+                            else -> "Image"
+                        },
+                        style = MaterialTheme.typography.titleSmall.copy(
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 15.sp
+                        ),
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (fileSpecsLeft.isNotEmpty()) {
+                        Text(
+                            text = fileSpecsLeft,
+                            style = MaterialTheme.typography.bodySmall.copy(fontFeatureSettings = "tnum"),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+                Text(
+                    text = sizeLabel,
+                    style = MaterialTheme.typography.labelLarge.copy(
+                        fontWeight = FontWeight.SemiBold,
+                        fontFeatureSettings = "tnum"
+                    ),
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+        } else {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                // Gear Identity Header (Camera Body + Clean Lens Name)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(RoundedCornerShape(13.dp))
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = if (item.isVideo && !liveExif.hasCameraDetails) {
+                                Icons.Rounded.Movie
+                            } else {
+                                Icons.Rounded.CameraAlt
+                            },
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        Text(
+                            text = liveExif.cameraDisplayName
+                                ?: if (item.isVideo) "Video capture" else if (item.isRaw) "RAW Photograph" else "Camera settings",
+                            style = MaterialTheme.typography.titleSmall.copy(
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 15.5.sp,
+                                letterSpacing = (-0.2).sp
+                            ),
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        if (!formattedLens.isNullOrBlank()) {
+                            Text(
+                                text = formattedLens,
+                                style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.5.sp),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+
+                // Core 2×2 Exposure & Optics Bento Grid
+                if (primaryTiles.isNotEmpty()) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        primaryTiles.chunked(2).forEach { rowTiles ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                rowTiles.forEach { tile ->
+                                    ShootingMetricTileCard(
+                                        tile = tile,
+                                        hairlineBorder = hairlineBorder,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
+                                if (rowTiles.size == 1) {
+                                    Spacer(modifier = Modifier.weight(1f))
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Focused Secondary Shooting Chips (EV bias, Mode, Metering, WB, Flash when fired)
+                if (shootingChips.isNotEmpty()) {
+                    FlowRow(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(
+                                start = 14.dp,
+                                end = 14.dp,
+                                top = if (primaryTiles.isNotEmpty()) 10.dp else 0.dp
+                            ),
+                        horizontalArrangement = Arrangement.spacedBy(7.dp),
+                        verticalArrangement = Arrangement.spacedBy(7.dp)
+                    ) {
+                        shootingChips.forEach { chip ->
+                            ShootingChipBadge(chip = chip)
+                        }
+                    }
+                }
+
+                if (primaryTiles.isNotEmpty() || shootingChips.isNotEmpty()) {
+                    Spacer(Modifier.height(14.dp))
+                }
+
+                // Quiet File Geometry & Size Footer
+                HorizontalDivider(thickness = 0.6.dp, color = hairlineBorder)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.28f))
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = fileSpecsLeft.ifEmpty { if (item.isVideo) "Video file" else "Image file" },
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontSize = 11.5.sp,
+                            fontFeatureSettings = "tnum"
+                        ),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        text = sizeLabel,
+                        style = MaterialTheme.typography.labelMedium.copy(
+                            fontWeight = FontWeight.SemiBold,
+                            fontFeatureSettings = "tnum"
+                        ),
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ShootingMetricTileCard(
+    tile: ShootingMetricTile,
+    hairlineBorder: androidx.compose.ui.graphics.Color,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(16.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.56f))
+            .border(0.6.dp, hairlineBorder.copy(alpha = 0.6f), RoundedCornerShape(16.dp))
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                modifier = Modifier.weight(1f, fill = false),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp)
+            ) {
+                Icon(
+                    imageVector = tile.icon,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(14.dp)
+                )
+                Text(
+                    text = tile.label,
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium
+                    ),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            if (!tile.secondary.isNullOrBlank()) {
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    text = tile.secondary,
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Medium,
+                        fontFeatureSettings = "tnum"
+                    ),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+        Text(
+            text = tile.value,
+            style = TextStyle(
+                fontSize = 17.5.sp,
+                fontWeight = FontWeight.SemiBold,
+                letterSpacing = (-0.3).sp,
+                fontFeatureSettings = "tnum",
+                color = MaterialTheme.colorScheme.onSurface
+            ),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+@Composable
+private fun ShootingChipBadge(chip: ShootingChip) {
+    val bgColor = if (chip.highlighted) {
+        MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+    } else {
+        MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.72f)
+    }
+    val contentColor = if (chip.highlighted) {
+        MaterialTheme.colorScheme.primary
+    } else {
+        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.88f)
+    }
+    val iconTint = if (chip.highlighted) {
+        MaterialTheme.colorScheme.primary
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .background(bgColor)
+            .padding(horizontal = 10.dp, vertical = 6.dp)
+    ) {
+        Icon(
+            imageVector = chip.icon,
+            contentDescription = null,
+            tint = iconTint,
+            modifier = Modifier.size(13.5.dp)
+        )
+        Text(
+            text = chip.label,
+            style = MaterialTheme.typography.labelSmall.copy(
+                fontSize = 11.5.sp,
+                fontWeight = if (chip.highlighted) FontWeight.SemiBold else FontWeight.Medium,
+                fontFeatureSettings = "tnum"
+            ),
+            color = contentColor,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
         )
     }
 }

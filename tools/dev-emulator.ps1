@@ -1,15 +1,18 @@
-<#
+﻿<#
 .SYNOPSIS
-  Lumina Gallery local dev loop: runs the app in a lightweight Android emulator on this laptop,
+  Lumina Gallery local dev loop: runs the app in a lightweight, debloated Android emulator
   filled with photos from your PC Pictures folder. No phone, no release APK, no GitHub push needed.
 
 .EXAMPLES
-  .\tools\dev-emulator.ps1                 # start emulator, sync photos, build (if changed) + install + launch
-  .\tools\dev-emulator.ps1 -SkipPhotos     # after a code change: rebuild + reinstall (fastest)
+  .\tools\dev-emulator.ps1                       # start emulator, debloat once, sync photos, build + install + launch
+  .\tools\dev-emulator.ps1 -SkipPhotos           # after a code change: fast x86_64 debug rebuild + reinstall + relaunch
   .\tools\dev-emulator.ps1 -NoBuild -SkipPhotos  # just launch emulator + existing debug APK (zero Gradle RAM)
   .\tools\dev-emulator.ps1 -PhotoCount 1500 -IncludeVideos
-  .\tools\dev-emulator.ps1 -PhotosOnly     # only (re)sync photos
-  .\tools\dev-emulator.ps1 -Wipe           # fresh emulator (factory reset)
+  .\tools\dev-emulator.ps1 -PhotosOnly           # only (re)sync photos
+  .\tools\dev-emulator.ps1 -Debloat              # re-apply guest debloat (disables unused Google background apps)
+  .\tools\dev-emulator.ps1 -NoAudio              # boot without audio device emulation
+  .\tools\dev-emulator.ps1 -FullHD               # use 1080x2400@420 instead of lightweight 720x1600@280 (same dp layout)
+  .\tools\dev-emulator.ps1 -Wipe                 # fresh emulator (factory reset)
 
   The debug build installs as "com.luminagallery.drive.debug", completely separate from the app on
   your phone, and is only ever installed on the emulator (never on a USB-connected phone).
@@ -24,7 +27,10 @@ param(
     [switch]$NoBuild,
     [switch]$ForceBuild,
     [switch]$ColdBoot,
-    [switch]$Wipe
+    [switch]$Wipe,
+    [switch]$Debloat,
+    [switch]$NoAudio,
+    [switch]$FullHD
 )
 
 $ErrorActionPreference = 'Continue'   # adb/gradle print harmless warnings on stderr
@@ -35,16 +41,58 @@ $adb = Join-Path $sdk 'platform-tools\adb.exe'
 $emulator = Join-Path $sdk 'emulator\emulator.exe'
 $avdName = 'Lumina_Dev'
 $package = 'com.luminagallery.drive.debug'
+$mainActivity = "$package/com.luminagallery.drive.MainActivity"
 $remoteRoot = '/sdcard/Pictures/PC'
 $apkPath = Join-Path $repo 'app\build\outputs\apk\debug\app-debug.apk'
 
+$ramMB = 2560
+$cpuCores = 4
+# 720x1600 @ 280 dpi = 411.4dp x 914.3dp (exact same Compose layout as 1080x2400 @ 420 dpi, 56% fewer pixels)
+$lcdWidth = if ($FullHD) { 1080 } else { 720 }
+$lcdHeight = if ($FullHD) { 2400 } else { 1600 }
+$lcdDensity = if ($FullHD) { 420 } else { 280 }
+
 function Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
 
-# ---------------------------------------------------------------- 1. AVD (lightweight 2 GB RAM)
+function Get-EmulatorSerial {
+    (& $adb devices) | Select-String '^(emulator-\d+)\s+device' | ForEach-Object { $_.Matches[0].Groups[1].Value } | Select-Object -First 1
+}
+
+function Set-ConfigValue([string]$path, [hashtable]$updates) {
+    $lines = New-Object 'System.Collections.Generic.List[string]'
+    if (Test-Path $path) {
+        foreach ($l in (Get-Content $path)) { $lines.Add([string]$l) }
+    }
+    $changed = $false
+    foreach ($key in $updates.Keys) {
+        $val = "$($updates[$key])"
+        $prefix = "$key="
+        $idx = -1
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i].StartsWith($prefix)) { $idx = $i; break }
+        }
+        if ($idx -ge 0) {
+            if ($lines[$idx] -ne "$prefix$val") {
+                $lines[$idx] = "$prefix$val"
+                $changed = $true
+            }
+        } else {
+            $lines.Add("$prefix$val")
+            $changed = $true
+        }
+    }
+    if ($changed) {
+        Set-Content -Encoding ASCII -Path $path -Value $lines
+    }
+    return $changed
+}
+
+# ---------------------------------------------------------------- 1. AVD (lightweight 2 GB RAM, 4 vCPU, 720p same-dp display)
 # Written by hand: avdmanager on this SDK produces a broken template config (devices.xml bug).
 $avdRoot = Join-Path $env:USERPROFILE '.android\avd'
 $avdDir = Join-Path $avdRoot "$avdName.avd"
 $cfgPath = Join-Path $avdDir 'config.ini'
+$configChanged = $false
 if (-not (Test-Path $cfgPath) -or -not (Select-String -Path $cfgPath -Pattern '^AvdId=' -Quiet)) {
     Step "Creating lightweight emulator '$avdName' (one-time)"
     New-Item -ItemType Directory -Force -Path $avdDir | Out-Null
@@ -60,15 +108,15 @@ avd.ini.displayname=Lumina Dev
 avd.ini.encoding=UTF-8
 abi.type=x86_64
 hw.cpu.arch=x86_64
-hw.cpu.ncore=2
+hw.cpu.ncore=$cpuCores
 image.sysdir.1=system-images\android-36\google_apis_playstore\x86_64\
 tag.id=google_apis_playstore
 tag.display=Google Play
 PlayStore.enabled=true
-hw.lcd.width=1080
-hw.lcd.height=2400
-hw.lcd.density=420
-hw.ramSize=2560
+hw.lcd.width=$lcdWidth
+hw.lcd.height=$lcdHeight
+hw.lcd.density=$lcdDensity
+hw.ramSize=$ramMB
 vm.heapSize=384
 disk.dataPartition.size=12G
 hw.gpu.enabled=yes
@@ -76,27 +124,56 @@ hw.gpu.mode=host
 hw.keyboard=yes
 hw.mainKeys=no
 hw.initialOrientation=portrait
+hw.camera.back=none
+hw.camera.front=none
+hw.audioInput=no
+hw.sdCard=no
+hw.trackBall=no
+hw.dPad=no
 showDeviceFrame=no
 fastboot.forceColdBoot=no
 "@
+} elseif (-not (Get-EmulatorSerial)) {
+    # Keep existing AVD tuned to lightweight settings (preserving existing disk.dataPartition.size)
+    $configChanged = Set-ConfigValue $cfgPath @{
+        'hw.cpu.ncore'    = $cpuCores
+        'hw.lcd.width'    = $lcdWidth
+        'hw.lcd.height'   = $lcdHeight
+        'hw.lcd.density'  = $lcdDensity
+        'hw.ramSize'      = $ramMB
+        'vm.heapSize'     = 384
+        'hw.camera.back'  = 'none'
+        'hw.camera.front' = 'none'
+        'hw.audioInput'   = 'no'
+        'hw.sdCard'       = 'no'
+        'hw.trackBall'    = 'no'
+        'hw.dPad'         = 'no'
+    }
+    if ($configChanged) {
+        Write-Host "Updated $avdName config.ini (${ramMB}MB RAM, $cpuCores cores, ${lcdWidth}x${lcdHeight}@${lcdDensity}dpi) — cold-booting once to refresh Quick Boot snapshot." -ForegroundColor Yellow
+        $ColdBoot = $true
+    }
 }
 
-# ---------------------------------------------------------------- 2. Build FIRST (before emulator claims RAM)
+# ---------------------------------------------------------------- 2. Build FIRST (before emulator claims RAM, or incremental x86_64 when running)
 if (-not $PhotosOnly -and -not $NoBuild) {
     $needsBuild = $ForceBuild -or (-not (Test-Path $apkPath))
     if (-not $needsBuild) {
         $apkTime = (Get-Item $apkPath).LastWriteTime
-        $newestSrc = Get-ChildItem -Path (Join-Path $repo 'app\src\main'), (Join-Path $repo 'app\build.gradle.kts') -Recurse -File -ErrorAction SilentlyContinue |
+        $newestSrc = Get-ChildItem -Path (Join-Path $repo 'app\src\main'), (Join-Path $repo 'app\build.gradle.kts'), (Join-Path $repo 'gradle\libs.versions.toml') -Recurse -File -ErrorAction SilentlyContinue |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1
         if ($newestSrc -and $newestSrc.LastWriteTime -gt $apkTime) {
             $needsBuild = $true
         }
     }
     if ($needsBuild) {
-        Step 'Building debug APK (--no-daemon so Gradle frees RAM immediately)'
+        Step 'Building x86_64 debug APK (--no-daemon, 2 GB heap cap to spare laptop RAM)'
         Push-Location $repo
         try {
-            & .\gradlew.bat assembleDebug --no-daemon --max-workers=2 --console=plain
+            & .\gradlew.bat assembleDebug `
+                '-Plumina.debug.abi=x86_64' `
+                '-Dorg.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8' `
+                --no-daemon --max-workers=2 --console=plain
             if ($LASTEXITCODE -ne 0) { throw 'Gradle build failed.' }
         } finally { Pop-Location }
     } else {
@@ -105,17 +182,26 @@ if (-not $PhotosOnly -and -not $NoBuild) {
 }
 
 # ---------------------------------------------------------------- 3. Boot emulator
-function Get-EmulatorSerial {
-    (& $adb devices) | Select-String '^(emulator-\d+)\s+device' | ForEach-Object { $_.Matches[0].Groups[1].Value } | Select-Object -First 1
-}
 $serial = Get-EmulatorSerial
 if (-not $serial) {
-    Step 'Starting emulator (2.5 GB RAM, GPU accelerated)'
-    $emuArgs = @('-avd', $avdName, '-memory', '2560', '-cores', '2', '-netdelay', 'none', '-netspeed', 'full', '-gpu', 'host')
+    Step "Starting emulator (${ramMB} MB RAM, $cpuCores cores, ${lcdWidth}x${lcdHeight}@${lcdDensity}dpi, GPU accelerated)"
+    $emuArgs = @(
+        '-avd', $avdName,
+        '-memory', "$ramMB",
+        '-cores', "$cpuCores",
+        '-netdelay', 'none',
+        '-netspeed', 'full',
+        '-gpu', 'host',
+        '-no-boot-anim',
+        '-no-metrics',
+        '-camera-back', 'none',
+        '-camera-front', 'none'
+    )
+    if ($NoAudio) { $emuArgs += '-no-audio' }
     if ($ColdBoot) { $emuArgs += '-no-snapshot-load' }
     if ($Wipe) {
         $emuArgs += '-wipe-data'
-        Remove-Item (Join-Path $repo '.dev-emulator-photos.txt') -ErrorAction SilentlyContinue
+        Remove-Item (Join-Path $repo '.dev-emulator-photos.txt'), (Join-Path $repo '.dev-emulator-debloated.txt'), (Join-Path $repo '.dev-emulator-installed.txt') -ErrorAction SilentlyContinue
     }
     $emuLog = Join-Path $env:TEMP 'lumina-emulator.log'
     Start-Process -FilePath $emulator -ArgumentList $emuArgs -RedirectStandardOutput $emuLog -RedirectStandardError "$emuLog.err" | Out-Null
@@ -128,9 +214,48 @@ if (-not $serial) {
         $booted = (& $adb -s $serial shell getprop sys.boot_completed 2>$null | Out-String).Trim()
     } until ($booted -eq '1' -or (Get-Date) -gt $deadline)
     if ($booted -ne '1') { Get-Content $emuLog, "$emuLog.err" -Tail 30 -ErrorAction SilentlyContinue; throw 'Android did not finish booting. Log above.' }
-    Start-Sleep 3
+    Start-Sleep 2
 }
 Write-Host "Using $serial"
+
+# ---------------------------------------------------------------- 3b. One-time guest debloat (saves ~800+ MB guest RAM & stops Google Photos fighting MediaStore)
+$debloatStampPath = Join-Path $repo '.dev-emulator-debloated.txt'
+if ($Debloat -or -not (Test-Path $debloatStampPath)) {
+    Step 'Disabling unused preinstalled background apps inside emulator (reversible; keeps Play Services & Drive auth)'
+    $bloatPkgs = @(
+        'com.google.android.apps.photos'
+        'com.google.android.apps.wellbeing'
+        'com.google.android.apps.messaging'
+        'com.google.android.googlequicksearchbox'
+        'com.google.android.as'
+        'com.google.android.as.oss'
+        'com.google.android.tts'
+        'com.google.android.settings.intelligence'
+        'com.google.android.dialer'
+        'com.google.android.marvin.talkback'
+        'com.google.android.accessibility.switchaccess'
+        'com.google.android.apps.accessibility.voiceaccess'
+        'com.google.android.apps.safetyhub'
+        'com.google.android.projection.gearhead'
+        'com.google.android.healthconnect.controller'
+        'com.google.android.health.connect.backuprestore'
+        'com.google.android.youtube'
+        'com.google.android.apps.youtube.music'
+        'com.google.android.apps.maps'
+        'com.google.android.apps.docs'
+        'com.google.android.gm'
+        'com.google.android.calendar'
+        'com.google.android.apps.restore'
+        'com.google.android.feedback'
+        'com.google.android.deskclock'
+        'com.google.android.apps.wallpaper'
+    )
+    $cmd = ($bloatPkgs | ForEach-Object { "pm disable-user --user 0 $_ 2>/dev/null || true" }) -join '; '
+    $out = & $adb -s $serial shell $cmd 2>&1
+    $disabledCount = ($out | Select-String 'new state: disabled-user').Count
+    Write-Host "Disabled $disabledCount unused system apps." -ForegroundColor DarkGray
+    Set-Content -Path $debloatStampPath -Value (Get-Date -Format 'o')
+}
 
 # ---------------------------------------------------------------- 4. Photos from the PC
 if (-not $SkipPhotos) {
@@ -213,7 +338,8 @@ $pkgInstalled = (& $adb -s $serial shell pm list packages $package 2>$null | Out
 $alreadySameApk = $pkgInstalled -and (Test-Path $installedStampPath) -and ((Get-Content $installedStampPath -Raw).Trim() -eq $apkStamp)
 
 if (-not $alreadySameApk -or $ForceBuild) {
-    Step 'Installing debug APK onto emulator'
+    $apkMB = [math]::Round((Get-Item $apkPath).Length / 1MB, 1)
+    Step "Installing debug APK ($apkMB MB) onto emulator"
     & $adb -s $serial install -r -d $apkPath
     if ($LASTEXITCODE -ne 0) { throw 'adb install failed.' }
     Set-Content -Path $installedStampPath -Value $apkStamp
@@ -221,10 +347,13 @@ if (-not $alreadySameApk -or $ForceBuild) {
     Write-Host 'Same debug APK already installed — skipping reinstall.' -ForegroundColor DarkGray
 }
 
-foreach ($perm in 'android.permission.READ_MEDIA_IMAGES', 'android.permission.READ_MEDIA_VIDEO', 'android.permission.ACCESS_MEDIA_LOCATION', 'android.permission.POST_NOTIFICATIONS') {
-    & $adb -s $serial shell pm grant $package $perm 2>&1 | Out-Null
-}
 Step 'Launching Lumina (debug)'
-& $adb -s $serial shell am force-stop $package | Out-Null
-& $adb -s $serial shell monkey -p $package -c android.intent.category.LAUNCHER 1 2>&1 | Out-Null
+$launchCmd = @(
+    "pm grant $package android.permission.READ_MEDIA_IMAGES 2>/dev/null || true"
+    "pm grant $package android.permission.READ_MEDIA_VIDEO 2>/dev/null || true"
+    "pm grant $package android.permission.ACCESS_MEDIA_LOCATION 2>/dev/null || true"
+    "pm grant $package android.permission.POST_NOTIFICATIONS 2>/dev/null || true"
+    "am start -S -W -n $mainActivity"
+) -join '; '
+& $adb -s $serial shell $launchCmd 2>&1 | Out-Null
 Write-Host "`nDone! After editing code run:  .\tools\dev-emulator.ps1 -SkipPhotos" -ForegroundColor Green

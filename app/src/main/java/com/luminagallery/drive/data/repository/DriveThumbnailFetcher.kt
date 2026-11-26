@@ -437,7 +437,7 @@ class DriveThumbnailFetcher(
 
     internal companion object {
         private const val REFRESH_THUMB_FIELDS = "id,thumbnailLink"
-        private const val MAX_CONCURRENT_THUMB_FETCHES = 12
+        private const val MAX_CONCURRENT_THUMB_FETCHES = 18
         private const val MAX_THUMBNAIL_BYTES = 4L * 1024L * 1024L
         private const val MIN_VALID_IMAGE_BYTES = 32
         private const val MAX_MEMORY_LINK_CACHE = 4_000

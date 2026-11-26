@@ -51,6 +51,7 @@ data class ImageMediaMetadataDto(
     val lens: String? = null,
     val flashUsed: Boolean? = null,
     val meteringMode: String? = null,
+    val exposureMode: String? = null,
     val colorSpace: String? = null,
     val whiteBalance: String? = null,
     val exposureBias: Float? = null,

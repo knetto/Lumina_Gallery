@@ -108,8 +108,10 @@ import com.luminagallery.drive.ui.components.OneUiMotion
 import com.luminagallery.drive.ui.components.SamsungPhotoMap
 import com.luminagallery.drive.ui.components.TrashConfirmMode
 import com.luminagallery.drive.ui.components.oneUiClickable
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
 
 /**
@@ -138,20 +140,66 @@ fun SpecialCollectionScreen(
         .collectAsStateWithLifecycle(initialValue = container.preferencesManager.latestPreferences)
     val highResAllowed = networkState.isUnmeteredWifi || !prefs.wifiOnlyHighRes
     val favoriteIds by container.galleryExtrasRepository.favoriteItemIdsFlow
-        .collectAsStateWithLifecycle(initialValue = emptySet())
+        .collectAsStateWithLifecycle(initialValue = container.galleryExtrasRepository.latestFavoriteItemIds)
+
+    // Synchronous Frame-0 snapshot from hot in-memory local + Drive caches (zero blank/spinner flash!)
+    val initialItems = remember(filter) {
+        val blockedIds = container.galleryRepository.expandBlockedFolderIds(
+            container.galleryExtrasRepository.latestLockedAlbumIds +
+                container.galleryExtrasRepository.latestHiddenAlbumIds
+        )
+        when (filter) {
+            SpecialGalleryFilter.VIDEOS -> {
+                val localVideos = container.localMediaRepository
+                    .getCachedAlbumMedia(com.luminagallery.drive.data.local.LocalMediaRepository.LOCAL_BUCKET_VIDEOS)
+                val driveVideos = container.galleryRepository.getCachedAllVideos()
+                (localVideos + driveVideos)
+                    .filterNot { it.parentId in blockedIds }
+                    .sortedByDescending { it.createdTimeEpochMs }
+            }
+
+            SpecialGalleryFilter.FAVORITES -> {
+                val favIds = container.galleryExtrasRepository.latestFavoriteItemIds
+                if (favIds.isEmpty()) {
+                    emptyList()
+                } else {
+                    val localById = container.localMediaRepository.getCachedMediaById()
+                    val driveById = container.galleryRepository.getCachedMediaById()
+                    favIds.mapNotNull { id ->
+                        val item = localById[id] ?: driveById[id]
+                        if (item != null && item.parentId !in blockedIds) item else null
+                    }.sortedByDescending { it.createdTimeEpochMs }
+                }
+            }
+
+            SpecialGalleryFilter.RECENT -> {
+                val localTop = container.localMediaRepository.getCachedAllMedia()
+                    .asSequence().filterNot { it.parentId in blockedIds }.take(300).toList()
+                val driveTop = container.galleryRepository.getCachedAllMedia()
+                    .asSequence().filterNot { it.parentId in blockedIds }.take(300).toList()
+                (localTop + driveTop)
+                    .sortedByDescending { it.createdTimeEpochMs }
+                    .take(300)
+            }
+
+            SpecialGalleryFilter.TRASH -> emptyList()
+        }
+    }
 
     val itemsFlow = remember(filter) {
         when (filter) {
             SpecialGalleryFilter.VIDEOS -> combine(
-                container.localMediaRepository.observeAllLocalMedia(),
+                container.localMediaRepository.observeLocalAlbumMedia(
+                    com.luminagallery.drive.data.local.LocalMediaRepository.LOCAL_BUCKET_VIDEOS
+                ),
                 container.galleryRepository.searchMedia("", MediaType.VIDEO, null, null),
                 container.galleryExtrasRepository.excludedAlbumIdsFlow
-            ) { local, drive, excludedIds ->
+            ) { localVideos, driveVideos, excludedIds ->
                 val blockedIds = container.galleryRepository.expandBlockedFolderIds(excludedIds)
-                (local.filter { it.isVideo } + drive)
+                (localVideos + driveVideos)
                     .filterNot { it.parentId in blockedIds }
                     .sortedByDescending { it.createdTimeEpochMs }
-            }
+            }.flowOn(Dispatchers.Default)
 
             SpecialGalleryFilter.FAVORITES -> combine(
                 container.localMediaRepository.observeAllLocalMedia(),
@@ -159,11 +207,18 @@ fun SpecialCollectionScreen(
                 container.galleryExtrasRepository.favoriteItemIdsFlow,
                 container.galleryExtrasRepository.excludedAlbumIdsFlow
             ) { local, drive, favIds, excludedIds ->
+                if (favIds.isEmpty()) return@combine emptyList()
                 val blockedIds = container.galleryRepository.expandBlockedFolderIds(excludedIds)
-                (local + drive)
-                    .filter { it.id in favIds && it.parentId !in blockedIds }
-                    .sortedByDescending { it.createdTimeEpochMs }
-            }
+                val out = ArrayList<MediaItem>(favIds.size.coerceAtMost(256))
+                for (item in local) {
+                    if (item.id in favIds && item.parentId !in blockedIds) out.add(item)
+                }
+                for (item in drive) {
+                    if (item.id in favIds && item.parentId !in blockedIds) out.add(item)
+                }
+                out.sortByDescending { it.createdTimeEpochMs }
+                out
+            }.flowOn(Dispatchers.Default)
 
             SpecialGalleryFilter.RECENT -> combine(
                 container.localMediaRepository.observeAllLocalMedia(),
@@ -171,18 +226,19 @@ fun SpecialCollectionScreen(
                 container.galleryExtrasRepository.excludedAlbumIdsFlow
             ) { local, drive, excludedIds ->
                 val blockedIds = container.galleryRepository.expandBlockedFolderIds(excludedIds)
-                (local + drive)
-                    .filterNot { it.parentId in blockedIds }
+                val localTop = local.asSequence().filterNot { it.parentId in blockedIds }.take(300).toList()
+                val driveTop = drive.asSequence().filterNot { it.parentId in blockedIds }.take(300).toList()
+                (localTop + driveTop)
                     .sortedByDescending { it.createdTimeEpochMs }
                     .take(300)
-            }
+            }.flowOn(Dispatchers.Default)
 
             SpecialGalleryFilter.TRASH ->
                 container.localMediaRepository.observeTrashedLocalMedia()
         }
     }
 
-    val mediaItems by itemsFlow.collectAsStateWithLifecycle(initialValue = emptyList())
+    val mediaItems by itemsFlow.collectAsStateWithLifecycle(initialValue = initialItems)
     var selectedTrashIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var pendingSender by remember { mutableStateOf<IntentSender?>(null) }
     var pendingMessage by remember { mutableStateOf<String?>(null) }

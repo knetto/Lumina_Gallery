@@ -1153,6 +1153,34 @@ fun prefetchAlbumThumbnails(
 }
 
 /**
+ * Pre-warms circular person face avatars into Coil's memory cache right before navigating to
+ * People so every person circle paints cleanly on Frame 0 without disk-decode pop-in.
+ */
+fun prefetchPersonAvatars(
+    context: Context,
+    imageLoader: ImageLoader,
+    cropPaths: List<String>,
+    maxAvatars: Int = 24
+) {
+    if (cropPaths.isEmpty()) return
+    val count = cropPaths.size.coerceAtMost(maxAvatars)
+    for (i in 0 until count) {
+        val path = cropPaths[i]
+        if (path.isBlank()) continue
+        val file = java.io.File(path)
+        if (!file.exists()) continue
+        val stamp = file.lastModified()
+        val req = ImageRequest.Builder(context)
+            .data(file)
+            .memoryCacheKey("person_avatar_${file.name}_$stamp")
+            .size(256)
+            .crossfade(false)
+            .build()
+        imageLoader.enqueue(req)
+    }
+}
+
+/**
  * Pre-warms visible Google Drive album covers (including split collage tiles) right after
  * pinned roots load from Room so Drive album cards paint immediately without gray delays.
  */

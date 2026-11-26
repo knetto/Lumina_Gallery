@@ -58,6 +58,8 @@ import com.luminagallery.drive.ui.components.LocalAlbumTransitionOrigin
 import com.luminagallery.drive.ui.components.OneUiMotion
 import com.luminagallery.drive.ui.components.findActivity
 import com.luminagallery.drive.ui.components.prefetchAlbumThumbnails
+import com.luminagallery.drive.ui.components.prefetchDriveAlbumCovers
+import com.luminagallery.drive.ui.components.prefetchPersonAvatars
 import com.luminagallery.drive.ui.screens.cleanout.CleanOutScreen
 import com.luminagallery.drive.ui.screens.cleanout.CleanOutViewModel
 import com.luminagallery.drive.ui.screens.collection.CollectionScreen
@@ -339,8 +341,21 @@ fun LuminaNavGraph(
                     context = appContext,
                     imageLoader = imageLoader,
                     items = cachedItems,
-                    isUnmeteredWifi = highRes
+                    isUnmeteredWifi = highRes,
+                    maxItems = 24
                 )
+            }
+            if (!LocalMediaRepository.isLocalFolderId(folderId)) {
+                val cachedSubs = container.galleryRepository.getCachedSubfolders(folderId).orEmpty()
+                if (cachedSubs.isNotEmpty()) {
+                    prefetchDriveAlbumCovers(
+                        context = appContext,
+                        imageLoader = imageLoader,
+                        folders = cachedSubs,
+                        isUnmeteredWifi = highRes,
+                        maxCovers = 16
+                    )
+                }
             }
             navController.navigate(FolderRoute(folderId, folderName))
         }
@@ -440,12 +455,49 @@ fun LuminaNavGraph(
                                 navController.navigate(SettingsRoute)
                             },
                             onOpenSpecialFilter = { filter ->
+                                val prefs = container.preferencesManager.latestPreferences
+                                val highRes = container.networkMonitor.networkState.value.isUnmeteredWifi || !prefs.wifiOnlyHighRes
+                                val blocked = container.galleryRepository.expandBlockedFolderIds(
+                                    container.galleryExtrasRepository.latestLockedAlbumIds +
+                                        container.galleryExtrasRepository.latestHiddenAlbumIds
+                                )
+                                val previewItems = when (filter) {
+                                    SpecialGalleryFilter.FAVORITES -> {
+                                        val localById = container.localMediaRepository.getCachedMediaById()
+                                        val driveById = container.galleryRepository.getCachedMediaById()
+                                        container.galleryExtrasRepository.latestFavoriteItemIds
+                                            .mapNotNull { id ->
+                                                val item = localById[id] ?: driveById[id]
+                                                if (item != null && item.parentId !in blocked) item else null
+                                            }
+                                            .sortedByDescending { it.createdTimeEpochMs }
+                                    }
+                                    SpecialGalleryFilter.VIDEOS ->
+                                        (container.localMediaRepository.getCachedAlbumMedia(LocalMediaRepository.LOCAL_BUCKET_VIDEOS) +
+                                            container.galleryRepository.getCachedAllVideos())
+                                            .filterNot { it.parentId in blocked }
+                                            .sortedByDescending { it.createdTimeEpochMs }
+                                    SpecialGalleryFilter.RECENT ->
+                                        (container.localMediaRepository.getCachedAllMedia().take(24) +
+                                            container.galleryRepository.getCachedAllMedia().take(24))
+                                            .filterNot { it.parentId in blocked }
+                                            .sortedByDescending { it.createdTimeEpochMs }
+                                    SpecialGalleryFilter.TRASH -> emptyList()
+                                }
+                                prefetchAlbumThumbnails(appContext, imageLoader, previewItems, highRes, maxItems = 20)
                                 navController.navigate(SpecialCollectionRoute(filter.name))
                             },
                             onOpenLocations = {
                                 navController.navigate(LocationsRoute)
                             },
                             onOpenPeople = {
+                                val crops = container.smartRecognitionManager.getCachedPersons()
+                                    .asSequence()
+                                    .filterNot { it.isHidden }
+                                    .mapNotNull { it.coverCropPath?.takeIf(String::isNotBlank) }
+                                    .take(24)
+                                    .toList()
+                                prefetchPersonAvatars(appContext, imageLoader, crops, maxAvatars = 24)
                                 navController.navigate(PeopleRoute)
                             },
                             onOpenCleanOut = {
@@ -511,6 +563,24 @@ fun LuminaNavGraph(
                             viewModel = peopleViewModel,
                             onNavigateBack = { safePopBackStack() },
                             onOpenPerson = { personId ->
+                                val prefs = container.preferencesManager.latestPreferences
+                                val highRes = container.networkMonitor.networkState.value.isUnmeteredWifi || !prefs.wifiOnlyHighRes
+                                val blocked = container.galleryRepository.expandBlockedFolderIds(
+                                    container.galleryExtrasRepository.latestLockedAlbumIds +
+                                        container.galleryExtrasRepository.latestHiddenAlbumIds
+                                )
+                                val localById = container.localMediaRepository.getCachedMediaById()
+                                val driveById = container.galleryRepository.getCachedMediaById()
+                                val personItems = container.smartRecognitionManager.getCachedActiveLightFaces()
+                                    .asSequence()
+                                    .filter { it.personId == personId }
+                                    .mapNotNull { localById[it.itemId] ?: driveById[it.itemId] }
+                                    .filterNot { it.parentId in blocked }
+                                    .distinctBy { it.id }
+                                    .sortedByDescending { it.createdTimeEpochMs }
+                                    .take(20)
+                                    .toList()
+                                prefetchAlbumThumbnails(appContext, imageLoader, personItems, highRes, maxItems = 20)
                                 navController.navigate(PersonDetailRoute(personId))
                             }
                         )

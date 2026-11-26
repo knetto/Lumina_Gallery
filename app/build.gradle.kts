@@ -88,6 +88,15 @@ android {
         debug {
             isMinifyEnabled = false
             applicationIdSuffix = ".debug"
+            val debugAbis = providers.gradleProperty("lumina.debug.abi").orNull
+                ?.split(",")
+                ?.map { it.trim() }
+                ?.filter { it.isNotEmpty() }
+            if (!debugAbis.isNullOrEmpty()) {
+                ndk {
+                    abiFilters += debugAbis
+                }
+            }
         }
     }
 

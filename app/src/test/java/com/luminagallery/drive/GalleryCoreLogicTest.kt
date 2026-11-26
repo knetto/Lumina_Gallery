@@ -136,6 +136,55 @@ class GalleryCoreLogicTest {
     }
 
     @Test
+    fun cameraExifFormatters_formatSettingsAndCleanRedundantPrefixes() {
+        // Aperture drops trailing .0 on whole stops while preserving fractional stops
+        assertEquals("f/5.6", FormatUtils.formatAperture(5.6f))
+        assertEquals("f/1.8", FormatUtils.formatAperture(1.78f))
+        assertEquals("f/8", FormatUtils.formatAperture(8.0f))
+        assertEquals("f/11", FormatUtils.formatAperture(11.0f))
+        assertNull(FormatUtils.formatAperture(0f))
+
+        // Shutter speed handles sub-second decimals cleanly without "1/1s" glitches
+        assertEquals("1/420s", FormatUtils.formatShutterSpeed(1f / 420f))
+        assertEquals("1/2s", FormatUtils.formatShutterSpeed(0.5f))
+        assertEquals("0.6s", FormatUtils.formatShutterSpeed(0.6f))
+        assertEquals("0.8s", FormatUtils.formatShutterSpeed(0.8f))
+        assertEquals("2s", FormatUtils.formatShutterSpeed(2.0f))
+        assertEquals("1.6s", FormatUtils.formatShutterSpeed(1.6f))
+
+        // Focal length keeps precision for smartphone short lenses and rounds camera lenses cleanly
+        assertEquals("278 mm", FormatUtils.formatFocalLength(278.0f))
+        assertEquals("6.9 mm", FormatUtils.formatFocalLength(6.86f))
+        assertEquals("4 mm", FormatUtils.formatFocalLength(4.0f))
+
+        // Lens name strips redundant camera brand/model prefix while preserving third-party brands
+        assertEquals(
+            "XF70-300mmF4-5.6 R LM OIS WR",
+            FormatUtils.formatLensName("FUJIFILM XF70-300mmF4-5.6 R LM OIS WR", "FUJIFILM", "X-T5")
+        )
+        assertEquals(
+            "SIGMA 18-50mm F2.8 DC DN",
+            FormatUtils.formatLensName("SIGMA 18-50mm F2.8 DC DN", "FUJIFILM", "X-T5")
+        )
+        assertEquals(
+            "Back triple camera 6.765mm f/1.78",
+            FormatUtils.formatLensName("iPhone 15 Pro back triple camera 6.765mm f/1.78", "Apple", "iPhone 15 Pro")
+        )
+
+        // Shooting mode decoding favors meaningful camera modes and suppresses generic Auto
+        assertEquals("Aperture priority", FormatUtils.decodeExifExposureMode(programRaw = 3, modeRaw = 0))
+        assertEquals("Manual", FormatUtils.decodeExifExposureMode(programRaw = 1, modeRaw = 1))
+        assertEquals("Shutter priority", FormatUtils.decodeExifExposureMode(programRaw = 4, modeRaw = 0))
+        assertEquals("Auto bracket", FormatUtils.decodeExifExposureMode(programRaw = 3, modeRaw = 2))
+        assertNull(FormatUtils.decodeExifExposureMode(programRaw = 0, modeRaw = 0))
+
+        // Folder path strips redundant storage origin prefixes
+        assertEquals("Duitsland-2026", FormatUtils.formatDisplayFolderPath("On Device / Duitsland-2026"))
+        assertEquals("Trips / Berlin", FormatUtils.formatDisplayFolderPath("Google Drive / Trips / Berlin"))
+        assertEquals("Google Drive", FormatUtils.formatDisplayFolderPath("Google Drive"))
+    }
+
+    @Test
     fun gitBlobSha1Formula_matchesStandardGitHashObject() {
         // Known git hash-object value for "hello world\n" is 3b18e512dba79e4c8300dd08aeb37f8e728b8dad
         val payload = "hello world\n".toByteArray(Charsets.UTF_8)
