@@ -337,12 +337,17 @@ class SearchViewModel(
                 matchesToken(item, loc, ann, ocr, smart, peopleNames, localCameraSummary, token)
             }
         }
+        val searchStripPeople = visiblePeople
+            .filter { it.isNamed || it.isFavorite || it.photoCount >= 2 }
+            .ifEmpty { visiblePeople }
+            .take(14)
+
         SearchComputedResult(
             results = filtered,
             recentSearches = enrich.recentSearches,
             topCities = topCities,
             topTags = topTags,
-            suggestedPeople = visiblePeople.take(14),
+            suggestedPeople = searchStripPeople,
             selectedPerson = selectedPersonSummary,
             suggestedObjects = topObjects,
             ocrProgress = enrich.ocrProgress,

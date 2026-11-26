@@ -17,6 +17,7 @@ import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.Face
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
+import com.google.mlkit.vision.face.FaceLandmark
 import com.google.mlkit.vision.label.ImageLabeling
 import com.google.mlkit.vision.label.defaults.ImageLabelerOptions
 import com.luminagallery.drive.data.local.GalleryDatabase
@@ -104,6 +105,8 @@ class SmartRecognitionManager(
     private val extrasDao = database.galleryExtrasDao()
     private val driveItemDao = database.driveItemDao()
     private val faceEngine = FaceEmbeddingEngine(context)
+    private val objectEngine = ImageNetObjectEngine(context)
+    private val metaPrefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     private val scanMutex = Mutex()
     @Volatile
@@ -124,7 +127,14 @@ class SmartRecognitionManager(
 
     private val imageLabeler by lazy {
         val options = ImageLabelerOptions.Builder()
-            .setConfidenceThreshold(0.62f)
+            .setConfidenceThreshold(0.55f)
+            .build()
+        ImageLabeling.getClient(options)
+    }
+
+    private val cropVerifierLabeler by lazy {
+        val options = ImageLabelerOptions.Builder()
+            .setConfidenceThreshold(0.42f)
             .build()
         ImageLabeling.getClient(options)
     }
@@ -150,6 +160,27 @@ class SmartRecognitionManager(
 
     fun pauseActiveScan() {
         pauseRequested = true
+    }
+
+    /**
+     * Clears all cached People clusters, face crops, and object tags so the library re-scans
+     * cleanly from scratch with the upgraded v2 detector (e.g., removing false positives).
+     */
+    suspend fun resetAllIndexData() = withContext(Dispatchers.IO) {
+        pauseRequested = true
+        scanMutex.lock()
+        try {
+            database.withTransaction {
+                smartDao.clearAllFaces()
+                smartDao.clearAllPersons()
+                smartDao.clearAllSmartIndex()
+            }
+            faceEngine.clearAllCropFiles()
+            metaPrefs.edit().putInt(KEY_AI_INDEX_VERSION, CURRENT_AI_INDEX_VERSION).apply()
+            _progress.value = SmartIndexProgress()
+        } finally {
+            scanMutex.unlock()
+        }
     }
 
     /**
@@ -212,6 +243,18 @@ class SmartRecognitionManager(
         if (!scanMutex.tryLock()) return@withContext
         pauseRequested = false
         try {
+            // One-time automatic clean rebuild when upgrading from v1 -> v2 (fixes old crooked face embeddings & non-human false positives)
+            val savedVersion = metaPrefs.getInt(KEY_AI_INDEX_VERSION, 0)
+            if (savedVersion < CURRENT_AI_INDEX_VERSION) {
+                database.withTransaction {
+                    smartDao.clearAllFaces()
+                    smartDao.clearAllPersons()
+                    smartDao.clearAllSmartIndex()
+                }
+                faceEngine.clearAllCropFiles()
+                metaPrefs.edit().putInt(KEY_AI_INDEX_VERSION, CURRENT_AI_INDEX_VERSION).apply()
+            }
+
             val blockedFolderIds = computeBlockedFolderIdsFromDb()
 
             // Gather eligible local photos (skipping locked, hidden, and hidden-on-disk vault files)
@@ -390,11 +433,18 @@ class SmartRecognitionManager(
                     }
 
                     val detectedFaces = facesResult.getOrDefault(emptyList())
-                    val rawLabels = labelsResult.getOrDefault(emptyList())
+                    val rawMlLabels = labelsResult.getOrDefault(emptyList())
                         .map { it.text to it.confidence }
+                    val rawImageNetLabels = objectEngine.classify(
+                        bitmap = bitmap,
+                        topK = 5,
+                        minConfidence = 0.22f
+                    )
 
-                    val usefulLabels = SmartObjectVocabulary.filterUsefulLabels(rawLabels)
-                    val searchTokens = SmartObjectVocabulary.buildSearchTokens(usefulLabels)
+                    val mergedObjects = SmartObjectVocabulary.mergeSceneAndObjectLabels(
+                        mlKitLabels = rawMlLabels,
+                        imageNetLabels = rawImageNetLabels
+                    )
                     val now = System.currentTimeMillis()
 
                     val usedPersonIdsInThisPhoto = HashSet<String>()
@@ -425,8 +475,8 @@ class SmartRecognitionManager(
                             itemId = item.id,
                             dateModifiedMs = item.createdTimeEpochMs,
                             faceCount = acceptedFaces,
-                            labelsCsv = usefulLabels.joinToString(","),
-                            labelSearchTokens = searchTokens,
+                            labelsCsv = mergedObjects.displayLabels.joinToString(","),
+                            labelSearchTokens = mergedObjects.searchTokens,
                             isDriveItem = !item.isLocal,
                             indexedAtEpochMs = now
                         )
@@ -451,6 +501,11 @@ class SmartRecognitionManager(
             }
 
             flushPending()
+
+            // Post-scan high-confidence cluster consolidation (auto-merges split clusters of the same person)
+            if (scanned > 0) {
+                runCatching { consolidateSplitClusters() }
+            }
 
             val finalRemaining = (unindexedAll.size - scanned).coerceAtLeast(0)
             _progress.value = SmartIndexProgress(
@@ -484,22 +539,84 @@ class SmartRecognitionManager(
         val box = face.boundingBox
         val w = box.width().toFloat()
         val h = box.height().toFloat()
-        if (!FaceClusteringEngine.isFaceUsableForRecognition(
-                faceWidthPx = w,
-                faceHeightPx = h,
+
+        // Gate 1: Strict human facial anatomy & pose verification (eliminates tiny background faces,
+        // extreme side profiles, and animals/parrots/patterns lacking valid human landmark geometry!)
+        val eye1 = face.getLandmark(FaceLandmark.LEFT_EYE)?.position
+            ?.let { FaceClusteringEngine.Point2D(it.x, it.y) }
+        val eye2 = face.getLandmark(FaceLandmark.RIGHT_EYE)?.position
+            ?.let { FaceClusteringEngine.Point2D(it.x, it.y) }
+        val nose = face.getLandmark(FaceLandmark.NOSE_BASE)?.position
+            ?.let { FaceClusteringEngine.Point2D(it.x, it.y) }
+        val mouthL = face.getLandmark(FaceLandmark.MOUTH_LEFT)?.position
+        val mouthR = face.getLandmark(FaceLandmark.MOUTH_RIGHT)?.position
+        val mouthB = face.getLandmark(FaceLandmark.MOUTH_BOTTOM)?.position
+        val mouth = when {
+            mouthB != null -> FaceClusteringEngine.Point2D(mouthB.x, mouthB.y)
+            mouthL != null && mouthR != null -> FaceClusteringEngine.Point2D(
+                (mouthL.x + mouthR.x) * 0.5f,
+                (mouthL.y + mouthR.y) * 0.5f
+            )
+            mouthL != null -> FaceClusteringEngine.Point2D(mouthL.x, mouthL.y)
+            mouthR != null -> FaceClusteringEngine.Point2D(mouthR.x, mouthR.y)
+            else -> null
+        }
+        val hasClassification = face.leftEyeOpenProbability != null ||
+            face.rightEyeOpenProbability != null ||
+            face.smilingProbability != null
+
+        if (!FaceClusteringEngine.isHumanFaceGeometryValid(
+                bboxLeft = box.left.toFloat(),
+                bboxTop = box.top.toFloat(),
+                bboxRight = box.right.toFloat(),
+                bboxBottom = box.bottom.toFloat(),
                 imageWidthPx = bitmap.width.toFloat(),
                 eulerY = face.headEulerAngleY,
-                eulerX = face.headEulerAngleX
+                eulerX = face.headEulerAngleX,
+                eyeA = eye1,
+                eyeB = eye2,
+                nose = nose,
+                mouth = mouth,
+                hasClassification = hasClassification
             )
         ) {
             return null
         }
 
-        val embedding = faceEngine.computeEmbedding(bitmap, face) ?: return null
-        if (embedding.isEmpty()) return null
+        // Gate 2: AI Non-Human Face-Crop Verification!
+        // Classify the upright cropped "face" directly with BOTH ML Kit & EfficientNet-Lite2 so a
+        // parrot, dog, cat, plush toy, statue, or pareidolia pattern NEVER enters the People section!
+        val avatarBitmap = faceEngine.extractUprightFaceCrop(bitmap, face) ?: return null
+        val cropPath: String?
+        val embedding: FloatArray?
+        try {
+            val cropMlLabels = runCatching {
+                Tasks.await(
+                    cropVerifierLabeler.process(InputImage.fromBitmap(avatarBitmap, 0)),
+                    ML_TIMEOUT_SEC,
+                    TimeUnit.SECONDS
+                ).map { it.text to it.confidence }
+            }.getOrDefault(emptyList())
+            val cropImageNetLabels = objectEngine.classify(
+                bitmap = avatarBitmap,
+                topK = 5,
+                minConfidence = 0.16f
+            )
+            if (SmartObjectVocabulary.isNonHumanFaceCrop(cropMlLabels, cropImageNetLabels)) {
+                return null
+            }
+
+            // Gate 3: Canonical 5-point InsightFace aligned MobileFaceNet embedding (+ horizontal flip TTA)
+            embedding = faceEngine.computeEmbedding(bitmap, face)
+            if (embedding == null || embedding.isEmpty()) return null
+
+            val faceId = "${item.id}_f$faceIndex"
+            cropPath = faceEngine.saveAvatarBitmap(avatarBitmap, faceId)
+        } finally {
+            avatarBitmap.recycle()
+        }
 
         val faceId = "${item.id}_f$faceIndex"
-        val cropPath = faceEngine.saveAvatarCrop(bitmap, face, faceId)
         val quality = FaceClusteringEngine.computeFaceQualityScore(
             faceWidthPx = w,
             faceHeightPx = h,
@@ -515,7 +632,8 @@ class SmartRecognitionManager(
             FaceClusteringEngine.ClusterCandidate(
                 personId = it.entity.personId,
                 centroid = it.centroid,
-                sampleCount = it.entity.sampleCount
+                sampleCount = it.entity.sampleCount,
+                isNamed = it.entity.name.isNotBlank()
             )
         }
         val match = FaceClusteringEngine.findBestMatchingCluster(
@@ -570,6 +688,29 @@ class SmartRecognitionManager(
             isExcludedByUser = false,
             detectedAtEpochMs = now
         )
+    }
+
+    private suspend fun consolidateSplitClusters() {
+        val allPersons = smartDao.getAllPersons().filterNot { it.isHidden }
+        if (allPersons.size < 2) return
+        val candidates = allPersons.map { person ->
+            val faces = smartDao.getFacesForPerson(person.personId)
+            FaceClusteringEngine.ClusterCandidate(
+                personId = person.personId,
+                centroid = FaceClusteringEngine.decodeEmbedding(person.centroidBlob),
+                sampleCount = faces.size.coerceAtLeast(person.sampleCount),
+                isNamed = person.name.isNotBlank(),
+                photoIds = faces.mapTo(HashSet(faces.size)) { it.itemId }
+            )
+        }
+        val merges = FaceClusteringEngine.findAutoConsolidationPairs(candidates)
+        if (merges.isEmpty()) return
+        for (merge in merges) {
+            mergePersons(
+                targetPersonId = merge.targetPersonId,
+                sourcePersonIds = listOf(merge.sourcePersonId)
+            )
+        }
     }
 
     private fun createNewCluster(
@@ -1007,6 +1148,9 @@ class SmartRecognitionManager(
     )
 
     companion object {
+        private const val PREFS_NAME = "lumina_smart_ai_meta"
+        private const val KEY_AI_INDEX_VERSION = "smart_ai_index_version"
+        private const val CURRENT_AI_INDEX_VERSION = 2
         private const val MAX_SCAN_DIMENSION_PX = 768
         private const val ML_TIMEOUT_SEC = 10L
         private const val BATCH_WRITE_SIZE = 10

@@ -9,6 +9,7 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -35,6 +36,8 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Face
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Merge
@@ -99,6 +102,8 @@ fun PeopleScreen(
 
     var showOverflowMenu by remember { mutableStateOf(false) }
     var showCombineDialog by remember { mutableStateOf(false) }
+    var showRebuildConfirmDialog by remember { mutableStateOf(false) }
+    var showSingleFacesExpanded by remember { mutableStateOf(false) }
     var renameTargetPerson by remember { mutableStateOf<PersonSummary?>(null) }
 
     BackHandler(enabled = uiState.isSelectionMode) {
@@ -200,6 +205,13 @@ fun PeopleScreen(
                                         viewModel.triggerScan(maxNewItems = 1000)
                                     }
                                 )
+                                DropdownMenuItem(
+                                    text = { Text("Rebuild People & Objects") },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        showRebuildConfirmDialog = true
+                                    }
+                                )
                             }
                         }
                     }
@@ -248,8 +260,22 @@ fun PeopleScreen(
                         )
                     }
                 } else {
+                    // Samsung Gallery / Apple Photos pattern: show named, pinned & recurring (2+ photos)
+                    // people first, and keep 1-photo unnamed background faces neatly collapsible below!
+                    val recurringPeople = if (uiState.showHiddenSection) {
+                        activeList
+                    } else {
+                        val primary = activeList.filter { it.isNamed || it.isFavorite || it.photoCount >= 2 }
+                        if (primary.isNotEmpty()) primary else activeList
+                    }
+                    val singlePhotoFaces = if (uiState.showHiddenSection || recurringPeople.size == activeList.size) {
+                        emptyList()
+                    } else {
+                        activeList.filterNot { it.isNamed || it.isFavorite || it.photoCount >= 2 }
+                    }
+
                     items(
-                        items = activeList,
+                        items = recurringPeople,
                         key = { it.personId }
                     ) { person ->
                         val isSelected = person.personId in uiState.selectedPersonIds
@@ -270,6 +296,72 @@ fun PeopleScreen(
                             },
                             modifier = Modifier.animateItem()
                         )
+                    }
+
+                    if (singlePhotoFaces.isNotEmpty()) {
+                        item(key = "other_faces_toggle", span = { GridItemSpan(maxLineSpan) }) {
+                            Surface(
+                                shape = RoundedCornerShape(16.dp),
+                                color = MaterialTheme.colorScheme.surfaceContainerLow,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 6.dp)
+                                    .clip(RoundedCornerShape(16.dp))
+                                    .clickable { showSingleFacesExpanded = !showSingleFacesExpanded }
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 14.dp, vertical = 11.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Column {
+                                        Text(
+                                            text = "Other faces (${singlePhotoFaces.size})",
+                                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                        Text(
+                                            text = "Single-photo faces · tap to expand, name, or combine",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    Icon(
+                                        imageVector = if (showSingleFacesExpanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+
+                        if (showSingleFacesExpanded) {
+                            items(
+                                items = singlePhotoFaces,
+                                key = { it.personId }
+                            ) { person ->
+                                val isSelected = person.personId in uiState.selectedPersonIds
+                                PersonGridCard(
+                                    person = person,
+                                    isSelected = isSelected,
+                                    onClick = {
+                                        if (uiState.isSelectionMode) {
+                                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                            viewModel.togglePersonSelected(person.personId)
+                                        } else {
+                                            onOpenPerson(person.personId)
+                                        }
+                                    },
+                                    onLongClick = {
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        viewModel.enterSelectionMode(person.personId)
+                                    },
+                                    modifier = Modifier.animateItem()
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -478,6 +570,36 @@ fun PeopleScreen(
             },
             dismissButton = {
                 TextButton(onClick = { renameTargetPerson = null }) { Text("Cancel") }
+            }
+        )
+    }
+
+    if (showRebuildConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = { showRebuildConfirmDialog = false },
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            shape = RoundedCornerShape(26.dp),
+            title = { Text("Rebuild People & Objects?") },
+            text = {
+                Text(
+                    text = "This clears cached face groups and object tags and re-analyzes your local & Drive photos cleanly on-device (locked folders are always skipped).",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showRebuildConfirmDialog = false
+                        viewModel.rebuildAllSmartIndex()
+                    },
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Text("Rebuild", fontWeight = FontWeight.SemiBold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRebuildConfirmDialog = false }) { Text("Cancel") }
             }
         )
     }

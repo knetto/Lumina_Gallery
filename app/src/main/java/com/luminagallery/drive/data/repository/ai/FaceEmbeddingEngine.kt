@@ -17,17 +17,17 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
-import kotlin.math.atan2
 import kotlin.math.max
 
 /**
- * 100% offline on-device face-embedding engine powered by MobileFaceNet (LiteRT / TFLite).
+ * 100% offline on-device face-embedding engine powered by MobileFaceNet (LiteRT / TFLite):
  *  - Memory-maps `assets/mobilefacenet.tflite` with zero heap duplication.
- *  - Aligns faces via eye landmarks (fallback: head roll angle) before cropping.
+ *  - Warps each face via exact 5-point InsightFace Procrustes similarity alignment onto
+ *    MobileFaceNet's canonical `112x112` landmark positions (fixing eye-order roll inversion!).
  *  - Runs horizontal-flip Test-Time Augmentation (TTA) averaging + L2 normalization for
- *    substantially higher grouping accuracy across left/right 3/4 poses.
- *  - Saves crisp `160x160` portrait avatar crops to `noBackupFilesDir/face_crops/` so circular
- *    People avatars render instantaneously offline even for Google Drive photos.
+ *    dramatically higher grouping accuracy across left/right poses.
+ *  - Extracts upright `160x160` portrait crops both for AI non-human verification and crisp
+ *    offline circular People avatars.
  */
 class FaceEmbeddingEngine(private val context: Context) {
 
@@ -81,7 +81,6 @@ class FaceEmbeddingEngine(private val context: Context) {
             }
         }
     }.getOrElse {
-        // Fallback if asset was compressed in a debug/test packaging
         runCatching {
             val bytes = context.assets.open(assetName).use { it.readBytes() }
             ByteBuffer.allocateDirect(bytes.size).order(ByteOrder.nativeOrder()).apply {
@@ -92,15 +91,74 @@ class FaceEmbeddingEngine(private val context: Context) {
     }
 
     /**
-     * Extracts a straight, eye-aligned square face crop around [face] without rotating the
-     * full source bitmap. Use [paddingFactor] ~1.22f for MobileFaceNet recognition input and
-     * ~1.62f for flattering circular portrait avatars (includes hair & chin nicely).
+     * Extracts a canonical 5-point InsightFace aligned `outputSize x outputSize` bitmap for
+     * MobileFaceNet recognition, falling back cleanly to eye-straightened tight box crop if
+     * landmarks cannot form a valid similarity transform.
      */
-    fun extractAlignedFaceCrop(
+    fun extractCanonicalRecognitionCrop(
         source: Bitmap,
         face: Face,
-        paddingFactor: Float,
-        outputSize: Int
+        outputSize: Int = inputWidth
+    ): Bitmap? = runCatching {
+        val eye1 = face.getLandmark(FaceLandmark.LEFT_EYE)?.position
+        val eye2 = face.getLandmark(FaceLandmark.RIGHT_EYE)?.position
+        val nose = face.getLandmark(FaceLandmark.NOSE_BASE)?.position
+        val mouthL = face.getLandmark(FaceLandmark.MOUTH_LEFT)?.position
+        val mouthR = face.getLandmark(FaceLandmark.MOUTH_RIGHT)?.position
+        val mouthB = face.getLandmark(FaceLandmark.MOUTH_BOTTOM)?.position
+
+        if (eye1 != null && eye2 != null) {
+            val p1 = FaceClusteringEngine.Point2D(eye1.x, eye1.y)
+            val p2 = FaceClusteringEngine.Point2D(eye2.x, eye2.y)
+            // Always sort viewer-left (smaller x) -> viewer-right (larger x)
+            val (viewerLeftEye, viewerRightEye) = if (p1.x <= p2.x) p1 to p2 else p2 to p1
+
+            val srcPts = mutableListOf(viewerLeftEye, viewerRightEye)
+            val dstPts = mutableListOf(
+                FaceClusteringEngine.CANONICAL_112_LEFT_EYE,
+                FaceClusteringEngine.CANONICAL_112_RIGHT_EYE
+            )
+            if (nose != null) {
+                srcPts.add(FaceClusteringEngine.Point2D(nose.x, nose.y))
+                dstPts.add(FaceClusteringEngine.CANONICAL_112_NOSE)
+            }
+            if (mouthL != null && mouthR != null) {
+                val m1 = FaceClusteringEngine.Point2D(mouthL.x, mouthL.y)
+                val m2 = FaceClusteringEngine.Point2D(mouthR.x, mouthR.y)
+                val (vMouthL, vMouthR) = if (m1.x <= m2.x) m1 to m2 else m2 to m1
+                srcPts.add(vMouthL)
+                srcPts.add(vMouthR)
+                dstPts.add(FaceClusteringEngine.CANONICAL_112_MOUTH_LEFT)
+                dstPts.add(FaceClusteringEngine.CANONICAL_112_MOUTH_RIGHT)
+            } else if (mouthB != null) {
+                srcPts.add(FaceClusteringEngine.Point2D(mouthB.x, mouthB.y))
+                dstPts.add(FaceClusteringEngine.CANONICAL_112_MOUTH_CENTER)
+            }
+
+            val transform = FaceClusteringEngine.solveSimilarityTransform(srcPts, dstPts, outputSize)
+            if (transform != null) {
+                val out = Bitmap.createBitmap(outputSize, outputSize, Bitmap.Config.ARGB_8888)
+                val canvas = Canvas(out)
+                val matrix = Matrix().apply { setValues(transform.toMatrixValues()) }
+                val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+                canvas.drawBitmap(source, matrix, paint)
+                return@runCatching out
+            }
+        }
+
+        extractUprightFaceCrop(source, face, paddingFactor = 1.08f, outputSize = outputSize)
+    }.getOrNull()
+
+    /**
+     * Extracts a straight, upright square face crop around [face] using viewer-sorted eye roll
+     * (never inverting 180 degrees!). Use [paddingFactor] ~1.62f for flattering circular avatars
+     * and AI non-human verification crops.
+     */
+    fun extractUprightFaceCrop(
+        source: Bitmap,
+        face: Face,
+        paddingFactor: Float = AVATAR_PADDING_FACTOR,
+        outputSize: Int = AVATAR_SIZE_PX
     ): Bitmap? = runCatching {
         val box: Rect = face.boundingBox
         val cx = box.exactCenterX()
@@ -108,22 +166,17 @@ class FaceEmbeddingEngine(private val context: Context) {
         val baseSize = max(box.width(), box.height()).toFloat().coerceAtLeast(16f)
         val cropSpan = baseSize * paddingFactor
 
-        // Prefer eye-landmark angle for precise face straightening; fallback to head roll angle
-        val leftEye = face.getLandmark(FaceLandmark.LEFT_EYE)?.position
-        val rightEye = face.getLandmark(FaceLandmark.RIGHT_EYE)?.position
-        val rollDegrees = if (leftEye != null && rightEye != null) {
-            val dx = rightEye.x - leftEye.x
-            val dy = rightEye.y - leftEye.y
-            if (kotlin.math.hypot(dx.toDouble(), dy.toDouble()) > 4.0) {
-                Math.toDegrees(atan2(dy.toDouble(), dx.toDouble())).toFloat().coerceIn(-45f, 45f)
-            } else {
-                face.headEulerAngleZ.coerceIn(-45f, 45f)
-            }
+        val eye1 = face.getLandmark(FaceLandmark.LEFT_EYE)?.position
+        val eye2 = face.getLandmark(FaceLandmark.RIGHT_EYE)?.position
+        val rollDegrees = if (eye1 != null && eye2 != null) {
+            FaceClusteringEngine.computeUprightEyeRollDegrees(
+                FaceClusteringEngine.Point2D(eye1.x, eye1.y),
+                FaceClusteringEngine.Point2D(eye2.x, eye2.y)
+            )
         } else {
-            face.headEulerAngleZ.coerceIn(-45f, 45f)
+            (-face.headEulerAngleZ).coerceIn(-45f, 45f)
         }
 
-        // Shift crop center slightly upward when generating generous avatar portraits so hair isn't clipped
         val verticalBiasPx = if (paddingFactor > 1.4f) -baseSize * 0.08f else 0f
 
         val out = Bitmap.createBitmap(outputSize, outputSize, Bitmap.Config.ARGB_8888)
@@ -141,15 +194,14 @@ class FaceEmbeddingEngine(private val context: Context) {
     }.getOrNull()
 
     /**
-     * Computes an L2-normalized MobileFaceNet embedding for a detected [face], averaging
-     * original and horizontally-flipped passes for pose invariance.
+     * Computes an L2-normalized MobileFaceNet embedding for a canonical 5-point aligned [face],
+     * averaging original and horizontally-flipped passes for pose invariance.
      */
     fun computeEmbedding(source: Bitmap, face: Face): FloatArray? {
         val interp = ensureInterpreter() ?: return null
-        val crop = extractAlignedFaceCrop(
+        val crop = extractCanonicalRecognitionCrop(
             source = source,
             face = face,
-            paddingFactor = RECOGNITION_PADDING_FACTOR,
             outputSize = inputWidth
         ) ?: return null
         try {
@@ -225,33 +277,28 @@ class FaceEmbeddingEngine(private val context: Context) {
     }
 
     /**
-     * Generates and persists a crisp `160x160` portrait avatar JPEG for [face] so People avatars
-     * load instantly without needing network access or re-cropping full-res images.
+     * Persists an already-extracted upright portrait bitmap to `noBackupFilesDir/face_crops/`.
      */
-    fun saveAvatarCrop(source: Bitmap, face: Face, faceId: String): String? {
-        val avatar = extractAlignedFaceCrop(
-            source = source,
-            face = face,
-            paddingFactor = AVATAR_PADDING_FACTOR,
-            outputSize = AVATAR_SIZE_PX
-        ) ?: return null
-        return try {
-            val safeName = faceId.replace(Regex("[^A-Za-z0-9_-]"), "_").take(80)
-            val file = File(faceCropsDir, "$safeName.jpg")
-            FileOutputStream(file).use { out ->
-                avatar.compress(Bitmap.CompressFormat.JPEG, 86, out)
-            }
-            file.absolutePath
-        } catch (_: Throwable) {
-            null
-        } finally {
-            avatar.recycle()
+    fun saveAvatarBitmap(avatar: Bitmap, faceId: String): String? = try {
+        val safeName = faceId.replace(Regex("[^A-Za-z0-9_-]"), "_").take(80)
+        val file = File(faceCropsDir, "$safeName.jpg")
+        FileOutputStream(file).use { out ->
+            avatar.compress(Bitmap.CompressFormat.JPEG, 88, out)
         }
+        file.absolutePath
+    } catch (_: Throwable) {
+        null
     }
 
     fun deleteCropFile(path: String?) {
         if (path.isNullOrBlank()) return
         runCatching { File(path).delete() }
+    }
+
+    fun clearAllCropFiles() {
+        runCatching {
+            faceCropsDir.listFiles()?.forEach { it.delete() }
+        }
     }
 
     fun close() {
@@ -265,8 +312,7 @@ class FaceEmbeddingEngine(private val context: Context) {
         private const val MODEL_ASSET_NAME = "mobilefacenet.tflite"
         private const val DEFAULT_INPUT_SIZE = 112
         private const val DEFAULT_EMBEDDING_DIM = 192
-        private const val RECOGNITION_PADDING_FACTOR = 1.22f
-        private const val AVATAR_PADDING_FACTOR = 1.62f
-        private const val AVATAR_SIZE_PX = 160
+        const val AVATAR_PADDING_FACTOR = 1.62f
+        const val AVATAR_SIZE_PX = 160
     }
 }

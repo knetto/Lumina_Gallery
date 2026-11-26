@@ -109,6 +109,15 @@ class PeopleViewModel(
         smartRecognitionManager.pauseActiveScan()
     }
 
+    fun rebuildAllSmartIndex() {
+        viewModelScope.launch(Dispatchers.IO) {
+            clearSelection()
+            snackbarFlow.value = "Rebuilding People & Objects index…"
+            smartRecognitionManager.resetAllIndexData()
+            smartRecognitionManager.syncSmartIndex(maxNewItemsPerRun = 400, includeDrive = true)
+        }
+    }
+
     fun toggleShowHidden() {
         showHiddenFlow.update { !it }
     }
