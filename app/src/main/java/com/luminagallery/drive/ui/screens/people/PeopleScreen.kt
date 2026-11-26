@@ -95,7 +95,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.positionChanged
+import androidx.compose.ui.input.pointer.positionChangedIgnoreConsumed
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -187,9 +187,11 @@ fun PeopleScreen(
     val floatingAvatarSizeDp = 96.dp
     val floatingAvatarHalfPx = remember(density) { with(density) { (floatingAvatarSizeDp / 2).toPx() } }
     val floatingLiftUpPx = remember(density) { with(density) { 18.dp.toPx() } }
+    val gridHorizontalPaddingPx = remember(density) { with(density) { 16.dp.toPx() } }
 
     fun findPersonAt(offset: Offset, excludePersonId: String? = null): PersonSummary? {
         val layoutInfo = gridState.layoutInfo
+        val adjustedX = offset.x - gridHorizontalPaddingPx
         val adjustedY = offset.y - layoutInfo.beforeContentPadding
         val hit = layoutInfo.visibleItemsInfo.firstOrNull { itemInfo ->
             val personId = itemInfo.key as? String ?: return@firstOrNull false
@@ -198,10 +200,14 @@ fun PeopleScreen(
             val top = itemInfo.offset.y.toFloat()
             val right = left + itemInfo.size.width
             val bottom = top + itemInfo.size.height
-            offset.x in left..right && adjustedY in top..bottom
+            adjustedX in left..right && adjustedY in top..bottom
         } ?: return null
         return latestActiveById[hit.key as? String]
     }
+
+    fun findDropTargetPerson(pointerPos: Offset, excludePersonId: String): PersonSummary? =
+        findPersonAt(pointerPos, excludePersonId = excludePersonId)
+            ?: findPersonAt(Offset(pointerPos.x, pointerPos.y - floatingLiftUpPx), excludePersonId = excludePersonId)
 
     LaunchedEffect(autoScrollSpeed) {
         if (autoScrollSpeed == 0f) return@LaunchedEffect
@@ -209,7 +215,7 @@ fun PeopleScreen(
             gridState.scrollBy(autoScrollSpeed)
             val activeDrag = draggedPerson
             if (activeDrag != null) {
-                val targetId = findPersonAt(dragPointerOffset, excludePersonId = activeDrag.personId)?.personId
+                val targetId = findDropTargetPerson(dragPointerOffset, excludePersonId = activeDrag.personId)?.personId
                 if (targetId != hoveredMergeTargetId) {
                     hoveredMergeTargetId = targetId
                     if (targetId != null) {
@@ -385,9 +391,12 @@ fun PeopleScreen(
                                     val activeChange = event.changes.firstOrNull { it.id == longPress.id }
                                         ?: event.changes.firstOrNull()
                                         ?: break
+                                    val moved = activeChange.positionChangedIgnoreConsumed()
+                                    val pos = activeChange.position
+                                    val isPressed = activeChange.pressed
                                     event.changes.forEach { it.consume() }
 
-                                    if (!activeChange.pressed) {
+                                    if (!isPressed) {
                                         val activeDragged = draggedPerson
                                         val dropTargetId = hoveredMergeTargetId
                                         val travel = totalTravelPx
@@ -407,13 +416,12 @@ fun PeopleScreen(
                                         }
                                         break
                                     }
-                                    if (activeChange.positionChanged()) {
-                                        val pos = activeChange.position
+                                    if (moved) {
                                         totalTravelPx += hypot(pos.x - lastPos.x, pos.y - lastPos.y)
                                         lastPos = pos
                                         dragPointerOffset = pos
 
-                                        val nextTargetId = findPersonAt(pos, excludePersonId = hitPerson.personId)?.personId
+                                        val nextTargetId = findDropTargetPerson(pos, excludePersonId = hitPerson.personId)?.personId
                                         if (nextTargetId != hoveredMergeTargetId) {
                                             hoveredMergeTargetId = nextTargetId
                                             if (nextTargetId != null) {

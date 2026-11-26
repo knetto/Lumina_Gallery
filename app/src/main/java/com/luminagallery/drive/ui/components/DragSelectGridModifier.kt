@@ -18,7 +18,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.positionChanged
+import androidx.compose.ui.input.pointer.positionChangedIgnoreConsumed
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.unit.dp
@@ -254,14 +254,17 @@ fun Modifier.photoGridDragSelect(
                     val activeChange = event.changes.firstOrNull { it.id == longPress.id }
                         ?: event.changes.firstOrNull()
                         ?: break
+                    val moved = activeChange.positionChangedIgnoreConsumed()
+                    val pos = activeChange.position
+                    val isPressed = activeChange.pressed
                     event.changes.forEach { it.consume() }
 
-                    if (!activeChange.pressed) {
+                    if (!isPressed) {
                         finishLongPressSession(cancelled = false)
                         break
                     }
-                    if (activeChange.positionChanged()) {
-                        handleDragMove(activeChange.position)
+                    if (moved) {
+                        handleDragMove(pos)
                     }
                 }
             } catch (ce: CancellationException) {

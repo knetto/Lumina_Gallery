@@ -163,4 +163,23 @@ class UiSafetyAuditTest {
             viewerVm.contains("excludedAlbumIdsFlow")
         )
     }
+
+    @Test
+    fun dragHandlers_neverCheckPositionChangedAfterConsumingEvent() {
+        val dragFiles = listOf(
+            "java/com/luminagallery/drive/ui/components/DragSelectGridModifier.kt",
+            "java/com/luminagallery/drive/ui/screens/people/PeopleScreen.kt"
+        )
+        for (relPath in dragFiles) {
+            val text = File(projectSrcRoot(), relPath).readText()
+            assertFalse(
+                "$relPath must use positionChangedIgnoreConsumed() instead of positionChanged() after consuming events",
+                text.contains(".positionChanged()")
+            )
+            assertTrue(
+                "$relPath must read positionChangedIgnoreConsumed() so dragging moves smoothly",
+                text.contains("positionChangedIgnoreConsumed()")
+            )
+        }
+    }
 }
