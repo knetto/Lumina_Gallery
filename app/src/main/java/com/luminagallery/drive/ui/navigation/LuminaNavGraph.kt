@@ -18,6 +18,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -40,6 +41,8 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.toRoute
+import androidx.navigationevent.NavigationEventTransitionState
+import androidx.navigationevent.compose.LocalNavigationEventDispatcherOwner
 import com.luminagallery.drive.LocalAppContainer
 import com.luminagallery.drive.LocalGalleryImageLoader
 import com.luminagallery.drive.data.local.LocalMediaRepository
@@ -171,14 +174,13 @@ private fun holdStillEnter(durationMillis: Int): EnterTransition =
 private fun NavDestination.isMorphRoute(): Boolean =
     hasRoute<ViewerRoute>() || hasRoute<FolderRoute>() || hasRoute<CollectionRoute>()
 
-/**
- * Keeps rect-morph routes (`FolderRoute`, `CollectionRoute`, `ViewerRoute`) closing cleanly
- * on gesture release so `HyperOsRectMorphFrame` animates smoothly back into the source tile,
- * while standard slide routes use Android's native predictive-back transitions.
- */
+
 @Composable
-private fun PopOnReleaseBackHandler(onBack: () -> Unit) {
-    BackHandler(onBack = onBack)
+private fun NavBackStackEntry.lastViewedItemIdState(): State<String?> =
+    savedStateHandle.getStateFlow<String?>(KEY_LAST_VIEWED_ITEM_ID, null).collectAsStateWithLifecycle()
+
+private fun NavBackStackEntry.clearLastViewedItemId() {
+    savedStateHandle[KEY_LAST_VIEWED_ITEM_ID] = null
 }
 
 private fun NavBackStackEntry.isLockedDestination(lockedIds: Set<String>): Boolean {
@@ -239,6 +241,19 @@ fun LuminaNavGraph(
             }
         } else {
             navController.popBackStack()
+        }
+    }
+
+    // Passive observer of the system back gesture (never consumes it): lets the page frames switch
+    // to direct finger tracking while the NavHost seeks its predictive-back transition.
+    val navigationEventOwner = LocalNavigationEventDispatcherOwner.current
+    LaunchedEffect(navigationEventOwner) {
+        navigationEventOwner?.navigationEventDispatcher?.transitionState?.collect { state ->
+            if (state is NavigationEventTransitionState.InProgress) {
+                originTracker.onBackGesture(active = true, swipeEdge = state.latestEvent.swipeEdge)
+            } else {
+                originTracker.onBackGesture(active = false, swipeEdge = 0)
+            }
         }
     }
 
@@ -446,9 +461,12 @@ fun LuminaNavGraph(
                     val filter = runCatching { SpecialGalleryFilter.valueOf(route.filterName) }
                         .getOrDefault(SpecialGalleryFilter.VIDEOS)
 
+                    val lastViewedItemId by backStackEntry.lastViewedItemIdState()
                     HyperOsTransitionFrame {
                         SpecialCollectionScreen(
                             filter = filter,
+                            lastViewedItemId = lastViewedItemId,
+                            onConsumedLastViewedItemId = { backStackEntry.clearLastViewedItemId() },
                             onNavigateBack = { safePopBackStack() },
                             onOpenViewer = { activeFilter, itemId ->
                                 activeViewerItemId = itemId
@@ -503,9 +521,12 @@ fun LuminaNavGraph(
                         key = "person_${route.personId}",
                         factory = PersonDetailViewModel.Factory(route.personId, container)
                     )
+                    val lastViewedItemId by backStackEntry.lastViewedItemIdState()
                     HyperOsTransitionFrame {
                         PersonDetailScreen(
                             personId = route.personId,
+                            lastViewedItemId = lastViewedItemId,
+                            onConsumedLastViewedItemId = { backStackEntry.clearLastViewedItemId() },
                             viewModel = detailViewModel,
                             onNavigateBack = { safePopBackStack() },
                             onOpenViewer = { pids, itemId ->
@@ -574,7 +595,6 @@ fun LuminaNavGraph(
                             container = container
                         )
                     )
-                    PopOnReleaseBackHandler(::safePopBackStack)
                     HyperOsRectMorphFrame(
                         entryId = backStackEntry.id,
                         targetKey = route.collectionId,
@@ -641,7 +661,6 @@ fun LuminaNavGraph(
                         .getStateFlow<String?>(KEY_LAST_VIEWED_ITEM_ID, null)
                         .collectAsStateWithLifecycle()
 
-                    PopOnReleaseBackHandler(::safePopBackStack)
                     HyperOsRectMorphFrame(
                         entryId = backStackEntry.id,
                         targetKey = activeFolderId.folderId.ifBlank { route.folderId },
@@ -712,13 +731,16 @@ fun LuminaNavGraph(
                     }
                 }
 
-                composable<SearchRoute> {
+                composable<SearchRoute> { backStackEntry ->
                     val searchViewModel: SearchViewModel = viewModel(
                         factory = SearchViewModel.Factory(container)
                     )
+                    val lastViewedItemId by backStackEntry.lastViewedItemIdState()
                     HyperOsTransitionFrame {
                         SearchScreen(
                             viewModel = searchViewModel,
+                            lastViewedItemId = lastViewedItemId,
+                            onConsumedLastViewedItemId = { backStackEntry.clearLastViewedItemId() },
                             onNavigateBack = { safePopBackStack() },
                             onOpenPeople = {
                                 navController.navigate(PeopleRoute)
@@ -815,7 +837,6 @@ fun LuminaNavGraph(
                         )
                     )
                     val targetPhotoKey = "media_${activeViewerItemId ?: route.initialItemId}"
-                    PopOnReleaseBackHandler(::safePopBackStack)
                     HyperOsRectMorphFrame(
                         entryId = backStackEntry.id,
                         targetKey = targetPhotoKey,
@@ -827,6 +848,9 @@ fun LuminaNavGraph(
                         midFlightCornerBump = 8.dp,
                         hideSourceWhileMorphing = true,
                         useAlbumCoverCrossfade = false,
+                        previewMinScale = 0.78f,
+                        previewCornerRadius = 18.dp,
+                        previewBackdropDrop = 0.85f,
                         sourceRectProvider = { originTracker.viewerContentRectProvider?.invoke() },
                         backdropAlphaProvider = { originTracker.viewerBackdropAlphaProvider?.invoke() ?: 1f }
                     ) { isRectMorphing ->
@@ -905,6 +929,14 @@ fun LuminaNavGraph(
                         )
                     }
                 }
+            }
+
+            // Predictive back gestures go straight to the NavHost so every page (including the photo /
+            // album morph routes) tracks the thumb live. Only while a transition is already running do
+            // we intercept back presses and queue them, so back-to-back closes (photo -> album) play
+            // both animations cleanly one after the other instead of cutting the first one short.
+            BackHandler(enabled = visibleEntries.size > 1) {
+                safePopBackStack()
             }
 
             if (!externalViewUri.isNullOrBlank()) {

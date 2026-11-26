@@ -124,7 +124,9 @@ import kotlinx.coroutines.launch
 fun SpecialCollectionScreen(
     filter: SpecialGalleryFilter,
     onNavigateBack: () -> Unit,
-    onOpenViewer: (filter: SpecialGalleryFilter, itemId: String) -> Unit
+    onOpenViewer: (filter: SpecialGalleryFilter, itemId: String) -> Unit,
+    lastViewedItemId: String? = null,
+    onConsumedLastViewedItemId: () -> Unit = {}
 ) {
     val container = LocalAppContainer.current
     val context = LocalContext.current
@@ -337,6 +339,13 @@ fun SpecialCollectionScreen(
                         maxColumns = 6,
                         modifier = Modifier.weight(1f)
                     ) {
+                        val returnMorphIds = remember(mediaItems) { mediaItems.map { it.id } }
+                        com.luminagallery.drive.ui.components.ReturnMorphScrollEffect(
+                            gridState = gridState,
+                            lastViewedItemId = lastViewedItemId,
+                            itemIds = returnMorphIds,
+                            onConsumed = onConsumedLastViewedItemId
+                        )
                         LazyVerticalGrid(
                             columns = GridCells.Fixed(prefs.gridColumns),
                             state = gridState,

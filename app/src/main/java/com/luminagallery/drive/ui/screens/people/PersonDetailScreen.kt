@@ -95,7 +95,9 @@ fun PersonDetailScreen(
     onNavigateBack: () -> Unit,
     onOpenViewer: (personIds: List<String>, itemId: String) -> Unit,
     onOpenPerson: (personId: String) -> Unit = {},
-    onOpenCompare: (List<String>) -> Unit = {}
+    onOpenCompare: (List<String>) -> Unit = {},
+    lastViewedItemId: String? = null,
+    onConsumedLastViewedItemId: () -> Unit = {}
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val container = LocalAppContainer.current
@@ -206,6 +208,12 @@ fun PersonDetailScreen(
                 modifier = Modifier.fillMaxSize()
             ) {
                 val orderedPhotoIds = remember(uiState.photos) { uiState.photos.map { it.id } }
+                com.luminagallery.drive.ui.components.ReturnMorphScrollEffect(
+                    gridState = gridState,
+                    lastViewedItemId = lastViewedItemId,
+                    itemIds = orderedPhotoIds,
+                    onConsumed = onConsumedLastViewedItemId
+                )
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(uiState.gridColumns),
                     state = gridState,

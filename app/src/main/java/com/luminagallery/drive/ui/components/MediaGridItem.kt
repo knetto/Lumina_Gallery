@@ -77,6 +77,8 @@ private val SelectionSpringSpec = spring<Dp>(
     stiffness = Spring.StiffnessMediumLow
 )
 private val TilePressSpringSpec = spring<Float>(dampingRatio = 0.75f, stiffness = 580f)
+private val SelectionAppearSpringSpec = spring<Float>(dampingRatio = 0.62f, stiffness = 520f)
+private val FavoriteBadgeSpringSpec = spring<Float>(dampingRatio = 0.42f, stiffness = 480f)
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -176,6 +178,18 @@ fun MediaGridItem(
                 .build()
         }
     }
+
+    // Selection check springs in / out with selection mode; favourite heart pops when toggled.
+    val selectionAppear by animateFloatAsState(
+        targetValue = if (isSelectionMode) 1f else 0f,
+        animationSpec = SelectionAppearSpringSpec,
+        label = "selectionAppear"
+    )
+    val favoriteAppear by animateFloatAsState(
+        targetValue = if (isFavorite) 1f else 0f,
+        animationSpec = FavoriteBadgeSpringSpec,
+        label = "favoriteBadgeAppear"
+    )
 
     val durationText = remember(item.durationMillis) {
         if (item.isVideo) FormatUtils.formatDuration(item.durationMillis) else null
@@ -323,7 +337,7 @@ fun MediaGridItem(
         }
 
         // Top-right subtle badges: Favorite red heart + offline pin + Google Drive icon badge
-        if (isFavorite || isOfflinePinned || (showCloudBadge && !item.isLocal)) {
+        if (favoriteAppear > 0.01f || isOfflinePinned || (showCloudBadge && !item.isLocal)) {
             Row(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
@@ -344,8 +358,16 @@ fun MediaGridItem(
                         badgeSize = 18.dp
                     )
                 }
-                if (isFavorite) {
-                    Box(contentAlignment = Alignment.Center) {
+                if (favoriteAppear > 0.01f) {
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier.graphicsLayer {
+                            val s = favoriteAppear.coerceAtLeast(0f)
+                            scaleX = s
+                            scaleY = s
+                            alpha = favoriteAppear.coerceIn(0f, 1f)
+                        }
+                    ) {
                         // Subtle shadow layer so the heart stays razor-sharp even on pure white photos
                         Icon(
                             imageVector = Icons.Rounded.Favorite,
@@ -366,34 +388,23 @@ fun MediaGridItem(
             }
         }
 
-        // Samsung One UI circular selection checkmark
-        if (isSelectionMode) {
-            Box(
+        // Circular selection check: springs in with selection mode, draws its tick when picked
+        if (selectionAppear > 0.01f) {
+            AnimatedSelectionCheck(
+                selected = isSelected,
+                selectedColor = MaterialTheme.colorScheme.primary,
+                unselectedFill = SelectionUnselectedBg,
+                borderColor = SelectionBorderColor,
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .padding(6.dp)
-                    .size(22.dp)
-                    .clip(CircleShape)
-                    .background(
-                        if (isSelected) MaterialTheme.colorScheme.primary
-                        else SelectionUnselectedBg
-                    )
-                    .border(
-                        width = if (isSelected) 0.dp else 1.5.dp,
-                        color = SelectionBorderColor,
-                        shape = CircleShape
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                if (isSelected) {
-                    Icon(
-                        imageVector = Icons.Rounded.Check,
-                        contentDescription = "Selected",
-                        tint = Color.White,
-                        modifier = Modifier.size(14.dp)
-                    )
-                }
-            }
+                    .graphicsLayer {
+                        val s = 0.5f + 0.5f * selectionAppear
+                        scaleX = s
+                        scaleY = s
+                        alpha = selectionAppear.coerceIn(0f, 1f)
+                    }
+            )
         }
     }
 }

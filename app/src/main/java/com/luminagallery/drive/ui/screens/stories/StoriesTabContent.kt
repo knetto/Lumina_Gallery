@@ -806,18 +806,17 @@ fun StorySlideshowDialog(
                         )
                     }
                     IconButton(onClick = { isPaused = !isPaused }) {
-                        Icon(
-                            imageVector = if (isPaused) Icons.Rounded.PlayArrow else Icons.Rounded.Pause,
-                            contentDescription = if (isPaused) "Resume" else "Pause",
+                        com.luminagallery.drive.ui.components.AnimatedPlayPauseIcon(
+                            isPlaying = !isPaused,
                             tint = Color.White
                         )
                     }
                     if (onToggleFavorite != null) {
                         IconButton(onClick = onToggleFavorite) {
-                            Icon(
-                                imageVector = if (story.isFavorited) Icons.Rounded.Favorite else Icons.Outlined.FavoriteBorder,
-                                contentDescription = "Favorite",
-                                tint = if (story.isFavorited) Color(0xFFFF5C77) else Color.White
+                            com.luminagallery.drive.ui.components.AnimatedFavoriteIcon(
+                                isFavorite = story.isFavorited,
+                                activeTint = Color(0xFFFF5C77),
+                                animationKey = story.id
                             )
                         }
                     }

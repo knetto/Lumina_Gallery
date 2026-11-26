@@ -1,5 +1,7 @@
 package com.luminagallery.drive.ui.screens.home
 
+import androidx.compose.ui.platform.LocalDensity
+import com.luminagallery.drive.ui.components.revealItemForReturnMorph
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
@@ -272,16 +274,16 @@ fun HomeScreen(
         viewModel.consumePendingShare()
     }
 
+    val returnMorphMarginPx = with(LocalDensity.current) { 12.dp.roundToPx() }
     LaunchedEffect(lastViewedItemId, uiState.timelineEntries) {
         val targetId = lastViewedItemId ?: return@LaunchedEffect
         val idx = uiState.timelineEntries.indexOfFirst {
             it is PicturesTimelineEntry.PhotoTile && it.item.id == targetId
         }
         if (idx >= 0) {
-            val visible = picturesGridState.layoutInfo.visibleItemsInfo.map { it.index }
-            if (idx !in visible) {
-                picturesGridState.scrollToItem(idx)
-            }
+            // Content-aware return: keep the grid exactly where it was unless the photo you ended
+            // on is clipped / off-screen, then reveal it so the close morph lands on its tile.
+            picturesGridState.revealItemForReturnMorph(idx, returnMorphMarginPx)
             onConsumedLastViewedItemId()
         }
     }

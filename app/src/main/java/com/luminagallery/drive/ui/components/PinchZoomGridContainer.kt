@@ -1,7 +1,14 @@
 package com.luminagallery.drive.ui.components
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.geometry.isSpecified
+import androidx.compose.ui.graphics.TransformOrigin
+import kotlinx.coroutines.launch
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.fadeIn
@@ -67,6 +74,13 @@ fun PinchZoomGridContainer(
     var badgeVisible by remember { mutableStateOf(false) }
     var badgeTick by remember { mutableIntStateOf(0) }
     var displayedColumns by remember { mutableIntStateOf(currentColumns) }
+    val scope = rememberCoroutineScope()
+    // Apple Photos style zoom hand-off: when the column count steps, the new layout starts partly
+    // at the old tile scale (anchored under your fingers) and springs into place while fading in,
+    // so the change reads as one continuous zoom instead of a hard re-layout.
+    val stepSettle = remember { Animatable(1f) }
+    val stepAlpha = remember { Animatable(1f) }
+    val pinchPivot = remember { mutableStateOf(TransformOrigin.Center) }
 
     LaunchedEffect(currentColumns) {
         displayedColumns = currentColumns
@@ -102,6 +116,13 @@ fun PinchZoomGridContainer(
                         if (pressedCount >= 2) {
                             wasPinching = true
                             val zoomChange = event.calculateZoom()
+                            val centroid = event.calculateCentroid(useCurrent = true)
+                            if (centroid.isSpecified && size.width > 0 && size.height > 0) {
+                                pinchPivot.value = TransformOrigin(
+                                    (centroid.x / size.width).coerceIn(0f, 1f),
+                                    (centroid.y / size.height).coerceIn(0f, 1f)
+                                )
+                            }
                             event.changes.forEach { it.consume() }
                             if (zoomChange.isFinite() && zoomChange > 0f && zoomChange != 1f) {
                                 cumulativeZoom = (cumulativeZoom * zoomChange).coerceIn(0.60f, 1.65f)
@@ -117,6 +138,16 @@ fun PinchZoomGridContainer(
                                 )
                                 if (stepped != null) {
                                     if (stepped != latestColumns) {
+                                        val ratio = stepped.toFloat() / latestColumns.coerceAtLeast(1)
+                                        val startScale = (1f + (ratio - 1f) * 0.5f).coerceIn(0.8f, 1.25f)
+                                        scope.launch {
+                                            stepSettle.snapTo(startScale)
+                                            stepSettle.animateTo(1f, spring(dampingRatio = 0.86f, stiffness = 360f))
+                                        }
+                                        scope.launch {
+                                            stepAlpha.snapTo(0.55f)
+                                            stepAlpha.animateTo(1f, tween(durationMillis = 220))
+                                        }
                                         displayedColumns = stepped
                                         latestOnChange(stepped)
                                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
@@ -142,8 +173,11 @@ fun PinchZoomGridContainer(
             modifier = Modifier
                 .matchParentSize()
                 .graphicsLayer {
-                    scaleX = animatedScale
-                    scaleY = animatedScale
+                    val s = animatedScale * stepSettle.value
+                    transformOrigin = pinchPivot.value
+                    scaleX = s
+                    scaleY = s
+                    alpha = stepAlpha.value
                 },
             content = content
         )

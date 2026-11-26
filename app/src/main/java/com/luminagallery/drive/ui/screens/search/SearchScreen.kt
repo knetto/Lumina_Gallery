@@ -105,7 +105,9 @@ fun SearchScreen(
         onlyWithText: Boolean,
         personIdsCsv: String?
     ) -> Unit,
-    onOpenCompare: (List<String>) -> Unit = {}
+    onOpenCompare: (List<String>) -> Unit = {},
+    lastViewedItemId: String? = null,
+    onConsumedLastViewedItemId: () -> Unit = {}
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val container = LocalAppContainer.current
@@ -377,6 +379,12 @@ fun SearchScreen(
                 modifier = Modifier.fillMaxSize()
             ) {
                 val orderedResultIds = remember(uiState.results) { uiState.results.map { it.id } }
+                com.luminagallery.drive.ui.components.ReturnMorphScrollEffect(
+                    gridState = gridState,
+                    lastViewedItemId = lastViewedItemId,
+                    itemIds = orderedResultIds,
+                    onConsumed = onConsumedLastViewedItemId
+                )
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(uiState.gridColumns),
                     state = gridState,

@@ -142,19 +142,25 @@ private fun VideoTransport(
                     contentColor = Color(0xFF10253E)
                 )
             ) {
-                Icon(
-                    imageVector = when {
-                        isEnded -> Icons.Rounded.Replay
-                        isPlaying -> Icons.Rounded.Pause
-                        else -> Icons.Rounded.PlayArrow
-                    },
-                    contentDescription = when {
-                        isEnded -> "Replay"
-                        isPlaying -> "Pause"
-                        else -> "Play"
-                    },
-                    modifier = Modifier.size(27.dp)
-                )
+                androidx.compose.animation.Crossfade(
+                    targetState = isEnded,
+                    animationSpec = androidx.compose.animation.core.tween(180),
+                    label = "videoReplayCrossfade"
+                ) { ended ->
+                    if (ended) {
+                        Icon(
+                            imageVector = Icons.Rounded.Replay,
+                            contentDescription = "Replay",
+                            modifier = Modifier.size(27.dp)
+                        )
+                    } else {
+                        com.luminagallery.drive.ui.components.AnimatedPlayPauseIcon(
+                            isPlaying = isPlaying,
+                            tint = androidx.compose.material3.LocalContentColor.current,
+                            size = 27.dp
+                        )
+                    }
+                }
             }
             IconButton(onClick = { controller.skipBy(5_000L) }, enabled = canSeek) {
                 Icon(Icons.Rounded.Forward5, contentDescription = "Forward 5 seconds")

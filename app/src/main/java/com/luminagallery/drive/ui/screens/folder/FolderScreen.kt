@@ -1,5 +1,6 @@
 package com.luminagallery.drive.ui.screens.folder
 
+import com.luminagallery.drive.ui.components.revealItemForReturnMorph
 import android.app.Activity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -371,6 +372,7 @@ fun FolderScreen(
         trashLauncher.launch(IntentSenderRequest.Builder(sender).build())
     }
 
+    val returnMorphMarginPx = with(LocalDensity.current) { 12.dp.roundToPx() }
     LaunchedEffect(lastViewedItemId, uiState.gridEntries, uiState.folderId) {
         val targetId = lastViewedItemId ?: return@LaunchedEffect
         val activeGridState = gridStatesByFolder[uiState.folderId] ?: return@LaunchedEffect
@@ -378,10 +380,9 @@ fun FolderScreen(
             entry is FolderGridEntry.MediaCell && entry.item.id == targetId
         }
         if (targetIndex >= 0) {
-            val visibleIndices = activeGridState.layoutInfo.visibleItemsInfo.map { it.index }
-            if (targetIndex !in visibleIndices) {
-                activeGridState.scrollToItem(targetIndex)
-            }
+            // Content-aware return: preserve the scroll position unless the photo you ended on is
+            // clipped / off-screen, then reveal it so the close morph lands right on its tile.
+            activeGridState.revealItemForReturnMorph(targetIndex, returnMorphMarginPx)
             onConsumedLastViewedItemId()
         }
     }

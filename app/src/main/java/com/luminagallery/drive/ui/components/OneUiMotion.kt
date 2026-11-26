@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.EnterExitState
 import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.Transition
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
@@ -65,6 +66,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.navigationevent.NavigationEvent
 import coil3.ImageLoader
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
@@ -127,7 +129,19 @@ object OneUiMotion {
      * spring-like velocity and lands cleanly right into the exact grid slot.
      */
     val MorphCloseEasing = CubicBezierEasing(0.22f, 0.88f, 0.24f, 1f)
-    const val MORPH_CLOSE_MS = 310
+
+    /**
+     * Total close budget. The close transition itself runs linearly so Android predictive-back
+     * seeking maps 1:1 onto the finger; [MorphCloseEasing] is applied in the draw phase. When a
+     * gesture is released at progress p the remaining flight takes (1 - p) * MORPH_CLOSE_MS.
+     */
+    const val MORPH_CLOSE_MS = 360
+
+    /** Rubber-band resistance applied to live predictive-back gesture progress (fast start, soft limit). */
+    fun gestureResistance(progress: Float): Float {
+        val p = progress.coerceIn(0f, 1f)
+        return 1f - (1f - p).pow(1.6f)
+    }
 
     /** Depth scrim drawn over the page sitting underneath a sliding page. */
     const val PAGE_DIM_ALPHA = 0.28f
@@ -372,6 +386,23 @@ class AlbumTransitionOriginTracker {
     var lastNavWasPop: Boolean = false
         private set
 
+    /**
+     * True while a system back gesture is in progress (finger down). The NavHost seeks its
+     * transition with the gesture progress during this time; frames use it to switch from the
+     * eased animation curves to direct finger tracking.
+     */
+    var backGestureActive by mutableStateOf(false)
+        private set
+
+    /** Edge the current / last back gesture started from (NavigationEvent.EDGE_*). */
+    var backGestureEdge: Int = 0
+        private set
+
+    fun onBackGesture(active: Boolean, swipeEdge: Int) {
+        if (active) backGestureEdge = swipeEdge
+        if (backGestureActive != active) backGestureActive = active
+    }
+
     /** Whether the page underneath a sliding page should receive the depth scrim. */
     var dimBackgroundPage: Boolean = true
         private set
@@ -453,51 +484,183 @@ class AlbumTransitionOriginTracker {
 val LocalAlbumTransitionOrigin = staticCompositionLocalOf { AlbumTransitionOriginTracker() }
 
 /**
- * Animates 0f (settled / Visible) -> 1f (off-stage) in lock-step with the page slide.
- * Uses `snap()` when background dimming is off (e.g. morph open/close) so this helper NEVER
- * keeps NavHost's outer Transition alive past the morph animation's exact duration!
+ * Linear 0f (settled / Visible) -> 1f (off-stage) page fraction that runs in lock-step with the
+ * HyperOS page slide. It is linear on purpose: during Android predictive back the NavHost seeks the
+ * transition with the raw gesture progress, so this value *is* the finger progress. Easing is
+ * applied in the draw phase instead (see [PageSlideMotion]).
+ * Uses `snap()` when the page is not sliding (e.g. morph open/close) so this helper NEVER keeps
+ * NavHost's outer Transition alive past the morph animation's exact duration!
  */
 @Composable
-private fun AnimatedVisibilityScope.rememberPageDimFraction(
+private fun AnimatedVisibilityScope.rememberLinearPageFraction(
     tracker: AlbumTransitionOriginTracker
 ): State<Float> =
     transition.animateFloat(
         transitionSpec = {
             if (tracker.dimBackgroundPage) {
-                tween(durationMillis = OneUiMotion.PAGE_SLIDE_MS, easing = OneUiMotion.PageSlideEasing)
+                tween(durationMillis = OneUiMotion.PAGE_SLIDE_MS, easing = LinearEasing)
             } else {
                 snap()
             }
         },
-        label = "hyperOsPageDim"
+        label = "hyperOsPageFraction"
     ) { state -> if (state == EnterExitState.Visible) 0f else 1f }
 
 /**
- * Xiaomi HyperOS depth scrim: only the page sitting *underneath* a sliding page is dimmed
- * (outgoing page on push, returning page on pop). The page on top always stays crisp.
+ * Remembers where a predictive-back gesture was released so the commit animation continues
+ * seamlessly from the exact pose the finger left behind (instead of snapping onto the eased curve).
+ * Pure draw-phase bookkeeping: idempotent, so several graphicsLayer blocks may call it per frame.
  */
-private fun Modifier.hyperOsPageDim(
-    transition: Transition<EnterExitState>,
-    tracker: AlbumTransitionOriginTracker,
-    fraction: State<Float>
-): Modifier = drawWithContent {
-    drawContent()
-    val f = fraction.value
-    if (f <= 0.003f || !tracker.dimBackgroundPage) return@drawWithContent
-    val entering = transition.targetState == EnterExitState.Visible
-    val isUnderneath = if (tracker.lastNavWasPop) entering else !entering
-    if (isUnderneath) {
-        drawRect(Color.Black.copy(alpha = (OneUiMotion.PAGE_DIM_ALPHA * f).coerceIn(0f, 1f)))
+internal class PredictiveSeekHandoff {
+    private var wasSeeking = false
+    private var lastSeekProgress = 0f
+
+    /** >= 0 once a seek gesture was released into its commit animation, otherwise -1. */
+    var releaseProgress = -1f
+        private set
+
+    fun update(progress: Float, seeking: Boolean, settled: Boolean) {
+        when {
+            settled -> {
+                wasSeeking = false
+                lastSeekProgress = 0f
+                releaseProgress = -1f
+            }
+            seeking -> {
+                wasSeeking = true
+                lastSeekProgress = progress
+                releaseProgress = -1f
+            }
+            wasSeeking -> {
+                wasSeeking = false
+                releaseProgress = lastSeekProgress.coerceIn(0f, 0.98f)
+            }
+        }
     }
+}
+
+/**
+ * Converts the linear page fraction into the visual progress of a page slide:
+ *  - Regular navigation: [OneUiMotion.PageSlideEasing].
+ *  - Predictive back (seeking): exactly the finger progress, so the page tracks the thumb 1:1
+ *    like iOS / HyperOS instead of racing ahead on the fast-out curve.
+ *  - Gesture released: the eased curve plus a decaying correction, so the page continues from
+ *    the exact released position with zero jump.
+ */
+private class PageSlideMotion(
+    private val transition: Transition<EnterExitState>,
+    private val tracker: AlbumTransitionOriginTracker,
+    private val fraction: State<Float>
+) {
+    private val handoff = PredictiveSeekHandoff()
+
+    val isEntering: Boolean get() = transition.targetState == EnterExitState.Visible
+
+    /** Visual progress (what we want to show) vs eased progress (what the NavHost slide draws). */
+    fun visualProgress(): Float? {
+        val settled = transition.currentState == transition.targetState
+        if (settled || !tracker.dimBackgroundPage) {
+            handoff.update(0f, seeking = false, settled = true)
+            return null
+        }
+        val q = fraction.value.coerceIn(0f, 1f)
+        val p = if (isEntering) 1f - q else q
+        val eased = OneUiMotion.PageSlideEasing.transform(p)
+        val seeking = tracker.lastNavWasPop && tracker.backGestureActive
+        handoff.update(p, seeking, settled = false)
+        val release = handoff.releaseProgress
+        return when {
+            seeking -> p
+            // Gesture cancelled: the NavHost seeks back to the start, keep tracking linearly.
+            release >= 0f && p < release - 0.0005f -> p
+            release >= 0f -> {
+                val correction = release - OneUiMotion.PageSlideEasing.transform(release)
+                val remaining = 1f - ((p - release) / (1f - release)).coerceIn(0f, 1f)
+                eased + correction * remaining
+            }
+            else -> eased
+        }
+    }
+
+    fun easedProgress(): Float {
+        val q = fraction.value.coerceIn(0f, 1f)
+        return OneUiMotion.PageSlideEasing.transform(if (isEntering) 1f - q else q)
+    }
+}
+
+/**
+ * Xiaomi HyperOS depth scrim + predictive-back finger tracking for a sliding page:
+ *  - Only the page sitting *underneath* a sliding page is dimmed (outgoing page on push,
+ *    returning page on pop). The page on top always stays crisp.
+ *  - While the back gesture is seeking, a translation correction is layered on top of the NavHost
+ *    slide so the top page follows the thumb 1:1 and the page below parallaxes at 1/4 speed.
+ */
+private fun Modifier.hyperOsPageMotion(
+    motion: PageSlideMotion,
+    tracker: AlbumTransitionOriginTracker,
+    enabled: () -> Boolean = { true }
+): Modifier = this
+    .graphicsLayer {
+        translationX = 0f
+        if (!enabled()) return@graphicsLayer
+        val visual = motion.visualProgress() ?: return@graphicsLayer
+        val eased = motion.easedProgress()
+        if (visual == eased) return@graphicsLayer
+        // Exiting page slides a full width, the page underneath parallaxes a quarter width.
+        val span = if (motion.isEntering) size.width / 4f else size.width
+        translationX = span * (visual - eased)
+    }
+    .drawWithContent {
+        drawContent()
+        if (!enabled() || !tracker.dimBackgroundPage) return@drawWithContent
+        val visual = motion.visualProgress() ?: return@drawWithContent
+        val entering = motion.isEntering
+        val isUnderneath = if (tracker.lastNavWasPop) entering else !entering
+        if (!isUnderneath) return@drawWithContent
+        // Underneath page: fully dimmed while covered, clearing as it comes back into focus.
+        val f = if (entering) 1f - visual else visual
+        if (f > 0.003f) {
+            drawRect(Color.Black.copy(alpha = (OneUiMotion.PAGE_DIM_ALPHA * f).coerceIn(0f, 1f)))
+        }
+    }
+
+/** Draw-phase pose of a rect morph. */
+private class MorphPose(
+    /** Predictive-back "card preview" amount the card is shrunk by (0 = none). */
+    val previewStart: Float,
+    /** 0 = at [previewStart] pose / full screen, 1 = landed inside the target tile. */
+    val flight: Float,
+    val closing: Boolean
+) {
+    val isRest: Boolean get() = flight <= 0.002f && previewStart <= 0.002f
+}
+
+/** Snapshot of where a rect-morph card currently is, shared by the frame and its cover overlays. */
+internal class MorphGeometry(
+    val current: Rect,
+    val contentFrame: Rect,
+    val flight: Float,
+    val hasTarget: Boolean,
+    val sourceProvided: Boolean
+)
+
+private fun scaleAboutCenter(rect: Rect, scale: Float): Rect {
+    val c = rect.center
+    val hw = rect.width * scale * 0.5f
+    val hh = rect.height * scale * 0.5f
+    return Rect(c.x - hw, c.y - hh, c.x + hw, c.y + hh)
 }
 
 /**
  * Xiaomi HyperOS / Apple Photos style Rect-to-Rect morph frame.
  *  - Open (`PreEnter -> Visible`): vacates the tapped grid tile / album cover and expands
  *    smoothly straight out of its exact pixel rectangle up to full screen.
- *  - Close (`Visible -> PostExit`): starts ONLY after the back gesture is released, vacates
- *    the target tile / cover slot, and flies the picture or album right back into that exact
- *    pixel rectangle at 100% solid opacity (with seamless album cover crossfade for albums!).
+ *  - Predictive back (gesture in progress): the page / photo lifts into a rounded "card preview"
+ *    that shrinks with the thumb while the real page underneath shows through the fading backdrop.
+ *    Cancelling springs it back; releasing flies it from that exact pose into its tile.
+ *  - Close (`Visible -> PostExit`): vacates the target tile / cover slot and flies the picture
+ *    or album right back into that exact pixel rectangle at 100% solid opacity (with seamless
+ *    album cover crossfade for albums!).
  *  - All geometry runs strictly in the GPU `graphicsLayer` draw phase at 120Hz with zero
  *    per-frame recomposition of the screen content.
  */
@@ -513,6 +676,9 @@ fun AnimatedVisibilityScope.HyperOsRectMorphFrame(
     midFlightCornerBump: Dp = 10.dp,
     hideSourceWhileMorphing: Boolean = true,
     useAlbumCoverCrossfade: Boolean = false,
+    previewMinScale: Float = 0.86f,
+    previewCornerRadius: Dp = 28.dp,
+    previewBackdropDrop: Float = 0.55f,
     sourceRectProvider: (() -> Rect?)? = null,
     backdropAlphaProvider: () -> Float = { 1f },
     content: @Composable (isMorphing: Boolean) -> Unit
@@ -522,10 +688,12 @@ fun AnimatedVisibilityScope.HyperOsRectMorphFrame(
     val targetCornerPx = with(density) { targetCornerRadius.toPx() }
     val bumpCornerPx = with(density) { midFlightCornerBump.toPx() }
     val maxShadowPx = with(density) { maxShadowElevation.toPx() }
+    val previewCornerPx = with(density) { previewCornerRadius.toPx() }
 
-    // 0f = full screen (Visible), 1f = fully collapsed inside the target tile/card (PreEnter / PostExit)
-    // Uses `snap()` when morph is disabled for this entry (e.g. an album returning behind a closing
-    // photo) so it never extends NavHost's transition duration or blocks back-to-back close animations!
+    // 0f = full screen (Visible), 1f = fully collapsed inside the target tile/card (PreEnter / PostExit).
+    // The close runs LINEAR so predictive-back seeking equals the finger progress; the close easing
+    // is applied in the draw phase. Uses `snap()` when morph is disabled for this entry (e.g. an album
+    // returning behind a closing photo) so it never extends NavHost's transition duration.
     val morphProgressState = transition.animateFloat(
         transitionSpec = {
             if (!originTracker.isMorphEnabled(entryId)) {
@@ -533,7 +701,7 @@ fun AnimatedVisibilityScope.HyperOsRectMorphFrame(
             } else if (targetState == EnterExitState.Visible) {
                 tween(durationMillis = OneUiMotion.MORPH_OPEN_MS, easing = OneUiMotion.MorphOpenEasing)
             } else {
-                tween(durationMillis = OneUiMotion.MORPH_CLOSE_MS, easing = OneUiMotion.MorphCloseEasing)
+                tween(durationMillis = OneUiMotion.MORPH_CLOSE_MS, easing = LinearEasing)
             }
         },
         label = "hyperOsRectMorphProgress"
@@ -545,6 +713,7 @@ fun AnimatedVisibilityScope.HyperOsRectMorphFrame(
     }
 
     val animTransition = transition
+    val seekHandoff = remember(entryId) { PredictiveSeekHandoff() }
     val isTransitionActive by remember(entryId, animTransition) {
         derivedStateOf {
             (animTransition.currentState != EnterExitState.Visible ||
@@ -588,13 +757,92 @@ fun AnimatedVisibilityScope.HyperOsRectMorphFrame(
         }
     }
 
-    val pageDim = rememberPageDimFraction(originTracker)
+    val pageFraction = rememberLinearPageFraction(originTracker)
+    val pageMotion = remember(animTransition, pageFraction) {
+        PageSlideMotion(animTransition, originTracker, pageFraction)
+    }
     val frameSize = remember { mutableStateOf(IntSize.Zero) }
+
+    fun resolvePose(): MorphPose {
+        val raw = morphProgressState.value.coerceIn(0f, 1f)
+        val closing = animTransition.targetState == EnterExitState.PostExit
+        if (!closing) {
+            seekHandoff.update(raw, seeking = false, settled = true)
+            return MorphPose(previewStart = 0f, flight = raw, closing = false)
+        }
+        val seeking = originTracker.backGestureActive
+        seekHandoff.update(raw, seeking, settled = false)
+        val release = seekHandoff.releaseProgress
+        return when {
+            seeking -> MorphPose(OneUiMotion.gestureResistance(raw), 0f, closing = true)
+            // Gesture cancelled: the NavHost seeks back to 0, so the card preview grows back to full.
+            release >= 0f && raw < release - 0.0005f ->
+                MorphPose(OneUiMotion.gestureResistance(raw), 0f, closing = true)
+            release >= 0f -> {
+                val local = ((raw - release) / (1f - release)).coerceIn(0f, 1f)
+                MorphPose(
+                    previewStart = OneUiMotion.gestureResistance(release),
+                    flight = OneUiMotion.MorphCloseEasing.transform(local),
+                    closing = true
+                )
+            }
+            else -> MorphPose(0f, OneUiMotion.MorphCloseEasing.transform(raw), closing = true)
+        }
+    }
+
+    fun computeGeometry(w: Float, h: Float, pose: MorphPose): MorphGeometry {
+        val providedSource = sourceRectProvider?.invoke()?.takeIf {
+            // A dragged viewer can extend beyond the viewport at the start of its close.
+            it.width > 8f && it.height > 8f &&
+                it.left.isFinite() && it.top.isFinite() && it.right.isFinite() && it.bottom.isFinite()
+        }
+        val contentFrame = providedSource ?: Rect(0f, 0f, w, h)
+        val start = if (pose.previewStart > 0f) {
+            // HyperOS card preview: shrinks with the thumb and drifts slightly away from the edge
+            // the swipe started on, so it feels physically pushed by the finger.
+            val edgeDirection = when (originTracker.backGestureEdge) {
+                NavigationEvent.EDGE_LEFT -> 1f
+                NavigationEvent.EDGE_RIGHT -> -1f
+                else -> 0f
+            }
+            scaleAboutCenter(contentFrame, 1f - (1f - previewMinScale) * pose.previewStart)
+                .translate(w * 0.045f * pose.previewStart * edgeDirection, 0f)
+        } else {
+            contentFrame
+        }
+        // Live lookup: even if the underlying grid just scrolled to a newly viewed photo,
+        // we lock straight onto its exact on-screen pixel rectangle!
+        val target = originTracker.boundsFor(
+            key = targetKey,
+            fallbackToLast = fallbackToLastBounds
+        )?.takeIf {
+            it.width >= 16f && it.height >= 16f &&
+                it.bottom > 0f && it.top < h && it.right > 0f && it.left < w
+        }
+        // Fallback if target tile/card is off-screen: gentle centered scale & fade
+        val dst = target ?: scaleAboutCenter(start, 0.72f)
+        return MorphGeometry(
+            current = lerp(start, dst, pose.flight),
+            contentFrame = contentFrame,
+            flight = pose.flight,
+            hasTarget = target != null,
+            sourceProvided = providedSource != null
+        )
+    }
+
+    val overlayGeometry: () -> MorphGeometry? = {
+        val s = frameSize.value
+        if (s.width <= 1 || s.height <= 1) {
+            null
+        } else {
+            computeGeometry(s.width.toFloat(), s.height.toFloat(), resolvePose())
+        }
+    }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .hyperOsPageDim(animTransition, originTracker, pageDim)
+            .hyperOsPageMotion(pageMotion, originTracker, enabled = { !originTracker.isMorphEnabled(entryId) })
     ) {
         // Full-screen depth / theater backdrop behind the flying photo or album card.
         if (backdropMaxAlpha > 0f) {
@@ -603,11 +851,12 @@ fun AnimatedVisibilityScope.HyperOsRectMorphFrame(
                     .fillMaxSize()
                     .drawBehind {
                         if (!originTracker.isMorphEnabled(entryId)) return@drawBehind
-                        val t = morphProgressState.value.coerceIn(0f, 1f)
-                        if (t <= 0.002f && !isTransitionActive) return@drawBehind
-                        val isClosingNow = animTransition.targetState == EnterExitState.PostExit
-                        val curve = if (isClosingNow) (1f - t).pow(1.25f) else (1f - t).pow(0.75f)
-                        val a = (curve * backdropMaxAlpha * backdropAlphaProvider().coerceIn(0f, 1f))
+                        val pose = resolvePose()
+                        if (pose.isRest && !isTransitionActive) return@drawBehind
+                        val e = pose.flight
+                        val curve = if (pose.closing) (1f - e).pow(1.25f) else (1f - e).pow(0.75f)
+                        val startFactor = 1f - previewBackdropDrop * pose.previewStart
+                        val a = (curve * startFactor * backdropMaxAlpha * backdropAlphaProvider().coerceIn(0f, 1f))
                             .coerceIn(0f, 1f)
                         if (a > 0.003f) drawRect(Color.Black.copy(alpha = a))
                     }
@@ -620,56 +869,34 @@ fun AnimatedVisibilityScope.HyperOsRectMorphFrame(
                 .onSizeChanged { frameSize.value = it }
                 .graphicsLayer {
                     if (!originTracker.isMorphEnabled(entryId)) return@graphicsLayer
-                    val t = morphProgressState.value.coerceIn(0f, 1f)
-                    if (t <= 0.002f) return@graphicsLayer
+                    val pose = resolvePose()
+                    if (pose.isRest) return@graphicsLayer
 
                     val w = size.width
                     val h = size.height
                     if (w <= 1f || h <= 1f) return@graphicsLayer
 
-                    val providedSource = sourceRectProvider?.invoke()?.takeIf {
-                        // A dragged viewer can extend beyond the viewport at the start of its close.
-                        it.width > 8f && it.height > 8f &&
-                            it.left.isFinite() && it.top.isFinite() && it.right.isFinite() && it.bottom.isFinite()
-                    }
-                    val src = providedSource ?: Rect(0f, 0f, w, h)
-                    val cropBias = if (providedSource != null) 0.5f else verticalCropBias.coerceIn(0f, 1f)
-
-                    // Live lookup: even if the underlying grid just scrolled to a newly viewed photo,
-                    // we lock straight onto its exact on-screen pixel rectangle!
-                    val target = originTracker.boundsFor(
-                        key = targetKey,
-                        fallbackToLast = fallbackToLastBounds
-                    )?.takeIf {
-                        it.width >= 16f && it.height >= 16f &&
-                            it.bottom > 0f && it.top < h && it.right > 0f && it.left < w
-                    }
-                    val hasTarget = target != null
-
-                    // Fallback if target tile/card is off-screen: gentle centered scale & fade
-                    val dst = target ?: Rect(
-                        left = src.center.x - src.width * 0.36f,
-                        top = src.center.y - src.height * 0.36f,
-                        right = src.center.x + src.width * 0.36f,
-                        bottom = src.center.y + src.height * 0.36f
-                    )
-
-                    val cur = lerp(src, dst, t)
+                    val g = computeGeometry(w, h, pose)
+                    val cropBias = if (g.sourceProvided) 0.5f else verticalCropBias.coerceIn(0f, 1f)
+                    val cur = g.current
                     // Uniform aspect-preserving scale so the photo / album fills cur with zero stretch
-                    val uniformScale = morphScale(src, cur)
+                    val uniformScale = morphScale(g.contentFrame, cur)
                     // Exact local clip window that projects pixel-for-pixel onto `cur`
-                    val localClip = morphClipRect(src, cur, uniformScale, cropBias)
+                    val localClip = morphClipRect(g.contentFrame, cur, uniformScale, cropBias)
 
                     scaleX = uniformScale
                     scaleY = uniformScale
                     translationX = cur.center.x - w * 0.5f - (localClip.center.x - w * 0.5f) * uniformScale
                     translationY = cur.center.y - h * 0.5f - (localClip.center.y - h * 0.5f) * uniformScale
 
-                    val bell = sin(t * PI.toFloat()).coerceIn(0f, 1f)
-                    val visualCornerPx = targetCornerPx * t + bumpCornerPx * bell
+                    val e = g.flight
+                    val bell = sin(e * PI.toFloat()).coerceIn(0f, 1f)
+                    val startCornerPx = previewCornerPx * pose.previewStart
+                    val visualCornerPx = startCornerPx + (targetCornerPx - startCornerPx) * e + bumpCornerPx * bell
                     val localRadius = (visualCornerPx / uniformScale).coerceAtLeast(0f)
 
-                    shadowElevation = if (hasTarget) maxShadowPx * bell else 0f
+                    val previewShadowPx = maxShadowPx * 0.55f * pose.previewStart * (1f - e)
+                    shadowElevation = max(previewShadowPx, if (g.hasTarget) maxShadowPx * bell else 0f)
                     ambientShadowColor = Color.Black.copy(alpha = 0.36f)
                     spotShadowColor = Color.Black.copy(alpha = 0.45f)
 
@@ -686,9 +913,9 @@ fun AnimatedVisibilityScope.HyperOsRectMorphFrame(
                     // (since the source slot is vacated and the visuals match pixel-for-pixel!).
                     // Fade when there is no cover to hand off to or the target is scrolled off-screen.
                     alpha = when {
-                        !hasTarget -> (1f - t).coerceIn(0f, 1f)
+                        !g.hasTarget -> (1f - e).coerceIn(0f, 1f)
                         canSolidlyHandOff -> 1f
-                        else -> ((1f - t) / 0.14f).coerceIn(0f, 1f)
+                        else -> ((1f - e) / 0.14f).coerceIn(0f, 1f)
                     }
                 }
         ) {
@@ -698,11 +925,7 @@ fun AnimatedVisibilityScope.HyperOsRectMorphFrame(
                 when (albumCoverInfo) {
                     is AlbumCoverMorphInfo.Single -> AlbumCoverMorphOverlay(
                         coverInfo = albumCoverInfo,
-                        morphProgressState = morphProgressState,
-                        targetKey = targetKey,
-                        originTracker = originTracker,
-                        fallbackToLastBounds = fallbackToLastBounds,
-                        frameSize = frameSize,
+                        geometry = overlayGeometry,
                         modifier = Modifier.align(Alignment.TopCenter)
                     )
                     is AlbumCoverMorphInfo.Collage -> {
@@ -716,21 +939,19 @@ fun AnimatedVisibilityScope.HyperOsRectMorphFrame(
                                     .align(AbsoluteAlignment.TopLeft)
                                     .size(with(density) { target.width.toDp() })
                                     .graphicsLayer {
-                                        val w = frameSize.value.width.toFloat()
-                                        val h = frameSize.value.height.toFloat()
-                                        if (w <= 1f || h <= 1f || size.width <= 0f || size.height <= 0f) {
+                                        val g = overlayGeometry()
+                                        if (g == null || size.width <= 0f || size.height <= 0f) {
                                             alpha = 0f
                                             return@graphicsLayer
                                         }
-                                        val t = morphProgressState.value.coerceIn(0f, 1f)
-                                        alpha = albumCoverAlpha(t)
+                                        alpha = albumCoverAlpha(g.flight)
                                         if (alpha <= 0f) return@graphicsLayer
 
-                                        val src = Rect(0f, 0f, w, h)
-                                        val dst = originTracker.boundsFor(targetKey, fallbackToLastBounds) ?: target
-                                        val current = lerp(src, dst, t)
                                         val clip = morphClipRect(
-                                            src, current, morphScale(src, current), verticalCropBias.coerceIn(0f, 1f)
+                                            g.contentFrame,
+                                            g.current,
+                                            morphScale(g.contentFrame, g.current),
+                                            verticalCropBias.coerceIn(0f, 1f)
                                         )
                                         // Draw the square at tile size, then scale it into the clip.
                                         // The gaps and badge land at their normal size as the morph ends.
@@ -775,11 +996,7 @@ private fun albumCoverAlpha(progress: Float): Float = ((progress - 0.28f) / 0.56
 @Composable
 private fun AlbumCoverMorphOverlay(
     coverInfo: AlbumCoverMorphInfo.Single,
-    morphProgressState: State<Float>,
-    targetKey: String?,
-    originTracker: AlbumTransitionOriginTracker,
-    fallbackToLastBounds: Boolean,
-    frameSize: State<IntSize>,
+    geometry: () -> MorphGeometry?,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -825,24 +1042,23 @@ private fun AlbumCoverMorphOverlay(
             .fillMaxWidth()
             .aspectRatio(1f)
             .graphicsLayer {
-                val t = morphProgressState.value.coerceIn(0f, 1f)
-                // 100% opaque right at the card (t >= 0.84), dissolving cleanly into the album grid
-                // between t = 0.84 and t = 0.28 so the transition feels like a single living card.
-                val coverAlpha = albumCoverAlpha(t)
+                val g = geometry()
+                if (g == null) {
+                    alpha = 0f
+                    return@graphicsLayer
+                }
+                // 100% opaque right at the card (flight >= 0.84), dissolving cleanly into the album grid
+                // between 0.84 and 0.28 so the transition feels like a single living card.
+                val coverAlpha = albumCoverAlpha(g.flight)
                 alpha = coverAlpha
                 if (coverAlpha <= 0.002f) return@graphicsLayer
 
                 // Smoothly keep the cover filling the morphing clip height as it stretches from
                 // 1:1 square toward full screen so no bottom edge is ever exposed mid-crossfade.
-                val target = originTracker.boundsFor(targetKey, fallbackToLast = fallbackToLastBounds)
                 val coverSide = size.width
-                if (target != null && coverSide > 1f) {
-                    val parentW = frameSize.value.width.toFloat().takeIf { it > 1f } ?: coverSide
-                    val parentH = frameSize.value.height.toFloat().takeIf { it > 1f } ?: (coverSide * 2.25f)
-                    val curW = (parentW + (target.width - parentW) * t).coerceAtLeast(1f)
-                    val curH = (parentH + (target.height - parentH) * t).coerceAtLeast(1f)
-                    val uScale = max(curW / parentW, curH / parentH).coerceIn(0.02f, 6f)
-                    val localH = (curH / uScale).coerceAtLeast(coverSide)
+                if (g.hasTarget && coverSide > 1f) {
+                    val uScale = morphScale(g.contentFrame, g.current)
+                    val localH = (g.current.height.coerceAtLeast(1f) / uScale).coerceAtLeast(coverSide)
                     val extra = (localH / coverSide).coerceIn(1f, 3f)
                     transformOrigin = TransformOrigin(0.5f, 0f)
                     scaleX = extra
@@ -865,6 +1081,8 @@ private fun AlbumCoverMorphOverlay(
  * Navigation Compose transition:
  *  - The page on top slides cleanly (no rounding, no rim, no ghosting).
  *  - The page underneath gets a soft depth scrim that clears as it comes back into focus.
+ *  - During a predictive-back swipe the top page follows the thumb 1:1 (iOS / HyperOS feel)
+ *    and the commit / cancel continues from the released position without any jump.
  *  - At rest it draws nothing extra (zero overhead).
  */
 @Composable
@@ -872,12 +1090,15 @@ fun AnimatedVisibilityScope.HyperOsTransitionFrame(
     content: @Composable () -> Unit
 ) {
     val tracker = LocalAlbumTransitionOrigin.current
-    val pageDim = rememberPageDimFraction(tracker)
     val animTransition = transition
+    val pageFraction = rememberLinearPageFraction(tracker)
+    val pageMotion = remember(animTransition, pageFraction) {
+        PageSlideMotion(animTransition, tracker, pageFraction)
+    }
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .hyperOsPageDim(animTransition, tracker, pageDim)
+            .hyperOsPageMotion(pageMotion, tracker)
     ) {
         content()
     }

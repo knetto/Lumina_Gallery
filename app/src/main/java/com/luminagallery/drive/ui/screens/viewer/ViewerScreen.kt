@@ -171,6 +171,7 @@ import com.luminagallery.drive.ui.components.ExifMetadataBottomSheet
 import com.luminagallery.drive.ui.components.FormatUtils
 import com.luminagallery.drive.ui.components.HyperOsTrashConfirmSheet
 import com.luminagallery.drive.ui.components.LocalAlbumTransitionOrigin
+import com.luminagallery.drive.ui.components.AnimatedFavoriteIcon
 import com.luminagallery.drive.ui.components.LuminaSnackbarHost
 import com.luminagallery.drive.ui.components.MoveCopyToAlbumSheet
 import com.luminagallery.drive.ui.components.OneUiMotion
@@ -935,15 +936,6 @@ fun ViewerScreen(
             modifier = Modifier.align(Alignment.BottomCenter)
         ) {
             val isFavorited = currentItem.id in uiState.favoriteItemIds
-            val heartScale by animateFloatAsState(
-                targetValue = if (isFavorited) 1.2f else 1.0f,
-                animationSpec = spring(
-                    dampingRatio = Spring.DampingRatioMediumBouncy,
-                    stiffness = Spring.StiffnessMedium
-                ),
-                label = "viewerHeartPop"
-            )
-
             Column(
                 modifier = Modifier.fillMaxWidth()
             ) {
@@ -1006,16 +998,12 @@ fun ViewerScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         IconButton(onClick = { viewModel.toggleFavorite(currentItem) }) {
-                            Icon(
-                                imageVector = if (isFavorited) Icons.Rounded.Favorite else Icons.Outlined.FavoriteBorder,
-                                contentDescription = "Favorite",
-                                tint = if (isFavorited) Color(0xFFFF5C77) else Color.White,
-                                modifier = Modifier
-                                    .size(25.dp)
-                                    .graphicsLayer {
-                                        scaleX = heartScale
-                                        scaleY = heartScale
-                                    }
+                            AnimatedFavoriteIcon(
+                                isFavorite = isFavorited,
+                                size = 25.dp,
+                                inactiveTint = Color.White,
+                                activeTint = Color(0xFFFF5C77),
+                                animationKey = currentItem.id
                             )
                         }
 
