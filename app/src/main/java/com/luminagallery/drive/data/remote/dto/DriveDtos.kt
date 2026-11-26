@@ -30,6 +30,13 @@ data class DriveFileCapabilitiesDto(
 )
 
 @Serializable
+data class DriveLocationDto(
+    val latitude: Double? = null,
+    val longitude: Double? = null,
+    val altitude: Double? = null
+)
+
+@Serializable
 data class ImageMediaMetadataDto(
     val width: Int? = null,
     val height: Int? = null,
@@ -41,7 +48,13 @@ data class ImageMediaMetadataDto(
     val aperture: Float? = null,
     val isoSpeed: Int? = null,
     val focalLength: Float? = null,
-    val lens: String? = null
+    val lens: String? = null,
+    val flashUsed: Boolean? = null,
+    val meteringMode: String? = null,
+    val colorSpace: String? = null,
+    val whiteBalance: String? = null,
+    val exposureBias: Float? = null,
+    val location: DriveLocationDto? = null
 )
 
 @Serializable

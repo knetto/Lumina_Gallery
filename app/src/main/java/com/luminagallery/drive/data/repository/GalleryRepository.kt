@@ -14,6 +14,7 @@ import com.luminagallery.drive.data.remote.dto.DriveFileDto
 import com.luminagallery.drive.domain.model.AlbumCoverPreview
 import com.luminagallery.drive.domain.model.BreadcrumbItem
 import com.luminagallery.drive.domain.model.DriveFolder
+import com.luminagallery.drive.domain.model.ExifMetadata
 import com.luminagallery.drive.domain.model.MediaItem
 import com.luminagallery.drive.domain.model.MediaType
 import com.luminagallery.drive.domain.model.SyncStatus
@@ -87,6 +88,59 @@ class GalleryRepository(
     private val folderMediaCache = ConcurrentHashMap<String, List<MediaItem>>()
     private val subfoldersCache = ConcurrentHashMap<String, List<DriveFolder>>()
     private val lastFolderSyncEpochMs = ConcurrentHashMap<String, Long>()
+    private val driveRichExifCache = ConcurrentHashMap<String, ExifMetadata>()
+
+    suspend fun fetchRichDriveExif(item: MediaItem): ExifMetadata? = withContext(Dispatchers.IO) {
+        if (item.isLocal) return@withContext null
+        driveRichExifCache[item.id]?.let { return@withContext it }
+        if (!networkMonitor.networkState.value.isOnline) return@withContext null
+        val dto = runCatching {
+            driveApi.getFile(fileId = item.id, fields = DriveConstants.DETAIL_FILE_FIELDS)
+        }.getOrNull() ?: return@withContext null
+        val img = dto.imageMediaMetadata ?: return@withContext null
+        val loc = img.location
+        val lat = loc?.latitude?.takeIf { it.isFinite() && it in -90.0..90.0 }
+        val lon = loc?.longitude?.takeIf { it.isFinite() && it in -180.0..180.0 }
+        val hasCoords = lat != null && lon != null && (lat != 0.0 || lon != 0.0)
+        val alt = if (hasCoords) loc?.altitude?.takeIf { it.isFinite() && it in -500.0..15_000.0 } else null
+        val flashDesc = img.flashUsed?.let { if (it) "Fired" else "Off" }
+        val wb = img.whiteBalance?.trim()?.takeIf { it.isNotEmpty() }
+            ?.replaceFirstChar { it.uppercase() }
+        val metering = img.meteringMode?.trim()?.takeIf { it.isNotEmpty() }
+            ?.replaceFirstChar { it.uppercase() }
+        val colorSpace = img.colorSpace?.trim()?.takeIf { it.isNotEmpty() }
+        val ew = item.effectiveWidth
+        val eh = item.effectiveHeight
+        val orientation = if (ew != null && eh != null) {
+            when {
+                ew > eh -> "Landscape"
+                eh > ew -> "Portrait"
+                else -> "Square"
+            }
+        } else null
+        val enriched = item.exif.copy(
+            cameraMake = img.cameraMake?.trim()?.takeIf { it.isNotEmpty() } ?: item.exif.cameraMake,
+            cameraModel = img.cameraModel?.trim()?.takeIf { it.isNotEmpty() } ?: item.exif.cameraModel,
+            lens = img.lens?.trim()?.takeIf { it.isNotEmpty() } ?: item.exif.lens,
+            aperture = img.aperture ?: item.exif.aperture,
+            exposureTime = img.exposureTime ?: item.exif.exposureTime,
+            isoSpeed = img.isoSpeed ?: item.exif.isoSpeed,
+            focalLength = img.focalLength ?: item.exif.focalLength,
+            exposureBiasEv = img.exposureBias ?: item.exif.exposureBiasEv,
+            flashDescription = flashDesc ?: item.exif.flashDescription,
+            whiteBalance = wb ?: item.exif.whiteBalance,
+            meteringMode = metering ?: item.exif.meteringMode,
+            colorSpace = colorSpace ?: item.exif.colorSpace,
+            orientationLabel = orientation ?: item.exif.orientationLabel,
+            exifDateOriginal = img.time?.trim()?.takeIf { it.isNotEmpty() } ?: item.exif.exifDateOriginal,
+            latitude = if (hasCoords) lat else item.exif.latitude,
+            longitude = if (hasCoords) lon else item.exif.longitude,
+            altitudeMeters = alt ?: item.exif.altitudeMeters
+        )
+        if (driveRichExifCache.size > 400) driveRichExifCache.clear()
+        driveRichExifCache[item.id] = enriched
+        enriched
+    }
 
     @Volatile
     private var latestFolderParentById: Map<String, String?> = emptyMap()

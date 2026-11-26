@@ -629,3 +629,243 @@ private fun buildVectorClusters(
         )
     }.sortedBy { it.count }
 }
+
+/**
+ * Compact, scroll-safe MapLibre Native preview map for the swipe-up Photo Details sheet.
+ * Uses `textureMode(true)` so it clips cleanly inside rounded sheet cards, disables map drag/zoom
+ * so vertical bottom-sheet scrolling stays effortless, and places a crisp photo-thumbnail pin
+ * dead-center on the exact GPS capture coordinate.
+ */
+@Composable
+fun PhotoLocationMiniMap(
+    latitude: Double,
+    longitude: Double,
+    thumbnailData: Any?,
+    thumbnailMemoryKey: String?,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val imageLoader = LocalGalleryImageLoader.current
+
+    remember(context) {
+        MapLibre.getInstance(context.applicationContext)
+        true
+    }
+
+    val defaultDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    var isDarkStyle by remember { mutableStateOf(defaultDark) }
+    var mapLibreRef by remember { mutableStateOf<MapLibreMap?>(null) }
+    var mapLoadFailed by remember { mutableStateOf(false) }
+
+    val mapView = remember {
+        val options = MapLibreMapOptions.createFromAttributes(context)
+            .textureMode(true)
+            .attributionEnabled(false)
+            .logoEnabled(false)
+            .compassEnabled(false)
+        MapView(context, options).apply {
+            onCreate(null)
+        }
+    }
+
+    DisposableEffect(lifecycleOwner, mapView) {
+        val failListener = MapView.OnDidFailLoadingMapListener {
+            mapLoadFailed = true
+        }
+        mapView.addOnDidFailLoadingMapListener(failListener)
+
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> mapView.onStart()
+                Lifecycle.Event.ON_RESUME -> mapView.onResume()
+                Lifecycle.Event.ON_PAUSE -> mapView.onPause()
+                Lifecycle.Event.ON_STOP -> mapView.onStop()
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+            mapView.onStart()
+        }
+        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+            mapView.onResume()
+        }
+        onDispose {
+            mapView.removeOnDidFailLoadingMapListener(failListener)
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            mapView.onPause()
+            mapView.onStop()
+            mapView.onDestroy()
+        }
+    }
+
+    LaunchedEffect(mapView) {
+        mapView.getMapAsync { map ->
+            map.uiSettings.apply {
+                isLogoEnabled = false
+                isAttributionEnabled = false
+                isCompassEnabled = false
+                isScrollGesturesEnabled = false
+                isZoomGesturesEnabled = false
+                isRotateGesturesEnabled = false
+                isTiltGesturesEnabled = false
+                isDoubleTapGesturesEnabled = false
+                isQuickZoomGesturesEnabled = false
+            }
+            mapLibreRef = map
+            map.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(latitude, longitude), 14.5))
+            map.setStyle(Style.Builder().fromUri(if (isDarkStyle) STYLE_OPENFREEMAP_DARK else STYLE_OPENFREEMAP_LIBERTY)) {
+                mapLoadFailed = false
+            }
+        }
+    }
+
+    LaunchedEffect(mapLibreRef, latitude, longitude) {
+        val map = mapLibreRef ?: return@LaunchedEffect
+        map.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(latitude, longitude), 14.5))
+    }
+
+    LaunchedEffect(isDarkStyle, mapLibreRef) {
+        val map = mapLibreRef ?: return@LaunchedEffect
+        val targetUri = if (isDarkStyle) STYLE_OPENFREEMAP_DARK else STYLE_OPENFREEMAP_LIBERTY
+        if (map.style?.uri != targetUri) {
+            map.setStyle(Style.Builder().fromUri(targetUri)) {
+                mapLoadFailed = false
+            }
+        }
+    }
+
+    val thumbRequest = remember(thumbnailData, thumbnailMemoryKey) {
+        thumbnailData?.let { data ->
+            ImageRequest.Builder(context)
+                .data(data)
+                .apply {
+                    if (!thumbnailMemoryKey.isNullOrBlank()) {
+                        memoryCacheKey(thumbnailMemoryKey)
+                    }
+                }
+                .size(160)
+                .build()
+        }
+    }
+
+    Box(
+        modifier = modifier
+            .background(if (isDarkStyle) Color(0xFF14171D) else Color(0xFFE4EEF3))
+    ) {
+        AndroidView(
+            factory = { mapView },
+            modifier = Modifier.fillMaxSize()
+        )
+
+        // Centered photo-thumbnail location pin anchored directly onto the capture coordinate
+        Box(
+            modifier = Modifier.align(Alignment.Center),
+            contentAlignment = Alignment.BottomCenter
+        ) {
+            // Soft GPS pulse dot right at the coordinate point
+            Box(
+                modifier = Modifier
+                    .size(12.dp)
+                    .clip(CircleShape)
+                    .background(Color(0xFF2B7CFF).copy(alpha = 0.28f))
+                    .padding(3.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(CircleShape)
+                        .background(Color(0xFF2B7CFF))
+                )
+            }
+
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.padding(bottom = 6.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .shadow(elevation = 6.dp, shape = RoundedCornerShape(11.dp))
+                        .clip(RoundedCornerShape(11.dp))
+                        .background(Color.White)
+                        .padding(2.5.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clip(RoundedCornerShape(8.5.dp))
+                            .background(Color(0xFF23252C)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (thumbRequest != null) {
+                            AsyncImage(
+                                model = thumbRequest,
+                                imageLoader = imageLoader,
+                                contentDescription = null,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Rounded.MyLocation,
+                                contentDescription = null,
+                                tint = Color(0xFF2B7CFF),
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+                }
+                Canvas(modifier = Modifier.size(width = 12.dp, height = 7.dp)) {
+                    val path = Path().apply {
+                        moveTo(0f, 0f)
+                        lineTo(size.width, 0f)
+                        lineTo(size.width / 2f, size.height)
+                        close()
+                    }
+                    drawPath(path = path, color = Color.White)
+                }
+            }
+        }
+
+        // Top-right light/dark style toggle
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(10.dp)
+                .size(32.dp)
+                .shadow(4.dp, CircleShape)
+                .clip(CircleShape)
+                .background(Color(0xD91B1B1F))
+                .border(0.7.dp, Color.White.copy(alpha = 0.16f), CircleShape)
+                .oneUiClickable(pressedScale = 0.88f, hoveredScale = 1.05f) {
+                    isDarkStyle = !isDarkStyle
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = if (isDarkStyle) Icons.Rounded.LightMode else Icons.Rounded.DarkMode,
+                contentDescription = if (isDarkStyle) "Light map" else "Dark map",
+                tint = Color.White,
+                modifier = Modifier.size(16.dp)
+            )
+        }
+
+        // Subtle OpenFreeMap / offline attribution pill
+        Text(
+            text = if (mapLoadFailed) "Offline preview" else "© OpenFreeMap",
+            fontSize = 9.sp,
+            color = if (isDarkStyle) Color.White.copy(alpha = 0.72f) else Color(0xFF303036).copy(alpha = 0.82f),
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(start = 10.dp, top = 10.dp)
+                .clip(RoundedCornerShape(6.dp))
+                .background(
+                    if (isDarkStyle) Color.Black.copy(alpha = 0.56f)
+                    else Color.White.copy(alpha = 0.82f)
+                )
+                .padding(horizontal = 6.dp, vertical = 2.dp)
+        )
+    }
+}

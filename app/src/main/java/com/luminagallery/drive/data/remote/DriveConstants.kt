@@ -16,6 +16,11 @@ object DriveConstants {
             "imageMediaMetadata(width,height,rotation,time,cameraMake,cameraModel,exposureTime,aperture,isoSpeed,focalLength,lens)," +
             "videoMediaMetadata(width,height,durationMillis)"
 
+    const val DETAIL_FILE_FIELDS: String =
+        "id,name,mimeType,parents,size,createdTime,modifiedTime,thumbnailLink,trashed," +
+            "imageMediaMetadata(width,height,rotation,time,cameraMake,cameraModel,exposureTime,aperture,isoSpeed,focalLength,lens,flashUsed,meteringMode,colorSpace,whiteBalance,exposureBias,location(latitude,longitude,altitude))," +
+            "videoMediaMetadata(width,height,durationMillis)"
+
     const val SINGLE_FILE_FIELDS: String = FILE_FIELDS_BODY
     const val FILES_LIST_FIELDS: String = "nextPageToken,files($FILE_FIELDS_BODY)"
     const val CHANGES_LIST_FIELDS: String =

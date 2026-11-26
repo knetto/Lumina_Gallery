@@ -112,6 +112,9 @@ interface SmartRecognitionDao {
     @Query("SELECT * FROM photo_smart_index WHERE itemId = :itemId LIMIT 1")
     fun observeSmartIndexForPhoto(itemId: String): Flow<PhotoSmartIndexEntity?>
 
+    @Query("SELECT * FROM photo_smart_index WHERE itemId = :itemId LIMIT 1")
+    suspend fun getSmartIndexForPhoto(itemId: String): PhotoSmartIndexEntity?
+
     @Upsert
     suspend fun upsertSmartIndex(entries: List<PhotoSmartIndexEntity>)
 

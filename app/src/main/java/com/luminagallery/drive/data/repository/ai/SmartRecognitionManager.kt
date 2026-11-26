@@ -198,6 +198,157 @@ class SmartRecognitionManager(
     fun observeSmartIndexForPhoto(itemId: String): Flow<PhotoSmartIndexEntity?> =
         smartDao.observeSmartIndexForPhoto(itemId)
 
+    /**
+     * Instant single-photo on-demand AI recognition for the swipe-up Details sheet.
+     *  - Never indexes or leaks locked/hidden vault items.
+     *  - If already in `photo_smart_index`, returns its cached labels immediately.
+     *  - If the background scan mutex is free, runs full face + animal/object recognition and
+     *    persists to Room so People & Tags update immediately everywhere.
+     *  - If a background scan is already running, falls back to a fast read-only label/animal pass
+     *    so the user still gets instant animal & scene tags without waiting on the full scan.
+     */
+    suspend fun analyzePhotoOnDemand(item: MediaItem): List<String> = withContext(Dispatchers.IO) {
+        if (item.isRaw) return@withContext emptyList()
+        if (HiddenLockedFolderManager.isHiddenFileUri(item.localContentUri)) return@withContext emptyList()
+        val blockedFolderIds = computeBlockedFolderIdsFromDb()
+        if (item.parentId in blockedFolderIds) return@withContext emptyList()
+
+        val existing = smartDao.getSmartIndexForPhoto(item.id)
+        if (existing != null) {
+            return@withContext existing.labelsCsv.split(",")
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+        }
+
+        if (scanMutex.tryLock()) {
+            try {
+                // Re-check inside lock
+                smartDao.getSmartIndexForPhoto(item.id)?.let { cached ->
+                    return@withContext cached.labelsCsv.split(",")
+                        .map { it.trim() }
+                        .filter { it.isNotEmpty() }
+                }
+                val bitmap = decodeScanBitmap(item) ?: return@withContext emptyList()
+                try {
+                    val inputImage = InputImage.fromBitmap(bitmap, 0)
+                    val facesResult = runCatching {
+                        Tasks.await(faceDetector.process(inputImage), ML_TIMEOUT_SEC, TimeUnit.SECONDS)
+                    }
+                    val labelsResult = runCatching {
+                        Tasks.await(imageLabeler.process(inputImage), ML_TIMEOUT_SEC, TimeUnit.SECONDS)
+                    }
+                    if (isModelDownloadingException(facesResult.exceptionOrNull()) ||
+                        isModelDownloadingException(labelsResult.exceptionOrNull())
+                    ) {
+                        return@withContext emptyList()
+                    }
+                    val detectedFaces = facesResult.getOrDefault(emptyList())
+                    val rawMlLabels = labelsResult.getOrDefault(emptyList()).map { it.text to it.confidence }
+                    val wholeProbs = objectEngine.classifyProbabilities(bitmap)
+                    val wholeAnimal = wholeProbs?.let { AnimalTaxonomy.analyze(it) }
+                    val rawImageNetLabels = if (wholeProbs != null) {
+                        objectEngine.topLabels(wholeProbs, topK = 5, minConfidence = 0.22f, excludeAnimals = true)
+                    } else {
+                        emptyList()
+                    }
+                    val animalSpecificLabel = if (wholeProbs != null && wholeAnimal != null) {
+                        wholeAnimal.dominantTopIndex
+                            .takeIf { idx -> idx >= 0 && (wholeProbs.getOrNull(idx) ?: 0f) >= 0.25f }
+                            ?.let { idx -> objectEngine.labelAt(idx) }
+                    } else null
+
+                    val mergedObjects = SmartObjectVocabulary.mergeSceneAndObjectLabels(
+                        mlKitLabels = rawMlLabels,
+                        imageNetLabels = rawImageNetLabels,
+                        animal = wholeAnimal,
+                        animalSpecificLabel = animalSpecificLabel
+                    )
+                    val now = System.currentTimeMillis()
+                    val inMemoryClusters = smartDao.getAllPersons()
+                        .associateByTo(LinkedHashMap()) { it.personId }
+                        .mapValuesTo(LinkedHashMap()) { (_, entity) ->
+                            MutableClusterState(
+                                entity = entity,
+                                centroid = FaceClusteringEngine.decodeEmbedding(entity.centroidBlob)
+                            )
+                        }
+                    val usedPersonIds = HashSet<String>()
+                    val dirtyClusterIds = LinkedHashSet<String>()
+                    val newFaces = ArrayList<DetectedFaceEntity>(detectedFaces.size)
+                    for ((idx, face) in detectedFaces.withIndex()) {
+                        val processed = processSingleFace(
+                            bitmap = bitmap,
+                            item = item,
+                            face = face,
+                            faceIndex = idx,
+                            now = now,
+                            clusters = inMemoryClusters,
+                            forbiddenPersonIds = usedPersonIds,
+                            wholePhotoAnimal = wholeAnimal
+                        )
+                        if (processed != null) {
+                            processed.personId?.let { pid ->
+                                usedPersonIds.add(pid)
+                                dirtyClusterIds.add(pid)
+                            }
+                            newFaces.add(processed)
+                        }
+                    }
+                    val clustersToWrite = dirtyClusterIds.mapNotNull { inMemoryClusters[it]?.entity }
+                    val indexEntry = PhotoSmartIndexEntity(
+                        itemId = item.id,
+                        dateModifiedMs = item.createdTimeEpochMs,
+                        faceCount = newFaces.size,
+                        labelsCsv = mergedObjects.displayLabels.joinToString(","),
+                        labelSearchTokens = mergedObjects.searchTokens,
+                        isDriveItem = !item.isLocal,
+                        indexedAtEpochMs = now
+                    )
+                    database.withTransaction {
+                        if (clustersToWrite.isNotEmpty()) smartDao.upsertPersons(clustersToWrite)
+                        if (newFaces.isNotEmpty()) smartDao.upsertFaces(newFaces)
+                        smartDao.upsertSmartIndex(listOf(indexEntry))
+                    }
+                    return@withContext mergedObjects.displayLabels
+                } finally {
+                    bitmap.recycle()
+                }
+            } finally {
+                scanMutex.unlock()
+            }
+        } else {
+            // Background scan is running: compute lightweight read-only labels immediately
+            val bitmap = decodeScanBitmap(item) ?: return@withContext emptyList()
+            try {
+                val inputImage = InputImage.fromBitmap(bitmap, 0)
+                val rawMlLabels = runCatching {
+                    Tasks.await(imageLabeler.process(inputImage), ML_TIMEOUT_SEC, TimeUnit.SECONDS)
+                        .map { it.text to it.confidence }
+                }.getOrDefault(emptyList())
+                val wholeProbs = objectEngine.classifyProbabilities(bitmap)
+                val wholeAnimal = wholeProbs?.let { AnimalTaxonomy.analyze(it) }
+                val rawImageNetLabels = if (wholeProbs != null) {
+                    objectEngine.topLabels(wholeProbs, topK = 5, minConfidence = 0.22f, excludeAnimals = true)
+                } else {
+                    emptyList()
+                }
+                val animalSpecificLabel = if (wholeProbs != null && wholeAnimal != null) {
+                    wholeAnimal.dominantTopIndex
+                        .takeIf { idx -> idx >= 0 && (wholeProbs.getOrNull(idx) ?: 0f) >= 0.25f }
+                        ?.let { idx -> objectEngine.labelAt(idx) }
+                } else null
+                return@withContext SmartObjectVocabulary.mergeSceneAndObjectLabels(
+                    mlKitLabels = rawMlLabels,
+                    imageNetLabels = rawImageNetLabels,
+                    animal = wholeAnimal,
+                    animalSpecificLabel = animalSpecificLabel
+                ).displayLabels
+            } finally {
+                bitmap.recycle()
+            }
+        }
+    }
+
     fun pauseActiveScan() {
         pauseRequested = true
     }
@@ -704,9 +855,11 @@ class SmartRecognitionManager(
                     } else {
                         emptyList()
                     }
-                    val animalSpecificLabel = wholeAnimal?.dominantTopIndex
-                        ?.takeIf { idx -> idx >= 0 && (wholeProbs?.getOrNull(idx) ?: 0f) >= 0.25f }
-                        ?.let { idx -> objectEngine.labelAt(idx) }
+                    val animalSpecificLabel = if (wholeProbs != null && wholeAnimal != null) {
+                        wholeAnimal.dominantTopIndex
+                            .takeIf { idx -> idx >= 0 && (wholeProbs.getOrNull(idx) ?: 0f) >= 0.25f }
+                            ?.let { idx -> objectEngine.labelAt(idx) }
+                    } else null
 
                     val mergedObjects = SmartObjectVocabulary.mergeSceneAndObjectLabels(
                         mlKitLabels = rawMlLabels,

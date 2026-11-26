@@ -109,10 +109,11 @@ class SearchViewModel(
     private val smartRecognitionManager: SmartRecognitionManager,
     private val preferencesManager: PreferencesManager,
     private val exportMediaUseCase: ExportMediaUseCase,
-    private val networkMonitor: NetworkMonitor
+    private val networkMonitor: NetworkMonitor,
+    initialQuery: String = ""
 ) : ViewModel() {
 
-    private val queryFlow = MutableStateFlow("")
+    private val queryFlow = MutableStateFlow(initialQuery)
     private val mediaTypeFlow = MutableStateFlow<MediaType?>(null)
     private val onlyWithTextFlow = MutableStateFlow(false)
     private val selectedPersonIdsFlow = MutableStateFlow<Set<String>>(emptySet())
@@ -765,7 +766,10 @@ class SearchViewModel(
         private val localCameraMetaCache = ConcurrentHashMap<String, String>()
     }
 
-    class Factory(private val container: AppContainer) : ViewModelProvider.Factory {
+    class Factory(
+        private val container: AppContainer,
+        private val initialQuery: String = ""
+    ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T = SearchViewModel(
             appContext = container.appContext,
@@ -776,7 +780,8 @@ class SearchViewModel(
             smartRecognitionManager = container.smartRecognitionManager,
             preferencesManager = container.preferencesManager,
             exportMediaUseCase = container.exportMediaUseCase,
-            networkMonitor = container.networkMonitor
+            networkMonitor = container.networkMonitor,
+            initialQuery = initialQuery
         ) as T
     }
 }

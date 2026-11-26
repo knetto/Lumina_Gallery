@@ -79,6 +79,76 @@ object FormatUtils {
         return String.format(Locale.US, "%.1f MP", mp)
     }
 
+    fun formatExposureBias(ev: Float?): String? {
+        if (ev == null || !ev.isFinite()) return null
+        if (kotlin.math.abs(ev) < 0.05f) return "0 EV"
+        return String.format(Locale.US, "%+.1f EV", ev)
+    }
+
+    fun formatBitrate(bps: Long?): String? {
+        if (bps == null || bps <= 0L) return null
+        return when {
+            bps >= 1_000_000L -> String.format(Locale.US, "%.1f Mbps", bps / 1_000_000.0)
+            bps >= 1_000L -> String.format(Locale.US, "%.0f kbps", bps / 1_000.0)
+            else -> "$bps bps"
+        }
+    }
+
+    fun formatFrameRate(fps: Float?): String? {
+        if (fps == null || !fps.isFinite() || fps <= 0f) return null
+        val rounded = fps.roundToInt()
+        return if (kotlin.math.abs(fps - rounded) < 0.15f) {
+            "$rounded fps"
+        } else {
+            String.format(Locale.US, "%.1f fps", fps)
+        }
+    }
+
+    fun formatCoordinates(lat: Double, lon: Double): String {
+        val ns = if (lat >= 0.0) "N" else "S"
+        val ew = if (lon >= 0.0) "E" else "W"
+        return String.format(
+            Locale.US,
+            "%.4f° %s, %.4f° %s",
+            kotlin.math.abs(lat),
+            ns,
+            kotlin.math.abs(lon),
+            ew
+        )
+    }
+
+    fun formatAltitude(altitudeMeters: Double?): String? {
+        if (altitudeMeters == null || !altitudeMeters.isFinite()) return null
+        return "${altitudeMeters.roundToInt()} m"
+    }
+
+    fun formatAspectRatio(width: Int?, height: Int?): String? {
+        if (width == null || height == null || width <= 0 || height <= 0) return null
+        val longSide = maxOf(width, height).toDouble()
+        val shortSide = minOf(width, height).toDouble()
+        val ratio = longSide / shortSide
+        val isPortrait = height > width
+        val named = when {
+            kotlin.math.abs(ratio - 1.0) < 0.03 -> "1:1"
+            kotlin.math.abs(ratio - 4.0 / 3.0) < 0.04 -> if (isPortrait) "3:4" else "4:3"
+            kotlin.math.abs(ratio - 3.0 / 2.0) < 0.04 -> if (isPortrait) "2:3" else "3:2"
+            kotlin.math.abs(ratio - 16.0 / 9.0) < 0.05 -> if (isPortrait) "9:16" else "16:9"
+            kotlin.math.abs(ratio - 16.0 / 10.0) < 0.05 -> if (isPortrait) "10:16" else "16:10"
+            kotlin.math.abs(ratio - 20.0 / 9.0) < 0.06 -> if (isPortrait) "9:20" else "20:9"
+            kotlin.math.abs(ratio - 21.0 / 9.0) < 0.06 -> if (isPortrait) "9:21" else "21:9"
+            else -> null
+        }
+        return named
+    }
+
+    private val COMPACT_DATE_FMT: DateTimeFormatter =
+        DateTimeFormatter.ofPattern("MMM d, yyyy", Locale.getDefault())
+
+    fun formatCalendarDate(epochMs: Long): String {
+        if (epochMs <= 0L) return ""
+        return COMPACT_DATE_FMT.format(Instant.ofEpochMilli(epochMs).atZone(ZoneId.systemDefault()))
+    }
+
     fun formatFolderSummary(subfolderCount: Int, mediaCount: Int): String = when {
         subfolderCount > 0 && mediaCount > 0 ->
             "$subfolderCount ${if (subfolderCount == 1) "folder" else "folders"} · $mediaCount"

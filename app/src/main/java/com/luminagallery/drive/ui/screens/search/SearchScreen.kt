@@ -780,6 +780,10 @@ fun SearchScreen(
             onOpenPerson = { pid ->
                 viewModel.closeInfoSheet()
                 onOpenPersonDetail(pid)
+            },
+            onSearchTag = { tag ->
+                viewModel.closeInfoSheet()
+                viewModel.onQueryChanged(tag)
             }
         )
     }

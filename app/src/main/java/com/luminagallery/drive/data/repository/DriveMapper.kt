@@ -1,5 +1,6 @@
 package com.luminagallery.drive.data.repository
 
+import com.luminagallery.drive.data.local.MediaDateResolver
 import com.luminagallery.drive.data.local.dao.FolderWithStatsRow
 import com.luminagallery.drive.data.local.dao.PinnedRootWithStatsRow
 import com.luminagallery.drive.data.local.entity.DriveItemEntity
@@ -71,7 +72,12 @@ object DriveMapper {
         val exifEpochMs = parseExifTimestamp(imageMeta?.time)
         val createdEpochMs = parseIsoTimestamp(dto.createdTime)
         val modifiedEpochMs = parseIsoTimestamp(dto.modifiedTime)
-        val effectiveCreatedMs = exifEpochMs ?: createdEpochMs ?: modifiedEpochMs ?: 0L
+        val resolvedTimestamp = MediaDateResolver.resolveEffectiveTimestamp(
+            fileName = dto.name,
+            mediaStoreDateTakenMs = exifEpochMs ?: 0L,
+            fileModifiedMs = createdEpochMs ?: modifiedEpochMs ?: 0L
+        )
+        val effectiveCreatedMs = resolvedTimestamp.epochMs
         val effectiveModifiedMs = modifiedEpochMs ?: createdEpochMs ?: 0L
 
         return DriveItemEntity(
@@ -105,7 +111,18 @@ object DriveMapper {
 
     fun entityToMediaItem(entity: DriveItemEntity): MediaItem {
         val zone = ZoneId.systemDefault()
-        val epoch = entity.createdTimeEpochMs
+        val hasRealExifDate = !entity.dateTakenIso.isNullOrBlank() &&
+            entity.dateTakenIso != entity.createdTimeIso
+        val rawUploadMs = parseIsoTimestamp(entity.createdTimeIso)
+            ?: entity.modifiedTimeEpochMs.takeIf { it > 0L }
+            ?: entity.createdTimeEpochMs
+        val resolved = MediaDateResolver.resolveEffectiveTimestamp(
+            fileName = entity.name,
+            mediaStoreDateTakenMs = if (hasRealExifDate) entity.createdTimeEpochMs else 0L,
+            fileModifiedMs = rawUploadMs,
+            zone = zone
+        )
+        val epoch = resolved.epochMs.takeIf { it > 0L } ?: entity.createdTimeEpochMs
         val (monthYear, fullDate) = if (epoch > 0L) {
             val zdt = Instant.ofEpochMilli(epoch).atZone(zone)
             MONTH_YEAR_FORMATTER.format(zdt) to FULL_DATE_FORMATTER.format(zdt)
@@ -140,7 +157,9 @@ object DriveMapper {
                 isoSpeed = entity.isoSpeed,
                 focalLength = entity.focalLength,
                 dateTakenDisplay = fullDate
-            )
+            ),
+            dateRecoveredFromFilename = resolved.correctedFromFilename,
+            fileModifiedEpochMs = entity.modifiedTimeEpochMs
         )
     }
 

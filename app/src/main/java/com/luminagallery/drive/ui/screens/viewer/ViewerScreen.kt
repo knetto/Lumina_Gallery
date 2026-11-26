@@ -197,6 +197,7 @@ fun ViewerScreen(
     onActiveItemChanged: (String) -> Unit,
     onOpenEditor: (itemId: String, sourceUri: String, displayName: String, isLocal: Boolean) -> Unit = { _, _, _, _ -> },
     onOpenPerson: ((personId: String) -> Unit)? = null,
+    onSearchTag: ((tag: String) -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -1123,6 +1124,12 @@ fun ViewerScreen(
                 { pid ->
                     viewModel.closeExifSheet()
                     openFn(pid)
+                }
+            },
+            onSearchTag = onSearchTag?.let { searchFn ->
+                { tag ->
+                    viewModel.closeExifSheet()
+                    searchFn(tag)
                 }
             }
         )

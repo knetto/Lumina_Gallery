@@ -69,6 +69,7 @@ class LocalMediaRepository(
     private val repoScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val permissionRefreshTrigger = MutableStateFlow(0)
     private val geocodeCache = ConcurrentHashMap<String, Pair<String, String>>() // roundedCoord -> (city, country)
+    private val detailedAddressCache = ConcurrentHashMap<String, String>() // fineCoord -> full readable address
 
     // Pre-indexed in-memory snapshots for 0ms Frame-0 album opening (zero copy: shares exact MediaItem instances)
     @Volatile
@@ -330,29 +331,98 @@ class LocalMediaRepository(
         }
     }.flowOn(Dispatchers.Default)
 
-    suspend fun readLocalExifAndPath(item: MediaItem): Pair<ExifMetadata, String> =
+    suspend fun readLocalExifAndPath(
+        item: MediaItem,
+        resolveAddress: Boolean = false
+    ): Pair<ExifMetadata, String> =
         withContext(Dispatchers.IO) {
             val displayPath = item.relativePath?.trimEnd('/')?.ifBlank { "Internal Storage" }
                 ?: "Internal Storage"
-            if (item.isVideo || item.localContentUri.isNullOrBlank()) {
-                return@withContext item.exif to "On Device / $displayPath"
+            val fullPathLabel = "On Device / $displayPath"
+            val uriStr = item.localContentUri
+            if (uriStr.isNullOrBlank()) {
+                return@withContext item.exif to fullPathLabel
+            }
+
+            if (item.isVideo) {
+                val videoMeta = readLocalVideoMetadata(item, uriStr, resolveAddress)
+                return@withContext videoMeta to fullPathLabel
             }
 
             val exifMeta = runCatching {
-                val uri = Uri.parse(item.localContentUri)
-                context.contentResolver.openInputStream(uri)?.use { stream ->
-                    val exif = ExifInterface(stream)
+                val parsed = Uri.parse(uriStr)
+                val originalUri = if (
+                    parsed.scheme == "content" &&
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+                    hasMediaLocationPermission()
+                ) {
+                    runCatching { MediaStore.setRequireOriginal(parsed) }.getOrDefault(parsed)
+                } else {
+                    parsed
+                }
+                val stream = runCatching { context.contentResolver.openInputStream(originalUri) }.getOrNull()
+                    ?: context.contentResolver.openInputStream(parsed)
+                stream?.use { input ->
+                    val exif = ExifInterface(input)
                     val make = exif.getAttribute(ExifInterface.TAG_MAKE)?.trim()?.takeIf { it.isNotEmpty() }
                     val model = exif.getAttribute(ExifInterface.TAG_MODEL)?.trim()?.takeIf { it.isNotEmpty() }
-                    val lens = exif.getAttribute(ExifInterface.TAG_LENS_MODEL)?.trim()?.takeIf { it.isNotEmpty() }
+                    val lensModel = exif.getAttribute(ExifInterface.TAG_LENS_MODEL)?.trim()?.takeIf { it.isNotEmpty() }
+                    val lensMake = exif.getAttribute(ExifInterface.TAG_LENS_MAKE)?.trim()?.takeIf { it.isNotEmpty() }
+                    val lens = when {
+                        lensModel != null && lensMake != null && !lensModel.startsWith(lensMake, ignoreCase = true) ->
+                            "$lensMake $lensModel"
+                        lensModel != null -> lensModel
+                        else -> null
+                    }
                     val aperture = exif.getAttributeDouble(ExifInterface.TAG_F_NUMBER, -1.0)
-                        .takeIf { it > 0.0 }?.toFloat()
+                        .takeIf { it > 0.0 }
+                        ?.toFloat()
+                        ?: exif.getAttributeDouble(ExifInterface.TAG_APERTURE_VALUE, -1.0)
+                            .takeIf { it > 0.0 }
+                            ?.let { apex -> Math.pow(2.0, apex / 2.0).toFloat() }
                     val exposure = exif.getAttributeDouble(ExifInterface.TAG_EXPOSURE_TIME, -1.0)
                         .takeIf { it > 0.0 }?.toFloat()
                     val iso = exif.getAttributeInt(ExifInterface.TAG_PHOTOGRAPHIC_SENSITIVITY, -1)
                         .takeIf { it > 0 }
+                        ?: exif.getAttributeInt(ExifInterface.TAG_ISO_SPEED, -1).takeIf { it > 0 }
                     val focal = exif.getAttributeDouble(ExifInterface.TAG_FOCAL_LENGTH, -1.0)
                         .takeIf { it > 0.0 }?.toFloat()
+                    val focal35 = exif.getAttributeInt(ExifInterface.TAG_FOCAL_LENGTH_IN_35MM_FILM, -1)
+                        .takeIf { it > 0 }
+                    val exposureBias = exif.getAttributeDouble(ExifInterface.TAG_EXPOSURE_BIAS_VALUE, Double.NaN)
+                        .takeIf { it.isFinite() }?.toFloat()
+                    val flashRaw = exif.getAttributeInt(ExifInterface.TAG_FLASH, -1)
+                    val flashDesc = decodeFlashTag(flashRaw)
+                    val wbRaw = exif.getAttributeInt(ExifInterface.TAG_WHITE_BALANCE, -1)
+                    val whiteBalance = when (wbRaw) {
+                        ExifInterface.WHITE_BALANCE_AUTO.toInt() -> "Auto"
+                        ExifInterface.WHITE_BALANCE_MANUAL.toInt() -> "Manual"
+                        else -> null
+                    }
+                    val meteringRaw = exif.getAttributeInt(ExifInterface.TAG_METERING_MODE, -1)
+                    val meteringMode = decodeMeteringMode(meteringRaw)
+                    val colorSpaceRaw = exif.getAttributeInt(ExifInterface.TAG_COLOR_SPACE, -1)
+                    val colorSpace = when (colorSpaceRaw) {
+                        ExifInterface.COLOR_SPACE_S_RGB -> "sRGB"
+                        ExifInterface.COLOR_SPACE_UNCALIBRATED -> "Wide / P3"
+                        else -> null
+                    }
+                    val digitalZoom = exif.getAttributeDouble(ExifInterface.TAG_DIGITAL_ZOOM_RATIO, -1.0)
+                        .takeIf { it > 1.05 && it < 200.0 }?.toFloat()
+                    val software = exif.getAttribute(ExifInterface.TAG_SOFTWARE)?.trim()?.takeIf { it.isNotEmpty() }
+                    val dateOrig = exif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL)?.trim()?.takeIf { it.isNotEmpty() }
+                    val orientationLabel = inferOrientationLabel(item.effectiveWidth, item.effectiveHeight)
+
+                    val coords = exif.latLong
+                    val lat = coords?.getOrNull(0)?.takeIf { it.isFinite() && it in -90.0..90.0 }
+                    val lon = coords?.getOrNull(1)?.takeIf { it.isFinite() && it in -180.0..180.0 }
+                    val hasValidCoords = lat != null && lon != null && (lat != 0.0 || lon != 0.0)
+                    val altitude = if (hasValidCoords && exif.getAttribute(ExifInterface.TAG_GPS_ALTITUDE) != null) {
+                        exif.getAltitude(Double.NaN).takeIf { it.isFinite() && it in -500.0..15_000.0 }
+                    } else null
+                    val address = if (lat != null && lon != null && hasValidCoords && resolveAddress) {
+                        resolveDetailedAddress(lat, lon)
+                    } else null
 
                     ExifMetadata(
                         cameraMake = make,
@@ -362,13 +432,181 @@ class LocalMediaRepository(
                         exposureTime = exposure,
                         isoSpeed = iso,
                         focalLength = focal,
-                        dateTakenDisplay = item.fullDateLabel
+                        dateTakenDisplay = item.fullDateLabel,
+                        focalLength35mm = focal35,
+                        exposureBiasEv = exposureBias,
+                        flashDescription = flashDesc,
+                        whiteBalance = whiteBalance,
+                        meteringMode = meteringMode,
+                        colorSpace = colorSpace,
+                        digitalZoomRatio = digitalZoom,
+                        software = software,
+                        orientationLabel = orientationLabel,
+                        exifDateOriginal = dateOrig,
+                        latitude = if (hasValidCoords) lat else null,
+                        longitude = if (hasValidCoords) lon else null,
+                        altitudeMeters = altitude,
+                        locationAddress = address
                     )
                 }
             }.getOrNull() ?: item.exif
 
-            exifMeta to "On Device / $displayPath"
+            exifMeta to fullPathLabel
         }
+
+    private suspend fun readLocalVideoMetadata(
+        item: MediaItem,
+        uriStr: String,
+        resolveAddress: Boolean
+    ): ExifMetadata {
+        val parsed = Uri.parse(uriStr)
+        val originalUri = if (
+            parsed.scheme == "content" &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+            hasMediaLocationPermission()
+        ) {
+            runCatching { MediaStore.setRequireOriginal(parsed) }.getOrDefault(parsed)
+        } else {
+            parsed
+        }
+        return runCatching {
+            val retriever = MediaMetadataRetriever()
+            try {
+                if (originalUri.scheme == "file" && !originalUri.path.isNullOrBlank()) {
+                    retriever.setDataSource(originalUri.path)
+                } else {
+                    retriever.setDataSource(context, originalUri)
+                }
+                val locStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_LOCATION)
+                val latLon = locStr?.let(::parseIso6709)
+                val bitrate = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE)
+                    ?.toLongOrNull()?.takeIf { it > 0L }
+                val captureFps = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CAPTURE_FRAMERATE)
+                    ?.toFloatOrNull()?.takeIf { it > 0f && it <= 480f }
+                val computedFps = if (captureFps != null) {
+                    captureFps
+                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    val frames = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_FRAME_COUNT)
+                        ?.toLongOrNull()
+                    val durMs = item.durationMillis
+                        ?: retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
+                    if (frames != null && frames > 0L && durMs != null && durMs >= 500L) {
+                        (frames.toDouble() / (durMs / 1000.0)).toFloat().takeIf { it in 1f..480f }
+                    } else null
+                } else null
+                val rawMime = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE)
+                val codecLabel = when {
+                    rawMime?.contains("hevc", ignoreCase = true) == true -> "HEVC (H.265)"
+                    rawMime?.contains("avc", ignoreCase = true) == true -> "H.264 / AVC"
+                    rawMime?.contains("vp9", ignoreCase = true) == true -> "VP9"
+                    rawMime?.contains("av01", ignoreCase = true) == true -> "AV1"
+                    rawMime?.contains("mp4", ignoreCase = true) == true -> "MP4"
+                    rawMime?.contains("webm", ignoreCase = true) == true -> "WebM"
+                    rawMime?.contains("quicktime", ignoreCase = true) == true -> "QuickTime MOV"
+                    rawMime?.contains("matroska", ignoreCase = true) == true -> "Matroska MKV"
+                    !rawMime.isNullOrBlank() -> rawMime.substringAfter('/').uppercase(Locale.US)
+                    else -> null
+                }
+                val hasAudio = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO)
+                val sampleRateHz = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_SAMPLERATE)?.toIntOrNull()
+                } else null
+                val audioSummary = when {
+                    hasAudio.equals("yes", ignoreCase = true) && sampleRateHz != null && sampleRateHz > 0 ->
+                        String.format(Locale.US, "%.1f kHz audio", sampleRateHz / 1000.0)
+                    hasAudio.equals("yes", ignoreCase = true) -> "Audio included"
+                    hasAudio != null -> "No audio"
+                    else -> null
+                }
+                val address = if (latLon != null && resolveAddress) {
+                    resolveDetailedAddress(latLon.first, latLon.second)
+                } else null
+
+                item.exif.copy(
+                    dateTakenDisplay = item.fullDateLabel,
+                    orientationLabel = inferOrientationLabel(item.effectiveWidth, item.effectiveHeight),
+                    latitude = latLon?.first,
+                    longitude = latLon?.second,
+                    locationAddress = address,
+                    videoFrameRate = computedFps,
+                    videoBitrateBps = bitrate,
+                    videoCodec = codecLabel,
+                    audioSummary = audioSummary
+                )
+            } finally {
+                runCatching { retriever.release() }
+            }
+        }.getOrDefault(item.exif)
+    }
+
+    @Suppress("DEPRECATION")
+    suspend fun resolveDetailedAddress(lat: Double, lon: Double): String? = withContext(Dispatchers.IO) {
+        if (lat == 0.0 && lon == 0.0) return@withContext null
+        val fineKey = "${String.format(Locale.US, "%.4f", lat)},${String.format(Locale.US, "%.4f", lon)}"
+        detailedAddressCache[fineKey]?.let { return@withContext it }
+
+        val geocoder = if (Geocoder.isPresent()) Geocoder(context, Locale.getDefault()) else null
+        val addr = runCatching { geocoder?.getFromLocation(lat, lon, 1)?.firstOrNull() }.getOrNull()
+        if (addr != null) {
+            val street = listOfNotNull(
+                addr.thoroughfare?.takeIf { it.isNotBlank() },
+                addr.subLocality?.takeIf { it.isNotBlank() && it != addr.thoroughfare }
+            ).firstOrNull()
+            val city = addr.locality?.takeIf { it.isNotBlank() }
+                ?: addr.subAdminArea?.takeIf { it.isNotBlank() }
+                ?: addr.adminArea?.takeIf { it.isNotBlank() }
+            val country = addr.countryName?.takeIf { it.isNotBlank() }
+            val formatted = listOfNotNull(street, city, country)
+                .distinct()
+                .joinToString(", ")
+                .trim()
+            if (formatted.isNotEmpty()) {
+                if (detailedAddressCache.size > 1_000) detailedAddressCache.clear()
+                detailedAddressCache[fineKey] = formatted
+                return@withContext formatted
+            }
+        }
+        val (city, country, resolved) = resolveCityAndCountryWithStatus(lat, lon)
+        if (resolved) {
+            listOf(city, country).filter { it.isNotBlank() && it != "Other" }.distinct().joinToString(", ")
+                .takeIf { it.isNotBlank() }
+        } else {
+            null
+        }
+    }
+
+    private fun decodeFlashTag(flashRaw: Int): String? {
+        if (flashRaw < 0) return null
+        val fired = (flashRaw and 0x1) != 0
+        val mode = (flashRaw ushr 3) and 0x3
+        val noFlashFunction = (flashRaw and 0x20) != 0
+        if (noFlashFunction) return "No flash"
+        return when (mode) {
+            1 -> if (fired) "Forced · Fired" else "Forced · Off"
+            2 -> "Off"
+            3 -> if (fired) "Auto · Fired" else "Auto · Off"
+            else -> if (fired) "Fired" else "Off"
+        }
+    }
+
+    private fun decodeMeteringMode(raw: Int): String? = when (raw) {
+        ExifInterface.METERING_MODE_AVERAGE.toInt() -> "Average"
+        ExifInterface.METERING_MODE_CENTER_WEIGHT_AVERAGE.toInt() -> "Center-weighted"
+        ExifInterface.METERING_MODE_SPOT.toInt() -> "Spot"
+        ExifInterface.METERING_MODE_MULTI_SPOT.toInt() -> "Multi-spot"
+        ExifInterface.METERING_MODE_PATTERN.toInt() -> "Pattern"
+        ExifInterface.METERING_MODE_PARTIAL.toInt() -> "Partial"
+        else -> null
+    }
+
+    private fun inferOrientationLabel(width: Int?, height: Int?): String? {
+        if (width == null || height == null || width <= 0 || height <= 0) return null
+        return when {
+            width > height -> "Landscape"
+            height > width -> "Portrait"
+            else -> "Square"
+        }
+    }
 
     /**
      * Scans EXIF GPS coordinates across recent photos and reverse-geocodes clusters into
@@ -957,6 +1195,7 @@ class LocalMediaRepository(
 
         val results = ArrayList<MediaItem>(256)
         val zone = ZoneId.systemDefault()
+        val nowEpochMs = System.currentTimeMillis()
         val today = LocalDate.now(zone)
         val yesterday = today.minusDays(1)
         val dateLabelCache = HashMap<Long, Pair<String, String>>(128)
@@ -1009,7 +1248,14 @@ class LocalMediaRepository(
 
                 val dateTaken = if (dateTakenCol >= 0) c.getLong(dateTakenCol) else 0L
                 val dateModifiedMs = c.getLong(dateModCol) * 1000L
-                val epochMs = if (dateTaken > 0L) dateTaken else dateModifiedMs
+                val resolvedTs = MediaDateResolver.resolveEffectiveTimestamp(
+                    fileName = name,
+                    mediaStoreDateTakenMs = dateTaken,
+                    fileModifiedMs = dateModifiedMs,
+                    zone = zone,
+                    nowEpochMs = nowEpochMs
+                )
+                val epochMs = resolvedTs.epochMs
 
                 val width = if (widthCol >= 0) c.getInt(widthCol).takeIf { it > 0 } else null
                 val height = if (heightCol >= 0) c.getInt(heightCol).takeIf { it > 0 } else null
@@ -1089,7 +1335,9 @@ class LocalMediaRepository(
                         localContentUri = contentUri,
                         relativePath = bucketDisplay?.takeIf { it.isNotBlank() } ?: folderPathDisplay,
                         storagePath = folderPathDisplay,
-                        daySectionLabel = dayLabel
+                        daySectionLabel = dayLabel,
+                        dateRecoveredFromFilename = resolvedTs.correctedFromFilename,
+                        fileModifiedEpochMs = dateModifiedMs.coerceAtLeast(0L)
                     )
                 )
             }

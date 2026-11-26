@@ -283,7 +283,13 @@ class HiddenLockedFolderManager(private val context: Context) {
 
             val lastMod = file.lastModified()
             val fileLen = file.length()
-            val epochMs = lastMod.takeIf { it > 0L } ?: System.currentTimeMillis()
+            val resolvedTs = MediaDateResolver.resolveEffectiveTimestamp(
+                fileName = file.name,
+                mediaStoreDateTakenMs = 0L,
+                fileModifiedMs = lastMod.takeIf { it > 0L } ?: System.currentTimeMillis(),
+                zone = zone
+            )
+            val epochMs = resolvedTs.epochMs.takeIf { it > 0L } ?: System.currentTimeMillis()
             val zdt = Instant.ofEpochMilli(epochMs).atZone(zone)
             val monthYear = MONTH_YEAR_FMT.format(zdt)
             val fullDate = FULL_DATE_FMT.format(zdt)
@@ -364,7 +370,9 @@ class HiddenLockedFolderManager(private val context: Context) {
                     localContentUri = fileUri,
                     relativePath = displayFolderName,
                     storagePath = storagePathDisplay,
-                    daySectionLabel = dayLabel
+                    daySectionLabel = dayLabel,
+                    dateRecoveredFromFilename = resolvedTs.correctedFromFilename,
+                    fileModifiedEpochMs = lastMod.coerceAtLeast(0L)
                 )
             )
         }

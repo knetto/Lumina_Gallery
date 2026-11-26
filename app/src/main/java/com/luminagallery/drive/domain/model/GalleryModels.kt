@@ -238,7 +238,25 @@ data class ExifMetadata(
     val exposureTime: Float?,
     val isoSpeed: Int?,
     val focalLength: Float?,
-    val dateTakenDisplay: String?
+    val dateTakenDisplay: String?,
+    val focalLength35mm: Int? = null,
+    val exposureBiasEv: Float? = null,
+    val flashDescription: String? = null,
+    val whiteBalance: String? = null,
+    val meteringMode: String? = null,
+    val colorSpace: String? = null,
+    val digitalZoomRatio: Float? = null,
+    val software: String? = null,
+    val orientationLabel: String? = null,
+    val exifDateOriginal: String? = null,
+    val latitude: Double? = null,
+    val longitude: Double? = null,
+    val altitudeMeters: Double? = null,
+    val locationAddress: String? = null,
+    val videoFrameRate: Float? = null,
+    val videoBitrateBps: Long? = null,
+    val videoCodec: String? = null,
+    val audioSummary: String? = null
 ) {
     val hasCameraDetails: Boolean
         get() = !cameraMake.isNullOrBlank() ||
@@ -248,6 +266,11 @@ data class ExifMetadata(
             exposureTime != null ||
             isoSpeed != null ||
             focalLength != null
+
+    val hasLocation: Boolean
+        get() = latitude != null && longitude != null &&
+            (latitude != 0.0 || longitude != 0.0) &&
+            latitude in -90.0..90.0 && longitude in -180.0..180.0
 
     val cameraDisplayName: String?
         get() = when {
@@ -285,7 +308,9 @@ data class MediaItem(
     val localContentUri: String? = null,
     val relativePath: String? = null,
     val storagePath: String? = null,
-    val daySectionLabel: String = monthYearLabel
+    val daySectionLabel: String = monthYearLabel,
+    val dateRecoveredFromFilename: Boolean = false,
+    val fileModifiedEpochMs: Long = 0L
 ) {
     val isVideo: Boolean get() = mediaType == MediaType.VIDEO
     val isRaw: Boolean get() = mediaType == MediaType.RAW

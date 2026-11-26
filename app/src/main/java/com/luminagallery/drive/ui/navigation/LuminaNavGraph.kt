@@ -137,7 +137,9 @@ data class ViewerRoute(
 )
 
 @Serializable
-data object SearchRoute
+data class SearchRoute(
+    val initialQuery: String = ""
+)
 
 @Serializable
 data object SettingsRoute
@@ -297,7 +299,7 @@ fun LuminaNavGraph(
         val target = shortcutTarget ?: return@LaunchedEffect
         pendingBackPops = 0
         when (target) {
-            "search" -> navController.navigate(SearchRoute) { launchSingleTop = true }
+            "search" -> navController.navigate(SearchRoute()) { launchSingleTop = true }
             "favorites" -> navController.navigate(SpecialCollectionRoute(SpecialGalleryFilter.FAVORITES.name))
             "trash" -> navController.navigate(SpecialCollectionRoute(SpecialGalleryFilter.TRASH.name))
             "cleanout" -> navController.navigate(CleanOutRoute) { launchSingleTop = true }
@@ -432,7 +434,7 @@ fun LuminaNavGraph(
                                 )
                             },
                             onOpenSearch = {
-                                navController.navigate(SearchRoute)
+                                navController.navigate(SearchRoute())
                             },
                             onOpenSettings = {
                                 navController.navigate(SettingsRoute)
@@ -722,7 +724,7 @@ fun LuminaNavGraph(
                                 )
                             },
                             onOpenSearch = {
-                                navController.navigate(SearchRoute)
+                                navController.navigate(SearchRoute())
                             },
                             onOpenCompare = { ids ->
                                 navController.navigate(CompareRoute(ids.joinToString(",")))
@@ -732,8 +734,13 @@ fun LuminaNavGraph(
                 }
 
                 composable<SearchRoute> { backStackEntry ->
+                    val route = backStackEntry.toRoute<SearchRoute>()
                     val searchViewModel: SearchViewModel = viewModel(
-                        factory = SearchViewModel.Factory(container)
+                        key = "search_${route.initialQuery}",
+                        factory = SearchViewModel.Factory(
+                            container = container,
+                            initialQuery = route.initialQuery
+                        )
                     )
                     val lastViewedItemId by backStackEntry.lastViewedItemIdState()
                     HyperOsTransitionFrame {
@@ -878,6 +885,9 @@ fun LuminaNavGraph(
                             },
                             onOpenPerson = { pid ->
                                 navController.navigate(PersonDetailRoute(pid))
+                            },
+                            onSearchTag = { tag ->
+                                navController.navigate(SearchRoute(initialQuery = tag))
                             },
                             onDismiss = { safePopBackStack() }
                         )
