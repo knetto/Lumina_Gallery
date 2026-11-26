@@ -1,6 +1,7 @@
 package com.luminagallery.drive
 
 import com.luminagallery.drive.data.repository.ai.AnimalTaxonomy
+import com.luminagallery.drive.data.repository.ai.ImageNetObjectEngine
 import com.luminagallery.drive.data.repository.ai.SmartObjectVocabulary
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -99,5 +100,51 @@ class AnimalTaxonomyTest {
         assertTrue(SmartObjectVocabulary.tokensMatch("dog hond honden pet", "hond"))
         assertTrue(SmartObjectVocabulary.tokensMatch("Parrot,Bird", "parr"))
         assertTrue(SmartObjectVocabulary.tokensMatch("ice cream ijs dessert", "ice cream"))
+    }
+
+    @Test
+    fun quantizedSoftmaxOutputsWithTruncatedTails_areNotDoubleSoftmaxed() {
+        // Simulates an 8-bit quantized EfficientNet-Lite2 probability vector on a bare human face
+        // where tail rounding leaves sum = 0.42 (< 0.90). Previously this ran a second softmax,
+        // flattening all 1,000 classes to ~0.001 and causing 398 animal classes to sum to 0.398!
+        val quantizedFaceOutput = probs(
+            643 to 0.12f, // mask
+            903 to 0.08f, // wig
+            419 to 0.06f, // band aid
+            373 to 0.04f, // stray primate noise
+            207 to 0.02f  // stray dog noise
+        )
+        val normalized = ImageNetObjectEngine.normalizeOutputToProbabilities(quantizedFaceOutput)
+        assertEquals(0.12f, normalized[643], 1e-4f)
+        assertEquals(0.0f, normalized[0], 1e-6f)
+        val analysis = AnimalTaxonomy.analyze(normalized)
+        assertFalse(
+            "Truncated quantized probabilities on a human face must NEVER be vetoed as animal (animalMass=${analysis.animalMass})",
+            AnimalTaxonomy.isNonHumanFace(analysis, wholePhoto = null)
+        )
+
+        // All-zero quantized output must also stay zero (never softmaxed into 0.398 animalMass)
+        val zeros = ImageNetObjectEngine.normalizeOutputToProbabilities(FloatArray(1000))
+        assertEquals(0f, AnimalTaxonomy.analyze(zeros).animalMass, 1e-6f)
+
+        // True unnormalized logits (negative values / > 1.0) MUST still be softmaxed properly
+        val logits = FloatArray(1000) { -4.0f }.also { it[207] = 6.0f }
+        val fromLogits = ImageNetObjectEngine.normalizeOutputToProbabilities(logits)
+        assertTrue("Expected golden retriever logit to dominate after softmax, got ${fromLogits[207]}", fromLogits[207] > 0.90f)
+    }
+
+    @Test
+    fun bareHumanFaceWithMlKitPortraitConfirmation_isNotVetoedByWeakStrayPrimateNoise() {
+        // Close-up bare face with no clothing/glasses in frame: ImageNet has 0.12 stray primate mass
+        // and 0 human clothing cue mass, while ML Kit strongly confirms Person/Smile/Forehead (0.85).
+        val crop = AnimalTaxonomy.analyze(probs(373 to 0.07f, 380 to 0.05f))
+        assertFalse(
+            AnimalTaxonomy.isNonHumanFace(crop, wholePhoto = null, mlKitHumanConfidence = 0.85f)
+        )
+        // A real monkey (high primate mass 0.45) is STILL vetoed even if ML Kit guessed weakly
+        val realMonkey = AnimalTaxonomy.analyze(probs(373 to 0.25f, 380 to 0.20f))
+        assertTrue(
+            AnimalTaxonomy.isNonHumanFace(realMonkey, wholePhoto = null, mlKitHumanConfidence = 0.70f)
+        )
     }
 }

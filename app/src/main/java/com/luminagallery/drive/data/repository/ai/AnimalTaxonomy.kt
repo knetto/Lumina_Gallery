@@ -181,9 +181,18 @@ object AnimalTaxonomy {
     /**
      * People-section veto for a candidate face crop (plus the whole photo for context).
      * Returns true when the "face" belongs to an animal, toy or statue rather than a person.
+     *
+     * Optional [mlKitHumanConfidence] (from ML Kit portrait cues like Person/Face/Smile/Forehead/Hair)
+     * prevents close-up bare human faces (which have no clothing/accessories for ImageNet-1k's
+     * limited human classes) from being falsely rejected by weak stray animal scores.
      */
-    fun isNonHumanFace(crop: Analysis, wholePhoto: Analysis?): Boolean {
-        val humanEvidence = crop.humanCueMass
+    fun isNonHumanFace(
+        crop: Analysis,
+        wholePhoto: Analysis?,
+        mlKitHumanConfidence: Float = 0f
+    ): Boolean {
+        val mlKitBoost = if (mlKitHumanConfidence >= 0.65f) mlKitHumanConfidence * 0.40f else 0f
+        val humanEvidence = maxOf(crop.humanCueMass, mlKitBoost)
         // Monkeys / apes are by far the most common false positive for a human face detector.
         if (crop.primateMass >= 0.10f && crop.primateMass > humanEvidence * 0.8f) return true
         // Any clearly animal crop (dogs, cats, birds ... summed over all breeds / species).

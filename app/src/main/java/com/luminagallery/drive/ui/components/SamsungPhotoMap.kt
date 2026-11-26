@@ -15,17 +15,27 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.CloseFullscreen
+import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DarkMode
 import androidx.compose.material.icons.rounded.LightMode
+import androidx.compose.material.icons.rounded.Map
+import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.MyLocation
 import androidx.compose.material.icons.rounded.OpenInFull
+import androidx.compose.material.icons.rounded.Remove
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -631,22 +641,27 @@ private fun buildVectorClusters(
 }
 
 /**
- * Compact, scroll-safe MapLibre Native preview map for the swipe-up Photo Details sheet.
- * Uses `textureMode(true)` so it clips cleanly inside rounded sheet cards, disables map drag/zoom
- * so vertical bottom-sheet scrolling stays effortless, and places a crisp photo-thumbnail pin
- * dead-center on the exact GPS capture coordinate.
+ * Interactive, zoomable MapLibre Native mini-map for the swipe-up Photo Details sheet.
+ * Uses `textureMode(true)` so it clips cleanly inside rounded sheet cards, supports pinch/double-tap/
+ * button zoom and panning without bottom-sheet scroll hijacking, projects the photo pin live onto
+ * the exact GPS coordinate, and tucks map actions (Open in Maps, Copy coordinates, Light/Dark map,
+ * Recenter) behind a single clean 3-dots corner menu.
  */
+@SuppressLint("ClickableViewAccessibility")
 @Composable
 fun PhotoLocationMiniMap(
     latitude: Double,
     longitude: Double,
     thumbnailData: Any?,
     thumbnailMemoryKey: String?,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onOpenInMaps: (() -> Unit)? = null,
+    onCopyCoords: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val imageLoader = LocalGalleryImageLoader.current
+    val density = LocalDensity.current
 
     remember(context) {
         MapLibre.getInstance(context.applicationContext)
@@ -657,6 +672,8 @@ fun PhotoLocationMiniMap(
     var isDarkStyle by remember { mutableStateOf(defaultDark) }
     var mapLibreRef by remember { mutableStateOf<MapLibreMap?>(null) }
     var mapLoadFailed by remember { mutableStateOf(false) }
+    var cameraTick by remember { mutableIntStateOf(0) }
+    var menuExpanded by remember { mutableStateOf(false) }
 
     val mapView = remember {
         val options = MapLibreMapOptions.createFromAttributes(context)
@@ -666,6 +683,20 @@ fun PhotoLocationMiniMap(
             .compassEnabled(false)
         MapView(context, options).apply {
             onCreate(null)
+            // Keep pinch-zoom and pan gestures inside the mini-map rather than letting the
+            // parent ModalBottomSheet / verticalScroll steal them
+            setOnTouchListener { v, _ ->
+                v.parent?.requestDisallowInterceptTouchEvent(true)
+                false
+            }
+        }
+    }
+
+    fun bumpCameraTick() {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            cameraTick++
+        } else {
+            mapView.post { cameraTick++ }
         }
     }
 
@@ -673,7 +704,15 @@ fun PhotoLocationMiniMap(
         val failListener = MapView.OnDidFailLoadingMapListener {
             mapLoadFailed = true
         }
+        val cameraChangingListener = MapView.OnCameraIsChangingListener {
+            bumpCameraTick()
+        }
+        val cameraDidChangeListener = MapView.OnCameraDidChangeListener { _ ->
+            bumpCameraTick()
+        }
         mapView.addOnDidFailLoadingMapListener(failListener)
+        mapView.addOnCameraIsChangingListener(cameraChangingListener)
+        mapView.addOnCameraDidChangeListener(cameraDidChangeListener)
 
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
@@ -693,6 +732,8 @@ fun PhotoLocationMiniMap(
         }
         onDispose {
             mapView.removeOnDidFailLoadingMapListener(failListener)
+            mapView.removeOnCameraIsChangingListener(cameraChangingListener)
+            mapView.removeOnCameraDidChangeListener(cameraDidChangeListener)
             lifecycleOwner.lifecycle.removeObserver(observer)
             mapView.onPause()
             mapView.onStop()
@@ -706,17 +747,25 @@ fun PhotoLocationMiniMap(
                 isLogoEnabled = false
                 isAttributionEnabled = false
                 isCompassEnabled = false
-                isScrollGesturesEnabled = false
-                isZoomGesturesEnabled = false
+                isScrollGesturesEnabled = true
+                isZoomGesturesEnabled = true
                 isRotateGesturesEnabled = false
                 isTiltGesturesEnabled = false
-                isDoubleTapGesturesEnabled = false
-                isQuickZoomGesturesEnabled = false
+                isDoubleTapGesturesEnabled = true
+                isQuickZoomGesturesEnabled = true
+                isFlingVelocityAnimationEnabled = true
+                isScaleVelocityAnimationEnabled = true
             }
+            map.setMinZoomPreference(2.0)
+            map.setMaxZoomPreference(19.0)
             mapLibreRef = map
             map.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(latitude, longitude), 14.5))
+            bumpCameraTick()
+            map.addOnCameraMoveListener { bumpCameraTick() }
+            map.addOnCameraIdleListener { bumpCameraTick() }
             map.setStyle(Style.Builder().fromUri(if (isDarkStyle) STYLE_OPENFREEMAP_DARK else STYLE_OPENFREEMAP_LIBERTY)) {
                 mapLoadFailed = false
+                bumpCameraTick()
             }
         }
     }
@@ -724,6 +773,7 @@ fun PhotoLocationMiniMap(
     LaunchedEffect(mapLibreRef, latitude, longitude) {
         val map = mapLibreRef ?: return@LaunchedEffect
         map.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(latitude, longitude), 14.5))
+        bumpCameraTick()
     }
 
     LaunchedEffect(isDarkStyle, mapLibreRef) {
@@ -732,6 +782,7 @@ fun PhotoLocationMiniMap(
         if (map.style?.uri != targetUri) {
             map.setStyle(Style.Builder().fromUri(targetUri)) {
                 mapLoadFailed = false
+                bumpCameraTick()
             }
         }
     }
@@ -750,106 +801,268 @@ fun PhotoLocationMiniMap(
         }
     }
 
-    Box(
+    BoxWithConstraints(
         modifier = modifier
             .background(if (isDarkStyle) Color(0xFF14171D) else Color(0xFFE4EEF3))
     ) {
+        val widthPx = with(density) { maxWidth.toPx() }
+        val heightPx = with(density) { maxHeight.toPx() }
+        val pinWidthPx = with(density) { 44.dp.toPx() }
+        val pinAnchorYPx = with(density) { 51.dp.toPx() } // 44dp photo + 7dp tip = center of 12dp GPS dot
+
         AndroidView(
             factory = { mapView },
             modifier = Modifier.fillMaxSize()
         )
 
-        // Centered photo-thumbnail location pin anchored directly onto the capture coordinate
-        Box(
-            modifier = Modifier.align(Alignment.Center),
-            contentAlignment = Alignment.BottomCenter
-        ) {
-            // Soft GPS pulse dot right at the coordinate point
-            Box(
-                modifier = Modifier
-                    .size(12.dp)
-                    .clip(CircleShape)
-                    .background(Color(0xFF2B7CFF).copy(alpha = 0.28f))
-                    .padding(3.dp)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .clip(CircleShape)
-                        .background(Color(0xFF2B7CFF))
-                )
-            }
+        // Live screen-projected photo-thumbnail pin anchored directly onto the capture coordinate
+        val map = mapLibreRef
+        val activeTick = cameraTick
+        val projectedPt = if (map != null && activeTick >= 0 && mapView.width > 0 && mapView.height > 0) {
+            map.projection.toScreenLocation(LatLng(latitude, longitude))
+        } else {
+            null
+        }
+        val showPin = projectedPt == null || (
+            projectedPt.x >= -pinWidthPx &&
+                projectedPt.x <= widthPx + pinWidthPx &&
+                projectedPt.y >= -pinAnchorYPx &&
+                projectedPt.y <= heightPx + pinAnchorYPx
+            )
 
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier.padding(bottom = 6.dp)
+        if (showPin) {
+            Box(
+                modifier = if (projectedPt != null) {
+                    Modifier.offset {
+                        IntOffset(
+                            x = (projectedPt.x - pinWidthPx * 0.5f).roundToInt(),
+                            y = (projectedPt.y - pinAnchorYPx).roundToInt()
+                        )
+                    }
+                } else {
+                    Modifier.align(Alignment.Center)
+                },
+                contentAlignment = Alignment.BottomCenter
             ) {
+                // Soft GPS pulse dot right at the coordinate point
                 Box(
                     modifier = Modifier
-                        .size(44.dp)
-                        .shadow(elevation = 6.dp, shape = RoundedCornerShape(11.dp))
-                        .clip(RoundedCornerShape(11.dp))
-                        .background(Color.White)
-                        .padding(2.5.dp)
+                        .size(12.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFF2B7CFF).copy(alpha = 0.28f))
+                        .padding(3.dp)
                 ) {
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
-                            .clip(RoundedCornerShape(8.5.dp))
-                            .background(Color(0xFF23252C)),
-                        contentAlignment = Alignment.Center
+                            .clip(CircleShape)
+                            .background(Color(0xFF2B7CFF))
+                    )
+                }
+
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.padding(bottom = 6.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(44.dp)
+                            .shadow(elevation = 6.dp, shape = RoundedCornerShape(11.dp))
+                            .clip(RoundedCornerShape(11.dp))
+                            .background(Color.White)
+                            .padding(2.5.dp)
                     ) {
-                        if (thumbRequest != null) {
-                            AsyncImage(
-                                model = thumbRequest,
-                                imageLoader = imageLoader,
-                                contentDescription = null,
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier.fillMaxSize()
-                            )
-                        } else {
-                            Icon(
-                                imageVector = Icons.Rounded.MyLocation,
-                                contentDescription = null,
-                                tint = Color(0xFF2B7CFF),
-                                modifier = Modifier.size(20.dp)
-                            )
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .clip(RoundedCornerShape(8.5.dp))
+                                .background(Color(0xFF23252C)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (thumbRequest != null) {
+                                AsyncImage(
+                                    model = thumbRequest,
+                                    imageLoader = imageLoader,
+                                    contentDescription = null,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Rounded.MyLocation,
+                                    contentDescription = null,
+                                    tint = Color(0xFF2B7CFF),
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
                         }
                     }
-                }
-                Canvas(modifier = Modifier.size(width = 12.dp, height = 7.dp)) {
-                    val path = Path().apply {
-                        moveTo(0f, 0f)
-                        lineTo(size.width, 0f)
-                        lineTo(size.width / 2f, size.height)
-                        close()
+                    Canvas(modifier = Modifier.size(width = 12.dp, height = 7.dp)) {
+                        val path = Path().apply {
+                            moveTo(0f, 0f)
+                            lineTo(size.width, 0f)
+                            lineTo(size.width / 2f, size.height)
+                            close()
+                        }
+                        drawPath(path = path, color = Color.White)
                     }
-                    drawPath(path = path, color = Color.White)
                 }
             }
         }
 
-        // Top-right light/dark style toggle
+        // Top-right 3-dots menu holding Open in Maps, Copy coordinates, Light/Dark map, and Recenter
         Box(
             modifier = Modifier
                 .align(Alignment.TopEnd)
                 .padding(10.dp)
-                .size(32.dp)
-                .shadow(4.dp, CircleShape)
-                .clip(CircleShape)
-                .background(Color(0xD91B1B1F))
-                .border(0.7.dp, Color.White.copy(alpha = 0.16f), CircleShape)
-                .oneUiClickable(pressedScale = 0.88f, hoveredScale = 1.05f) {
-                    isDarkStyle = !isDarkStyle
-                },
-            contentAlignment = Alignment.Center
         ) {
-            Icon(
-                imageVector = if (isDarkStyle) Icons.Rounded.LightMode else Icons.Rounded.DarkMode,
-                contentDescription = if (isDarkStyle) "Light map" else "Dark map",
-                tint = Color.White,
-                modifier = Modifier.size(16.dp)
+            Box(
+                modifier = Modifier
+                    .size(32.dp)
+                    .shadow(4.dp, CircleShape)
+                    .clip(CircleShape)
+                    .background(Color(0xD91B1B1F))
+                    .border(0.7.dp, Color.White.copy(alpha = 0.16f), CircleShape)
+                    .oneUiClickable(pressedScale = 0.88f, hoveredScale = 1.05f) {
+                        menuExpanded = true
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.MoreVert,
+                    contentDescription = "Map options",
+                    tint = Color.White,
+                    modifier = Modifier.size(17.dp)
+                )
+            }
+
+            DropdownMenu(
+                expanded = menuExpanded,
+                onDismissRequest = { menuExpanded = false },
+                shape = RoundedCornerShape(18.dp),
+                containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+            ) {
+                if (onOpenInMaps != null) {
+                    DropdownMenuItem(
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Rounded.Map,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        },
+                        text = { Text("Open in Maps", fontWeight = FontWeight.Medium) },
+                        onClick = {
+                            menuExpanded = false
+                            onOpenInMaps()
+                        }
+                    )
+                }
+                if (onCopyCoords != null) {
+                    DropdownMenuItem(
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Rounded.ContentCopy,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        },
+                        text = { Text("Copy coordinates", fontWeight = FontWeight.Medium) },
+                        onClick = {
+                            menuExpanded = false
+                            onCopyCoords()
+                        }
+                    )
+                }
+                DropdownMenuItem(
+                    leadingIcon = {
+                        Icon(
+                            imageVector = if (isDarkStyle) Icons.Rounded.LightMode else Icons.Rounded.DarkMode,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    },
+                    text = {
+                        Text(
+                            text = if (isDarkStyle) "Light map" else "Dark map",
+                            fontWeight = FontWeight.Medium
+                        )
+                    },
+                    onClick = {
+                        menuExpanded = false
+                        isDarkStyle = !isDarkStyle
+                    }
+                )
+                DropdownMenuItem(
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Rounded.MyLocation,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    },
+                    text = { Text("Recenter", fontWeight = FontWeight.Medium) },
+                    onClick = {
+                        menuExpanded = false
+                        mapLibreRef?.animateCamera(
+                            CameraUpdateFactory.newLatLngZoom(LatLng(latitude, longitude), 14.5),
+                            360
+                        )
+                    }
+                )
+            }
+        }
+
+        // Compact frosted +/- zoom pill in bottom-right corner for effortless one-handed zooming
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(10.dp)
+                .shadow(4.dp, RoundedCornerShape(16.dp))
+                .clip(RoundedCornerShape(16.dp))
+                .background(Color(0xD91B1B1F))
+                .border(0.7.dp, Color.White.copy(alpha = 0.16f), RoundedCornerShape(16.dp)),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(width = 32.dp, height = 30.dp)
+                    .oneUiClickable(pressedScale = 0.88f, hoveredScale = 1.04f) {
+                        mapLibreRef?.animateCamera(CameraUpdateFactory.zoomIn(), 240)
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Add,
+                    contentDescription = "Zoom in",
+                    tint = Color.White,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+            HorizontalDivider(
+                modifier = Modifier.width(18.dp),
+                thickness = 0.6.dp,
+                color = Color.White.copy(alpha = 0.18f)
             )
+            Box(
+                modifier = Modifier
+                    .size(width = 32.dp, height = 30.dp)
+                    .oneUiClickable(pressedScale = 0.88f, hoveredScale = 1.04f) {
+                        mapLibreRef?.animateCamera(CameraUpdateFactory.zoomOut(), 240)
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Remove,
+                    contentDescription = "Zoom out",
+                    tint = Color.White,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
         }
 
         // Subtle OpenFreeMap / offline attribution pill

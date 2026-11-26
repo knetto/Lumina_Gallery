@@ -275,7 +275,9 @@ class SmartRecognitionManager(
         val blockedFolderIds = computeBlockedFolderIdsFromDb()
         if (item.parentId in blockedFolderIds) return@withContext emptyList()
 
-        val existing = smartDao.getSmartIndexForPhoto(item.id)
+        val existing = if (metaPrefs.getInt(KEY_AI_INDEX_VERSION, 0) >= CURRENT_AI_INDEX_VERSION) {
+            smartDao.getSmartIndexForPhoto(item.id)
+        } else null
         if (existing != null) {
             return@withContext existing.labelsCsv.split(",")
                 .map { it.trim() }
@@ -284,6 +286,7 @@ class SmartRecognitionManager(
 
         if (scanMutex.tryLock()) {
             try {
+                ensureAiIndexVersionCurrent()
                 // Re-check inside lock
                 smartDao.getSmartIndexForPhoto(item.id)?.let { cached ->
                     return@withContext cached.labelsCsv.split(",")
@@ -325,6 +328,11 @@ class SmartRecognitionManager(
                         animal = wholeAnimal,
                         animalSpecificLabel = animalSpecificLabel
                     )
+                    // If Face Detection threw a transient error, return tags immediately without
+                    // caching a permanent faceCount=0 stamp in Room.
+                    if (facesResult.isFailure) {
+                        return@withContext mergedObjects.displayLabels
+                    }
                     val now = System.currentTimeMillis()
                     val inMemoryClusters = smartDao.getAllPersons()
                         .associateByTo(LinkedHashMap()) { it.personId }
@@ -452,6 +460,22 @@ class SmartRecognitionManager(
         } finally {
             scanMutex.unlock()
         }
+    }
+
+    private suspend fun ensureAiIndexVersionCurrent() {
+        val savedVersion = metaPrefs.getInt(KEY_AI_INDEX_VERSION, 0)
+        if (savedVersion >= CURRENT_AI_INDEX_VERSION) return
+        snapshotNamedProfilesBeforeReset()
+        database.withTransaction {
+            smartDao.clearAllFaces()
+            smartDao.clearAllPersons()
+            smartDao.clearAllSmartIndex()
+        }
+        faceEngine.clearAllCropFiles()
+        metaPrefs.edit()
+            .putInt(KEY_AI_INDEX_VERSION, CURRENT_AI_INDEX_VERSION)
+            .putInt(KEY_AVATAR_CROP_VERSION, CURRENT_AVATAR_CROP_VERSION)
+            .apply()
     }
 
     private suspend fun snapshotNamedProfilesBeforeReset() {
@@ -615,21 +639,7 @@ class SmartRecognitionManager(
         if (!scanMutex.tryLock()) return@withContext ScanRunOutcome.ALREADY_BUSY
         pauseRequested = false
         try {
-            // One-time automatic clean rebuild when upgrading from v1 -> v2 (preserves any names set!)
-            val savedVersion = metaPrefs.getInt(KEY_AI_INDEX_VERSION, 0)
-            if (savedVersion < CURRENT_AI_INDEX_VERSION) {
-                snapshotNamedProfilesBeforeReset()
-                database.withTransaction {
-                    smartDao.clearAllFaces()
-                    smartDao.clearAllPersons()
-                    smartDao.clearAllSmartIndex()
-                }
-                faceEngine.clearAllCropFiles()
-                metaPrefs.edit()
-                    .putInt(KEY_AI_INDEX_VERSION, CURRENT_AI_INDEX_VERSION)
-                    .putInt(KEY_AVATAR_CROP_VERSION, CURRENT_AVATAR_CROP_VERSION)
-                    .apply()
-            }
+            ensureAiIndexVersionCurrent()
 
             val blockedFolderIds = computeBlockedFolderIdsFromDb()
 
@@ -913,6 +923,12 @@ class SmartRecognitionManager(
                         onProgressUpdate?.invoke(dlProgress)
                         return@withContext ScanRunOutcome.MODEL_DOWNLOADING
                     }
+                    // If Face Detection failed transiently (not 0 faces, an actual exception), skip persisting
+                    // an empty stamp so this photo will be retried cleanly instead of permanently marked empty.
+                    if (faceErr != null) {
+                        processedInQueue++
+                        continue
+                    }
 
                     val detectedFaces = facesResult.getOrDefault(emptyList())
                     val rawMlLabels = labelsResult.getOrDefault(emptyList())
@@ -1129,7 +1145,11 @@ class SmartRecognitionManager(
             // Group-mass veto: catches monkeys / pets whose probability is spread over many
             // look-alike classes so that no single class name would have tripped the keyword veto.
             val cropAnimal = cropProbs?.let { AnimalTaxonomy.analyze(it) }
-            if (cropAnimal != null && AnimalTaxonomy.isNonHumanFace(cropAnimal, wholePhotoAnimal)) {
+            val mlKitHumanConf = cropMlLabels
+                .asSequence()
+                .filter { (label, _) -> label.trim().lowercase(Locale.US) in MLKIT_STRONG_HUMAN_PORTRAIT_LABELS }
+                .maxOfOrNull { it.second } ?: 0f
+            if (cropAnimal != null && AnimalTaxonomy.isNonHumanFace(cropAnimal, wholePhotoAnimal, mlKitHumanConf)) {
                 return null
             }
             if (SmartObjectVocabulary.isNonHumanFaceCrop(cropMlLabels, cropImageNetLabels)) {
@@ -1694,7 +1714,7 @@ class SmartRecognitionManager(
             val src = ImageDecoder.createSource(context.contentResolver, uri)
             ImageDecoder.decodeBitmap(src) { decoder, info, _ ->
                 decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
-                decoder.memorySizePolicy = ImageDecoder.MEMORY_POLICY_LOW_RAM
+                decoder.memorySizePolicy = ImageDecoder.MEMORY_POLICY_DEFAULT
                 decoder.setTargetColorSpace(ColorSpace.get(ColorSpace.Named.SRGB))
                 val maxDim = maxOf(info.size.width, info.size.height)
                 if (maxDim > MAX_SCAN_DIMENSION_PX) {
@@ -1731,7 +1751,7 @@ class SmartRecognitionManager(
             val src = ImageDecoder.createSource(file)
             ImageDecoder.decodeBitmap(src) { decoder, info, _ ->
                 decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
-                decoder.memorySizePolicy = ImageDecoder.MEMORY_POLICY_LOW_RAM
+                decoder.memorySizePolicy = ImageDecoder.MEMORY_POLICY_DEFAULT
                 decoder.setTargetColorSpace(ColorSpace.get(ColorSpace.Named.SRGB))
                 val maxDim = maxOf(info.size.width, info.size.height)
                 if (maxDim > MAX_SCAN_DIMENSION_PX) {
@@ -1792,7 +1812,9 @@ class SmartRecognitionManager(
             if (cur is MlKitException && cur.errorCode == MlKitException.UNAVAILABLE) return true
             val msg = cur.message.orEmpty()
             if (msg.contains("Waiting for the", ignoreCase = true) ||
-                msg.contains("model to be downloaded", ignoreCase = true)
+                msg.contains("model to be downloaded", ignoreCase = true) ||
+                msg.contains("module to be downloaded", ignoreCase = true) ||
+                msg.contains("optional module", ignoreCase = true)
             ) return true
             cur = cur.cause
         }
@@ -1898,8 +1920,16 @@ class SmartRecognitionManager(
         private const val KEY_AVATAR_CROP_VERSION = "smart_avatar_crop_version"
         private const val KEY_REJECTED_MERGE_PAIRS = "rejected_merge_pairs"
         private const val KEY_PRESERVED_PROFILES = "preserved_person_profiles_json"
-        private const val CURRENT_AI_INDEX_VERSION = 3
+        private const val CURRENT_AI_INDEX_VERSION = 4
         private const val CURRENT_AVATAR_CROP_VERSION = 2
+
+        /** High-precision ML Kit portrait cues specific to humans (excludes eye/nose/mouth shared with animals). */
+        private val MLKIT_STRONG_HUMAN_PORTRAIT_LABELS: Set<String> = setOf(
+            "person", "human", "smile", "forehead", "cheek", "chin", "beard", "mustache",
+            "eyebrow", "eyelash", "hair", "hairstyle", "selfie", "portrait",
+            "man", "woman", "boy", "girl", "child", "baby", "adult", "youth", "people",
+            "glasses", "sunglasses", "eyewear"
+        )
         private const val MAX_SCAN_DIMENSION_PX = 768
         private const val ML_TIMEOUT_SEC = 10L
         private const val BATCH_WRITE_SIZE = 20

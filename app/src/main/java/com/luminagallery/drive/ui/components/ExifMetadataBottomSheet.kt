@@ -16,8 +16,10 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -39,25 +41,20 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Label
-import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.Add
-import androidx.compose.material.icons.rounded.Adjust
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Camera
 import androidx.compose.material.icons.rounded.CameraAlt
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Edit
-import androidx.compose.material.icons.rounded.Exposure
 import androidx.compose.material.icons.rounded.Face
 import androidx.compose.material.icons.rounded.FilterCenterFocus
-import androidx.compose.material.icons.rounded.FlashOn
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.Grain
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.LocationOn
-import androidx.compose.material.icons.rounded.Map
 import androidx.compose.material.icons.rounded.Movie
 import androidx.compose.material.icons.rounded.People
 import androidx.compose.material.icons.rounded.PersonRemove
@@ -68,10 +65,7 @@ import androidx.compose.material.icons.rounded.Smartphone
 import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.SwapHoriz
 import androidx.compose.material.icons.rounded.Timer
-import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.Videocam
-import androidx.compose.material.icons.rounded.WbSunny
-import androidx.compose.material.icons.rounded.ZoomIn
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -83,6 +77,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.VerticalDivider
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -480,131 +475,80 @@ fun ExifMetadataBottomSheet(
                             longitude = resolvedLon,
                             thumbnailData = thumbData,
                             thumbnailMemoryKey = DriveConstants.stableThumbMemoryKey(item.id),
+                            onOpenInMaps = {
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                val labelEncoded = Uri.encode(locationTitle)
+                                val geoUri = Uri.parse(
+                                    String.format(
+                                        Locale.US,
+                                        "geo:%.6f,%.6f?q=%.6f,%.6f(%s)",
+                                        resolvedLat,
+                                        resolvedLon,
+                                        resolvedLat,
+                                        resolvedLon,
+                                        labelEncoded
+                                    )
+                                )
+                                val launched = runCatching {
+                                    context.startActivity(
+                                        Intent(Intent.ACTION_VIEW, geoUri).apply {
+                                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        }
+                                    )
+                                }.isSuccess
+                                if (!launched) {
+                                    onCopiedMessage("No maps app installed")
+                                }
+                            },
+                            onCopyCoords = {
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                val clipboard =
+                                    context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                val rawCoord = String.format(Locale.US, "%.6f, %.6f", resolvedLat, resolvedLon)
+                                clipboard.setPrimaryClip(ClipData.newPlainText("Location", rawCoord))
+                                onCopiedMessage("Copied coordinates")
+                            },
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(172.dp)
+                                .height(196.dp)
                                 .clip(RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
                         )
-                        Column(
+                        Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(horizontal = 16.dp, vertical = 13.dp),
-                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            Box(
+                                modifier = Modifier
+                                    .size(34.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
+                                contentAlignment = Alignment.Center
                             ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(34.dp)
-                                        .clip(RoundedCornerShape(10.dp))
-                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.LocationOn,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.size(19.dp)
-                                    )
-                                }
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = locationTitle,
-                                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
-                                        color = MaterialTheme.colorScheme.onSurface,
-                                        maxLines = 2,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    Text(
-                                        text = coordText,
-                                        style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"),
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
+                                Icon(
+                                    imageVector = Icons.Rounded.LocationOn,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(19.dp)
+                                )
                             }
-
-                            Row(
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(50))
-                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f))
-                                        .clickable {
-                                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                            val labelEncoded = Uri.encode(locationTitle)
-                                            val geoUri = Uri.parse(
-                                                String.format(
-                                                    Locale.US,
-                                                    "geo:%.6f,%.6f?q=%.6f,%.6f(%s)",
-                                                    resolvedLat,
-                                                    resolvedLon,
-                                                    resolvedLat,
-                                                    resolvedLon,
-                                                    labelEncoded
-                                                )
-                                            )
-                                            val launched = runCatching {
-                                                context.startActivity(
-                                                    Intent(Intent.ACTION_VIEW, geoUri).apply {
-                                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                                    }
-                                                )
-                                            }.isSuccess
-                                            if (!launched) {
-                                                onCopiedMessage("No maps app installed")
-                                            }
-                                        }
-                                        .padding(horizontal = 12.dp, vertical = 6.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Map,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.size(15.dp)
-                                    )
-                                    Text(
-                                        text = "Open in Maps",
-                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
-                                }
-
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(5.dp),
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(50))
-                                        .background(MaterialTheme.colorScheme.surfaceContainerHighest)
-                                        .clickable {
-                                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                            val clipboard =
-                                                context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                            val rawCoord = String.format(Locale.US, "%.6f, %.6f", resolvedLat, resolvedLon)
-                                            clipboard.setPrimaryClip(ClipData.newPlainText("Location", rawCoord))
-                                            onCopiedMessage("Copied coordinates")
-                                        }
-                                        .padding(horizontal = 12.dp, vertical = 6.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.ContentCopy,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.size(14.dp)
-                                    )
-                                    Text(
-                                        text = "Copy coords",
-                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                }
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = locationTitle,
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = coordText,
+                                    style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
                             }
                         }
                     }
@@ -811,9 +755,17 @@ fun ExifMetadataBottomSheet(
                 }
             }
 
-            // 5. Storage Location Card with One-Tap Copy
+            // 5. Storage Location Card with Full Path & One-Tap Copy
             val cleanFolderPath = remember(driveFolderPath) {
                 FormatUtils.formatDisplayFolderPath(driveFolderPath)
+            }
+            val fullCopyPath = remember(item.isLocal, item.storagePath, driveFolderPath, item.name) {
+                FormatUtils.buildMediaCopyPath(
+                    isLocal = item.isLocal,
+                    storagePath = item.storagePath,
+                    driveFolderPath = driveFolderPath,
+                    fileName = item.name
+                )
             }
             Surface(
                 shape = RoundedCornerShape(24.dp),
@@ -826,13 +778,7 @@ fun ExifMetadataBottomSheet(
                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                         val clipboard =
                             context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        val copyPath = if (item.isLocal) {
-                            val rel = item.storagePath?.trim('/')?.takeIf { it.isNotBlank() }
-                            if (rel != null) "/storage/emulated/0/$rel/${item.name}" else "$cleanFolderPath/${item.name}"
-                        } else {
-                            "$cleanFolderPath/${item.name}"
-                        }
-                        clipboard.setPrimaryClip(ClipData.newPlainText("Path", copyPath))
+                        clipboard.setPrimaryClip(ClipData.newPlainText("Path", fullCopyPath))
                         onCopiedMessage("Copied path to clipboard")
                     }
             ) {
@@ -857,18 +803,23 @@ fun ExifMetadataBottomSheet(
                             modifier = Modifier.size(19.dp)
                         )
                     }
-                    Column(modifier = Modifier.weight(1f)) {
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
                         Text(
                             text = cleanFolderPath,
-                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
+                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
                             color = MaterialTheme.colorScheme.onSurface,
-                            maxLines = 2,
+                            maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            text = "Tap to copy path",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            text = fullCopyPath,
+                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                     Icon(
@@ -1259,13 +1210,12 @@ private data class ShootingMetricTile(
     val secondary: String? = null
 )
 
-private data class ShootingChip(
-    val icon: ImageVector,
+private data class ShootingDetailItem(
     val label: String,
+    val value: String,
     val highlighted: Boolean = false
 )
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun CameraSettingsCard(
     item: MediaItem,
@@ -1329,47 +1279,46 @@ private fun CameraSettingsCard(
         }
     }
 
-    val shootingChips = remember(item.isVideo, liveExif) {
+    val secondaryDetails = remember(item.isVideo, liveExif) {
         if (item.isVideo) {
             buildList {
                 liveExif.audioSummary?.takeIf { it.isNotBlank() }?.let {
-                    add(ShootingChip(Icons.AutoMirrored.Rounded.VolumeUp, it))
+                    add(ShootingDetailItem("Audio", it))
                 }
             }
         } else {
             buildList {
                 liveExif.exposureBiasEv?.takeIf { it.isFinite() && abs(it) >= 0.05f }?.let { ev ->
                     FormatUtils.formatExposureBias(ev)?.let { formatted ->
-                        add(ShootingChip(Icons.Rounded.Exposure, formatted, highlighted = true))
+                        add(ShootingDetailItem("Exposure", formatted, highlighted = true))
                     }
                 }
                 liveExif.exposureMode?.takeIf { it.isNotBlank() }?.let { mode ->
-                    add(ShootingChip(Icons.Rounded.Tune, mode))
+                    add(ShootingDetailItem("Mode", mode))
                 }
                 liveExif.meteringMode?.takeIf { it.isNotBlank() }?.let { metering ->
-                    add(ShootingChip(Icons.Rounded.Adjust, metering))
+                    add(ShootingDetailItem("Metering", metering))
                 }
                 liveExif.whiteBalance?.takeIf { it.isNotBlank() }?.let { wb ->
                     add(
-                        ShootingChip(
-                            icon = Icons.Rounded.WbSunny,
-                            label = "WB · $wb",
+                        ShootingDetailItem(
+                            label = "White balance",
+                            value = wb,
                             highlighted = wb.equals("Manual", ignoreCase = true)
                         )
                     )
                 }
-                liveExif.flashDescription?.takeIf { it.contains("Fired", ignoreCase = true) }?.let { flash ->
-                    val label = if (flash.equals("Fired", ignoreCase = true)) "Flash fired" else "Flash · $flash"
-                    add(ShootingChip(Icons.Rounded.FlashOn, label, highlighted = true))
+                FormatUtils.formatFlashSetting(liveExif.flashDescription)?.let { flashVal ->
+                    add(ShootingDetailItem("Flash", flashVal, highlighted = true))
                 }
                 liveExif.digitalZoomRatio?.let { zoom ->
-                    add(ShootingChip(Icons.Rounded.ZoomIn, String.format(Locale.US, "%.1f× zoom", zoom)))
+                    add(ShootingDetailItem("Digital zoom", String.format(Locale.US, "%.1f×", zoom)))
                 }
             }
         }
     }
 
-    val hasShootingTelemetry = primaryTiles.isNotEmpty() || shootingChips.isNotEmpty() || liveExif.hasCameraDetails
+    val hasShootingTelemetry = primaryTiles.isNotEmpty() || secondaryDetails.isNotEmpty() || liveExif.hasCameraDetails
     val fileSpecsLeft = remember(resLabel, mpLabel, aspectLabel, item.isVideo) {
         buildList {
             resLabel?.let { add(it) }
@@ -1526,26 +1475,22 @@ private fun CameraSettingsCard(
                     }
                 }
 
-                // Focused Secondary Shooting Chips (EV bias, Mode, Metering, WB, Flash when fired)
-                if (shootingChips.isNotEmpty()) {
-                    FlowRow(
+                // Structured 2-column secondary shooting settings panel (aligned cleanly with the 2×2 grid above)
+                if (secondaryDetails.isNotEmpty()) {
+                    ShootingDetailGrid(
+                        details = secondaryDetails,
+                        hairlineBorder = hairlineBorder,
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(
                                 start = 14.dp,
                                 end = 14.dp,
                                 top = if (primaryTiles.isNotEmpty()) 10.dp else 0.dp
-                            ),
-                        horizontalArrangement = Arrangement.spacedBy(7.dp),
-                        verticalArrangement = Arrangement.spacedBy(7.dp)
-                    ) {
-                        shootingChips.forEach { chip ->
-                            ShootingChipBadge(chip = chip)
-                        }
-                    }
+                            )
+                    )
                 }
 
-                if (primaryTiles.isNotEmpty() || shootingChips.isNotEmpty()) {
+                if (primaryTiles.isNotEmpty() || secondaryDetails.isNotEmpty()) {
                     Spacer(Modifier.height(14.dp))
                 }
 
@@ -1658,45 +1603,87 @@ private fun ShootingMetricTileCard(
 }
 
 @Composable
-private fun ShootingChipBadge(chip: ShootingChip) {
-    val bgColor = if (chip.highlighted) {
-        MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
-    } else {
-        MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.72f)
-    }
-    val contentColor = if (chip.highlighted) {
-        MaterialTheme.colorScheme.primary
-    } else {
-        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.88f)
-    }
-    val iconTint = if (chip.highlighted) {
-        MaterialTheme.colorScheme.primary
-    } else {
-        MaterialTheme.colorScheme.onSurfaceVariant
-    }
-
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(5.dp),
-        modifier = Modifier
-            .clip(RoundedCornerShape(50))
-            .background(bgColor)
-            .padding(horizontal = 10.dp, vertical = 6.dp)
+private fun ShootingDetailGrid(
+    details: List<ShootingDetailItem>,
+    hairlineBorder: androidx.compose.ui.graphics.Color,
+    modifier: Modifier = Modifier
+) {
+    val rows = remember(details) { details.chunked(2) }
+    val subtleDivider = hairlineBorder.copy(alpha = 0.55f)
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(16.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.28f))
+            .border(0.6.dp, subtleDivider, RoundedCornerShape(16.dp))
     ) {
-        Icon(
-            imageVector = chip.icon,
-            contentDescription = null,
-            tint = iconTint,
-            modifier = Modifier.size(13.5.dp)
+        rows.forEachIndexed { rowIdx, pair ->
+            if (rowIdx > 0) {
+                HorizontalDivider(thickness = 0.6.dp, color = subtleDivider)
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(IntrinsicSize.Min)
+            ) {
+                val first = pair[0]
+                ShootingDetailCell(
+                    detail = first,
+                    modifier = Modifier.weight(1f)
+                )
+                if (pair.size > 1) {
+                    VerticalDivider(
+                        modifier = Modifier.fillMaxHeight(),
+                        thickness = 0.6.dp,
+                        color = subtleDivider
+                    )
+                    ShootingDetailCell(
+                        detail = pair[1],
+                        modifier = Modifier.weight(1f)
+                    )
+                } else if (rows.size > 1) {
+                    VerticalDivider(
+                        modifier = Modifier.fillMaxHeight(),
+                        thickness = 0.6.dp,
+                        color = subtleDivider
+                    )
+                    Spacer(modifier = Modifier.weight(1f))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ShootingDetailCell(
+    detail: ShootingDetailItem,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp)
+    ) {
+        Text(
+            text = detail.label,
+            style = MaterialTheme.typography.labelSmall.copy(
+                fontSize = 10.5.sp,
+                fontWeight = FontWeight.Medium
+            ),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
         )
         Text(
-            text = chip.label,
-            style = MaterialTheme.typography.labelSmall.copy(
-                fontSize = 11.5.sp,
-                fontWeight = if (chip.highlighted) FontWeight.SemiBold else FontWeight.Medium,
+            text = detail.value,
+            style = MaterialTheme.typography.bodySmall.copy(
+                fontSize = 13.sp,
+                fontWeight = if (detail.highlighted) FontWeight.SemiBold else FontWeight.Medium,
                 fontFeatureSettings = "tnum"
             ),
-            color = contentColor,
+            color = if (detail.highlighted) {
+                MaterialTheme.colorScheme.primary
+            } else {
+                MaterialTheme.colorScheme.onSurface
+            },
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )

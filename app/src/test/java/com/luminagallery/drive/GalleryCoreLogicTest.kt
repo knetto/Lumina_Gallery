@@ -182,6 +182,33 @@ class GalleryCoreLogicTest {
         assertEquals("Duitsland-2026", FormatUtils.formatDisplayFolderPath("On Device / Duitsland-2026"))
         assertEquals("Trips / Berlin", FormatUtils.formatDisplayFolderPath("Google Drive / Trips / Berlin"))
         assertEquals("Google Drive", FormatUtils.formatDisplayFolderPath("Google Drive"))
+
+        // Flash formatter cleans double-dot EXIF descriptions and hides Flash Off
+        assertEquals("Fired (auto)", FormatUtils.formatFlashSetting("Auto · Fired"))
+        assertEquals("Fired (forced)", FormatUtils.formatFlashSetting("Forced · Fired"))
+        assertEquals("Fired", FormatUtils.formatFlashSetting("Fired"))
+        assertNull(FormatUtils.formatFlashSetting("Off"))
+        assertNull(FormatUtils.formatFlashSetting("Auto · Off"))
+
+        // Storage copy path builder shows exact local or Drive path
+        assertEquals(
+            "/storage/emulated/0/DCIM/Duitsland-2026/DSCF8066.JPG",
+            FormatUtils.buildMediaCopyPath(
+                isLocal = true,
+                storagePath = "DCIM/Duitsland-2026",
+                driveFolderPath = "On Device / Duitsland-2026",
+                fileName = "DSCF8066.JPG"
+            )
+        )
+        assertEquals(
+            "Google Drive / Trips / IMG_1.JPG",
+            FormatUtils.buildMediaCopyPath(
+                isLocal = false,
+                storagePath = null,
+                driveFolderPath = "Google Drive / Trips",
+                fileName = "IMG_1.JPG"
+            )
+        )
     }
 
     @Test

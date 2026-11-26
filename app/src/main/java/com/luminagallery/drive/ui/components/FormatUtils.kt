@@ -154,6 +154,46 @@ object FormatUtils {
         return stripped.ifBlank { trimmed }
     }
 
+    /**
+     * Converts raw EXIF flash descriptions (e.g. "Auto · Fired", "Forced · Fired", "Fired", "Off")
+     * into a clean, concise value for the camera settings card, returning `null` when flash did not fire.
+     */
+    fun formatFlashSetting(rawFlash: String?): String? {
+        val clean = rawFlash?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        if (!clean.contains("Fired", ignoreCase = true)) return null
+        return when {
+            clean.contains("Auto", ignoreCase = true) -> "Fired (auto)"
+            clean.contains("Forced", ignoreCase = true) -> "Fired (forced)"
+            else -> "Fired"
+        }
+    }
+
+    /**
+     * Builds the exact readable storage path shown in the Details sheet and copied to the clipboard.
+     */
+    fun buildMediaCopyPath(
+        isLocal: Boolean,
+        storagePath: String?,
+        driveFolderPath: String,
+        fileName: String
+    ): String {
+        val cleanName = fileName.trim()
+        if (isLocal) {
+            val rel = storagePath?.trim()?.trim('/')?.takeIf { it.isNotBlank() }
+            if (rel != null) {
+                return "/storage/emulated/0/$rel/$cleanName"
+            }
+            val fallback = formatDisplayFolderPath(driveFolderPath).trim('/')
+            return if (fallback.isNotEmpty()) "/storage/emulated/0/$fallback/$cleanName" else cleanName
+        }
+        val folder = driveFolderPath.trim().trimEnd('/')
+        return when {
+            folder.isEmpty() -> cleanName
+            folder.contains(" / ") -> "$folder / $cleanName"
+            else -> "$folder/$cleanName"
+        }
+    }
+
     fun formatMegapixels(width: Int?, height: Int?): String? {
         if (width == null || height == null || width <= 0 || height <= 0) return null
         val mp = (width.toLong() * height.toLong()) / 1_000_000.0

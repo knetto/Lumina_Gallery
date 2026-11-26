@@ -267,26 +267,7 @@ class ImageNetObjectEngine(private val context: Context) {
             }
         }
 
-        // If the model emitted unnormalized logits (negative values or sum far from 1.0), apply softmax
-        var hasNeg = false
-        var maxVal = Float.NEGATIVE_INFINITY
-        var sum = 0.0
-        for (v in rawFloat) {
-            if (v < -0.01f) hasNeg = true
-            if (v > maxVal) maxVal = v
-            sum += v.toDouble()
-        }
-        if (!hasNeg && sum in 0.90..1.10 && maxVal <= 1.05f) {
-            return rawFloat
-        }
-        var expSum = 0.0
-        val exps = DoubleArray(rawFloat.size) { i ->
-            val e = exp((rawFloat[i] - maxVal).toDouble())
-            expSum += e
-            e
-        }
-        if (expSum <= 1e-12) return FloatArray(rawFloat.size)
-        return FloatArray(rawFloat.size) { i -> (exps[i] / expSum).toFloat() }
+        return normalizeOutputToProbabilities(rawFloat)
     }
 
     fun close() {
@@ -300,5 +281,49 @@ class ImageNetObjectEngine(private val context: Context) {
         private const val MODEL_ASSET_NAME = "efficientnet_lite2.tflite"
         private const val LABELS_ASSET_NAME = "imagenet_1000_labels.txt"
         private const val DEFAULT_INPUT_SIZE = 260
+
+        /**
+         * Converts raw dequantized model outputs into a probability vector.
+         *
+         * IMPORTANT: 8-bit quantized 1,000-class Softmax models (like EfficientNet-Lite2 int8/uint8)
+         * truncate hundreds of small tail probabilities (< 0.002) down to 0, so the sum of valid
+         * probabilities is routinely 0.15–0.88 (< 0.90). Applying a second softmax to an already
+         * non-negative `[0, 1]` vector would flatten every class to ~0.001 (collapsing all object
+         * detections AND inflating the 398-class ImageNet animal sum to ~0.398, vetoing all human
+         * faces!). Therefore softmax is ONLY applied when outputs are actual unnormalized logits
+         * (contain negative values, exceed 1.05, or sum well above 1.25).
+         */
+        internal fun normalizeOutputToProbabilities(rawFloat: FloatArray): FloatArray {
+            if (rawFloat.isEmpty()) return rawFloat
+            var hasNeg = false
+            var maxVal = Float.NEGATIVE_INFINITY
+            var sum = 0.0
+            for (v in rawFloat) {
+                if (!v.isFinite()) continue
+                if (v < -0.01f) hasNeg = true
+                if (v > maxVal) maxVal = v
+                sum += v.toDouble()
+            }
+            if (!maxVal.isFinite()) return FloatArray(rawFloat.size)
+
+            // Already a probability vector (including quantized softmax outputs with truncated tails or all-zeros)
+            if (!hasNeg && maxVal <= 1.05f && sum <= 1.25) {
+                return FloatArray(rawFloat.size) { i ->
+                    val v = rawFloat[i]
+                    if (v.isFinite() && v > 0f) v.coerceAtMost(1f) else 0f
+                }
+            }
+
+            // Unnormalized logits -> numerically stable softmax
+            var expSum = 0.0
+            val exps = DoubleArray(rawFloat.size) { i ->
+                val v = rawFloat[i]
+                val e = if (v.isFinite()) exp((v - maxVal).toDouble()) else 0.0
+                expSum += e
+                e
+            }
+            if (expSum <= 1e-12) return FloatArray(rawFloat.size)
+            return FloatArray(rawFloat.size) { i -> (exps[i] / expSum).toFloat() }
+        }
     }
 }
