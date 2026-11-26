@@ -65,10 +65,12 @@ fun PersonAvatar(
     val cropFile = remember(cropPath) {
         cropPath?.takeIf { it.isNotBlank() }?.let { File(it) }?.takeIf { it.exists() }
     }
-    val request = remember(cropFile) {
+    val fileStamp = remember(cropFile) { cropFile?.lastModified() ?: 0L }
+    val request = remember(cropFile, fileStamp) {
         cropFile?.let { file ->
             ImageRequest.Builder(context)
                 .data(file)
+                .memoryCacheKey("person_avatar_${file.name}_$fileStamp")
                 .size(256)
                 .crossfade(false)
                 .build()

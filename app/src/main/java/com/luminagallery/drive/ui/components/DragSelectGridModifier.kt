@@ -1,6 +1,8 @@
 package com.luminagallery.drive.ui.components
 
-import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.runtime.LaunchedEffect
@@ -14,16 +16,22 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 
 /**
  * Samsung One UI / Google Photos-style continuous drag-to-select AND drag-to-move modifier
  * across a `LazyVerticalGrid`:
+ *  - Long-press an unselected photo & release (without dragging) -> cleanly selects that photo
+ *    and consumes the UP event on `PointerEventPass.Initial` BEFORE child `MediaGridItem.clickable`
+ *    can see it, so releasing never accidentally toggles the selection back off!
  *  - Long-press an unselected photo & slide across other photos -> smooth range selection with
  *    O(1) lookup, batched range updates, and auto-scroll.
  *  - Long-press an ALREADY-SELECTED photo (when [moveDragEnabled] is true) -> immediately lifts
@@ -131,6 +139,91 @@ fun Modifier.photoGridDragSelect(
         dragSessionRef.lastTargetIndex = currentIndex
     }
 
+    fun startLongPressSession(startOffset: Offset): Boolean {
+        val hitId = itemIdAtOffset(startOffset) ?: return false
+        val idx = latestIndexById[hitId] ?: return false
+        val alreadySelected = hitId in latestSelectedIds
+
+        // Samsung Gallery behavior: long-pressing an ALREADY-SELECTED photo immediately
+        // lifts all selected photos for drag-and-drop into parent folder or sidebar albums!
+        if (alreadySelected && latestMoveDragEnabled && latestOnMoveStart != null) {
+            dragSessionRef.reset()
+            dragSessionRef.isMoveDragging = true
+            dragSessionRef.anchorItemId = hitId
+            autoScrollSpeed = 0f
+            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+            latestOnMoveStart?.invoke(latestSelectedIds, hitId, startOffset)
+            return true
+        }
+
+        dragSessionRef.baselineSelection = latestSelectedIds
+        dragSessionRef.anchorIndex = idx
+        dragSessionRef.anchorItemId = hitId
+        dragSessionRef.lastTargetIndex = idx
+        dragSessionRef.selectTargetState = !alreadySelected
+        dragSessionRef.isMoveDragging = false
+        dragSessionRef.startOffset = startOffset
+        lastDragPosition = startOffset
+        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+        applyBatch(setOf(hitId), dragSessionRef.selectTargetState)
+        return true
+    }
+
+    fun handleDragMove(pos: Offset) {
+        if (dragSessionRef.isMoveDragging) {
+            autoScrollSpeed = 0f
+            latestOnMoveMove?.invoke(pos)
+            return
+        }
+        if (dragSessionRef.anchorIndex < 0) return
+        lastDragPosition = pos
+
+        // Single-gesture photo drag-out: if user grabbed 1 photo (no range extended yet)
+        // and dragged directly left toward the sidebar or straight up to the top parent drop zone,
+        // seamlessly lift that photo into move-drag mode!
+        val anchorId = dragSessionRef.anchorItemId
+        if (latestMoveDragEnabled &&
+            latestOnMoveStart != null &&
+            anchorId != null &&
+            dragSessionRef.selectTargetState &&
+            dragSessionRef.lastTargetIndex == dragSessionRef.anchorIndex &&
+            (pos.x <= escapeLeftThresholdPx || (pos.y <= escapeTopThresholdPx && pos.y < dragSessionRef.startOffset.y - 24f))
+        ) {
+            dragSessionRef.isMoveDragging = true
+            autoScrollSpeed = 0f
+            val moveIds = latestSelectedIds.ifEmpty { setOf(anchorId) }
+            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+            latestOnMoveStart?.invoke(moveIds, anchorId, pos)
+            return
+        }
+
+        val viewportHeight = gridState.layoutInfo.viewportSize.height.toFloat()
+        autoScrollSpeed = when {
+            viewportHeight > 0f && pos.y < autoScrollZonePx -> {
+                val factor = ((autoScrollZonePx - pos.y) / autoScrollZonePx).coerceIn(0f, 1f)
+                -maxAutoScrollSpeedPx * factor
+            }
+            viewportHeight > 0f && pos.y > viewportHeight - autoScrollZonePx -> {
+                val factor = ((pos.y - (viewportHeight - autoScrollZonePx)) / autoScrollZonePx).coerceIn(0f, 1f)
+                maxAutoScrollSpeedPx * factor
+            }
+            else -> 0f
+        }
+        val hitId = itemIdAtOffset(pos) ?: return
+        val idx = latestIndexById[hitId] ?: return
+        applyRange(idx)
+    }
+
+    fun finishLongPressSession(cancelled: Boolean) {
+        val wasMove = dragSessionRef.isMoveDragging
+        dragSessionRef.reset()
+        lastDragPosition = null
+        autoScrollSpeed = 0f
+        if (wasMove) {
+            latestOnMoveEnd?.invoke(cancelled)
+        }
+    }
+
     LaunchedEffect(autoScrollSpeed) {
         if (autoScrollSpeed == 0f) return@LaunchedEffect
         while (isActive && autoScrollSpeed != 0f) {
@@ -147,101 +240,35 @@ fun Modifier.photoGridDragSelect(
     }
 
     pointerInput(gridState) {
-        detectDragGesturesAfterLongPress(
-            onDragStart = { startOffset ->
-                val hitId = itemIdAtOffset(startOffset) ?: return@detectDragGesturesAfterLongPress
-                val idx = latestIndexById[hitId] ?: return@detectDragGesturesAfterLongPress
-                val alreadySelected = hitId in latestSelectedIds
+        awaitEachGesture {
+            val down = awaitFirstDown(requireUnconsumed = false)
+            val longPress = awaitLongPressOrCancellation(down.id) ?: return@awaitEachGesture
+            if (!startLongPressSession(longPress.position)) return@awaitEachGesture
 
-                // Samsung Gallery behavior: long-pressing an ALREADY-SELECTED photo immediately
-                // lifts all selected photos for drag-and-drop into parent folder or sidebar albums!
-                if (alreadySelected && latestMoveDragEnabled && latestOnMoveStart != null) {
-                    dragSessionRef.reset()
-                    dragSessionRef.isMoveDragging = true
-                    dragSessionRef.anchorItemId = hitId
-                    autoScrollSpeed = 0f
-                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                    latestOnMoveStart?.invoke(latestSelectedIds, hitId, startOffset)
-                    return@detectDragGesturesAfterLongPress
-                }
+            // Consume all subsequent MOVE and UP events on PointerEventPass.Initial (parent -> child)
+            // so lifting the finger after a stationary long-press NEVER leaks an unconsumed UP to
+            // child MediaGridItem.clickable (which would immediately toggle the item back off!).
+            try {
+                while (true) {
+                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                    val activeChange = event.changes.firstOrNull { it.id == longPress.id }
+                        ?: event.changes.firstOrNull()
+                        ?: break
+                    event.changes.forEach { it.consume() }
 
-                dragSessionRef.baselineSelection = latestSelectedIds
-                dragSessionRef.anchorIndex = idx
-                dragSessionRef.anchorItemId = hitId
-                dragSessionRef.lastTargetIndex = idx
-                dragSessionRef.selectTargetState = !alreadySelected
-                dragSessionRef.isMoveDragging = false
-                dragSessionRef.startOffset = startOffset
-                lastDragPosition = startOffset
-                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                applyBatch(setOf(hitId), dragSessionRef.selectTargetState)
-            },
-            onDragEnd = {
-                val wasMove = dragSessionRef.isMoveDragging
-                dragSessionRef.reset()
-                lastDragPosition = null
-                autoScrollSpeed = 0f
-                if (wasMove) {
-                    latestOnMoveEnd?.invoke(false)
-                }
-            },
-            onDragCancel = {
-                val wasMove = dragSessionRef.isMoveDragging
-                dragSessionRef.reset()
-                lastDragPosition = null
-                autoScrollSpeed = 0f
-                if (wasMove) {
-                    latestOnMoveEnd?.invoke(true)
-                }
-            },
-            onDrag = { change, _ ->
-                if (dragSessionRef.isMoveDragging) {
-                    change.consume()
-                    autoScrollSpeed = 0f
-                    latestOnMoveMove?.invoke(change.position)
-                    return@detectDragGesturesAfterLongPress
-                }
-                if (dragSessionRef.anchorIndex < 0) return@detectDragGesturesAfterLongPress
-                change.consume()
-                val pos = change.position
-                lastDragPosition = pos
-
-                // Single-gesture photo drag-out: if user grabbed 1 photo (no range extended yet)
-                // and dragged directly left toward the sidebar or straight up to the top parent drop zone,
-                // seamlessly lift that photo into move-drag mode!
-                val anchorId = dragSessionRef.anchorItemId
-                if (latestMoveDragEnabled &&
-                    latestOnMoveStart != null &&
-                    anchorId != null &&
-                    dragSessionRef.selectTargetState &&
-                    dragSessionRef.lastTargetIndex == dragSessionRef.anchorIndex &&
-                    (pos.x <= escapeLeftThresholdPx || (pos.y <= escapeTopThresholdPx && pos.y < dragSessionRef.startOffset.y - 24f))
-                ) {
-                    dragSessionRef.isMoveDragging = true
-                    autoScrollSpeed = 0f
-                    val moveIds = latestSelectedIds.ifEmpty { setOf(anchorId) }
-                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                    latestOnMoveStart?.invoke(moveIds, anchorId, pos)
-                    return@detectDragGesturesAfterLongPress
-                }
-
-                val viewportHeight = gridState.layoutInfo.viewportSize.height.toFloat()
-                autoScrollSpeed = when {
-                    viewportHeight > 0f && pos.y < autoScrollZonePx -> {
-                        val factor = ((autoScrollZonePx - pos.y) / autoScrollZonePx).coerceIn(0f, 1f)
-                        -maxAutoScrollSpeedPx * factor
+                    if (!activeChange.pressed) {
+                        finishLongPressSession(cancelled = false)
+                        break
                     }
-                    viewportHeight > 0f && pos.y > viewportHeight - autoScrollZonePx -> {
-                        val factor = ((pos.y - (viewportHeight - autoScrollZonePx)) / autoScrollZonePx).coerceIn(0f, 1f)
-                        maxAutoScrollSpeedPx * factor
+                    if (activeChange.positionChanged()) {
+                        handleDragMove(activeChange.position)
                     }
-                    else -> 0f
                 }
-                val hitId = itemIdAtOffset(pos) ?: return@detectDragGesturesAfterLongPress
-                val idx = latestIndexById[hitId] ?: return@detectDragGesturesAfterLongPress
-                applyRange(idx)
+            } catch (ce: CancellationException) {
+                finishLongPressSession(cancelled = true)
+                throw ce
             }
-        )
+        }
     }
 }
 

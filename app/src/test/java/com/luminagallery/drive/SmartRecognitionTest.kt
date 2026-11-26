@@ -1,7 +1,12 @@
 package com.luminagallery.drive
 
 import com.luminagallery.drive.data.repository.ai.FaceClusteringEngine
+import com.luminagallery.drive.data.repository.ai.FaceEmbeddingEngine
 import com.luminagallery.drive.data.repository.ai.SmartObjectVocabulary
+import com.luminagallery.drive.data.repository.ai.SmartRecognitionManager
+import com.luminagallery.drive.domain.model.ExifMetadata
+import com.luminagallery.drive.domain.model.MediaItem
+import com.luminagallery.drive.domain.model.MediaType
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -289,6 +294,115 @@ class SmartRecognitionTest {
         assertEquals("Mom", restored.first { it.personId == "new_1" }.profile.name)
         assertTrue(restored.first { it.personId == "new_1" }.profile.isFavorite)
         assertEquals("Alex", restored.first { it.personId == "new_2" }.profile.name)
+    }
+
+    @Test
+    fun centeredAvatarCropRect_neverExceedsPhotoBoundsAndKeepsFaceCentered() {
+        // 1. Standard portrait face near center: exact 1.62x square centered on face
+        val centered = FaceEmbeddingEngine.computeCenteredAvatarCropRect(
+            imageWidth = 1000,
+            imageHeight = 1000,
+            faceLeft = 400f,
+            faceTop = 400f,
+            faceRight = 600f,
+            faceBottom = 600f
+        )!!
+        assertEquals(324f, centered.right - centered.left, 0.5f)
+        assertEquals(324f, centered.bottom - centered.top, 0.5f)
+        assertEquals(500f, (centered.left + centered.right) * 0.5f, 0.5f)
+        assertTrue(centered.left >= 0f && centered.top >= 0f && centered.right <= 1000f && centered.bottom <= 1000f)
+
+        // 2. Face near top edge: shrinks symmetrically so face stays centered with ZERO black bar
+        val nearTop = FaceEmbeddingEngine.computeCenteredAvatarCropRect(
+            imageWidth = 1000,
+            imageHeight = 1000,
+            faceLeft = 400f,
+            faceTop = 40f,
+            faceRight = 600f,
+            faceBottom = 240f
+        )!!
+        assertEquals(0f, nearTop.top, 0.01f)
+        assertEquals(500f, (nearTop.left + nearTop.right) * 0.5f, 0.5f)
+        assertEquals(nearTop.right - nearTop.left, nearTop.bottom - nearTop.top, 0.5f)
+        assertTrue(nearTop.left >= 0f && nearTop.right <= 1000f && nearTop.bottom <= 1000f)
+
+        // 3. Face touching left edge: clamps strictly inside [0..W, 0..H] without clipping the face
+        val leftEdge = FaceEmbeddingEngine.computeCenteredAvatarCropRect(
+            imageWidth = 1000,
+            imageHeight = 1000,
+            faceLeft = 0f,
+            faceTop = 400f,
+            faceRight = 200f,
+            faceBottom = 600f
+        )!!
+        assertEquals(0f, leftEdge.left, 0.01f)
+        assertTrue(leftEdge.right >= 200f && leftEdge.right <= 1000f)
+        assertTrue(leftEdge.top >= 0f && leftEdge.bottom <= 1000f)
+
+        // 4. Close-up face taller than landscape height: clamped cleanly to image height
+        val closeUp = FaceEmbeddingEngine.computeCenteredAvatarCropRect(
+            imageWidth = 1200,
+            imageHeight = 600,
+            faceLeft = 350f,
+            faceTop = 10f,
+            faceRight = 850f,
+            faceBottom = 590f
+        )!!
+        assertEquals(600f, closeUp.right - closeUp.left, 0.5f)
+        assertEquals(600f, closeUp.bottom - closeUp.top, 0.5f)
+        assertEquals(0f, closeUp.top, 0.01f)
+        assertEquals(600f, closeUp.bottom, 0.01f)
+    }
+
+    @Test
+    fun incrementalSmartScan_skips30kAlreadyIndexedPhotosAndScansOnlyNewOrModified() {
+        val emptyExif = ExifMetadata(null, null, null, null, null, null, null, "")
+        fun item(id: String, epochMs: Long) = MediaItem(
+            id = id,
+            parentId = "local_bucket_cam",
+            name = "$id.jpg",
+            mimeType = "image/jpeg",
+            mediaType = MediaType.PHOTO,
+            sizeBytes = 1024L,
+            createdTimeEpochMs = epochMs,
+            monthYearLabel = "Nov 2026",
+            fullDateLabel = "Nov 26, 2026",
+            thumbnailLink = null,
+            width = 1000,
+            height = 1000,
+            rotation = 0,
+            durationMillis = null,
+            exif = emptyExif,
+            isLocal = true,
+            localContentUri = "content://media/$id"
+        )
+
+        val totalExisting = 30_000
+        val stamps = HashMap<String, Long>(totalExisting * 2)
+        val eligible = ArrayList<MediaItem>(totalExisting + 5)
+        for (i in 0 until totalExisting) {
+            val id = "local_$i"
+            val ts = 1_700_000_000_000L + i
+            stamps[id] = ts
+            // Modify 1 existing item's timestamp to verify edited files are re-scanned
+            eligible.add(item(id, if (i == 42) ts + 9999L else ts))
+        }
+        // Add 5 brand-new photos
+        for (j in 0 until 5) {
+            eligible.add(item("local_new_$j", 1_750_000_000_000L + j))
+        }
+
+        val toScan = SmartRecognitionManager.filterUnindexedItems(eligible, stamps)
+        assertEquals(6, toScan.size)
+        assertTrue(toScan.any { it.id == "local_42" })
+        for (j in 0 until 5) {
+            assertTrue(toScan.any { it.id == "local_new_$j" })
+        }
+
+        // Wi-Fi continuation guard
+        assertFalse(SmartRecognitionManager.shouldStopScanForWifi(requireWifiThroughout = true, isUnmeteredWifi = true))
+        assertTrue(SmartRecognitionManager.shouldStopScanForWifi(requireWifiThroughout = true, isUnmeteredWifi = false))
+        assertFalse(SmartRecognitionManager.shouldStopScanForWifi(requireWifiThroughout = false, isUnmeteredWifi = false))
     }
 
     @Test

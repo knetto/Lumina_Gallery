@@ -41,7 +41,7 @@ import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 
 class AppContainer(context: Context) {
-    private val appContext = context.applicationContext
+    val appContext: Context = context.applicationContext
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     val json: Json = NetworkModule.createJson()
@@ -147,6 +147,7 @@ class AppContainer(context: Context) {
         offlineMediaManager = offlineMediaManager,
         preferencesManager = preferencesManager,
         okHttpClient = okHttpClient,
+        driveApi = driveApiService,
         networkMonitor = networkMonitor
     )
 

@@ -8,6 +8,11 @@ import com.luminagallery.drive.data.local.entity.PersonClusterEntity
 import com.luminagallery.drive.data.local.entity.PhotoSmartIndexEntity
 import kotlinx.coroutines.flow.Flow
 
+data class IndexedItemStampRow(
+    val itemId: String,
+    val dateModifiedMs: Long
+)
+
 @Dao
 interface SmartRecognitionDao {
 
@@ -48,6 +53,15 @@ interface SmartRecognitionDao {
     // Detected faces
     @Query("SELECT * FROM detected_faces WHERE isExcludedByUser = 0")
     fun observeAllActiveFaces(): Flow<List<DetectedFaceEntity>>
+
+    @Query("SELECT * FROM detected_faces WHERE isExcludedByUser = 0")
+    suspend fun getAllActiveFacesSync(): List<DetectedFaceEntity>
+
+    @Query("UPDATE detected_faces SET cropPath = :cropPath WHERE faceId = :faceId")
+    suspend fun updateFaceCropPath(faceId: String, cropPath: String)
+
+    @Query("UPDATE person_clusters SET coverCropPath = :cropPath, updatedAtEpochMs = :updatedAt WHERE personId = :personId")
+    suspend fun updatePersonCoverCropPath(personId: String, cropPath: String, updatedAt: Long)
 
     @Query("SELECT * FROM detected_faces WHERE personId = :personId AND isExcludedByUser = 0 ORDER BY qualityScore DESC")
     fun observeFacesForPerson(personId: String): Flow<List<DetectedFaceEntity>>
@@ -91,6 +105,9 @@ interface SmartRecognitionDao {
 
     @Query("SELECT * FROM photo_smart_index")
     suspend fun getAllSmartIndex(): List<PhotoSmartIndexEntity>
+
+    @Query("SELECT itemId, dateModifiedMs FROM photo_smart_index")
+    suspend fun getIndexedItemStamps(): List<IndexedItemStampRow>
 
     @Query("SELECT * FROM photo_smart_index WHERE itemId = :itemId LIMIT 1")
     fun observeSmartIndexForPhoto(itemId: String): Flow<PhotoSmartIndexEntity?>

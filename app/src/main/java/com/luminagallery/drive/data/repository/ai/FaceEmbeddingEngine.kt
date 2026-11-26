@@ -18,6 +18,8 @@ import java.nio.ByteOrder
 import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
 import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.roundToInt
 
 /**
  * 100% offline on-device face-embedding engine powered by MobileFaceNet (LiteRT / TFLite):
@@ -194,6 +196,82 @@ class FaceEmbeddingEngine(private val context: Context) {
     }.getOrNull()
 
     /**
+     * Extracts a clean, unrotated, face-centered square portrait bitmap for visible circular
+     * People avatars. Strictly clamped inside [source] bounds so circular avatars never show
+     * rotated black corners or black edge bars.
+     */
+    fun extractAvatarPortraitCrop(
+        source: Bitmap,
+        face: Face,
+        outputSize: Int = AVATAR_SIZE_PX
+    ): Bitmap? {
+        val box = face.boundingBox
+        return extractAvatarPortraitCropFromBounds(
+            source = source,
+            faceLeft = box.left.toFloat(),
+            faceTop = box.top.toFloat(),
+            faceRight = box.right.toFloat(),
+            faceBottom = box.bottom.toFloat(),
+            outputSize = outputSize
+        )
+    }
+
+    /**
+     * Same unrotated, strictly in-bounds face-centered circular portrait crop computed from
+     * normalized `[0..1]` face bounding box coordinates stored in Room (used to upgrade
+     * existing People thumbnails without resetting clusters or names).
+     */
+    fun extractAvatarPortraitCropFromNormalizedBox(
+        source: Bitmap,
+        bboxLeft: Float,
+        bboxTop: Float,
+        bboxRight: Float,
+        bboxBottom: Float,
+        outputSize: Int = AVATAR_SIZE_PX
+    ): Bitmap? = extractAvatarPortraitCropFromBounds(
+        source = source,
+        faceLeft = bboxLeft * source.width,
+        faceTop = bboxTop * source.height,
+        faceRight = bboxRight * source.width,
+        faceBottom = bboxBottom * source.height,
+        outputSize = outputSize
+    )
+
+    private fun extractAvatarPortraitCropFromBounds(
+        source: Bitmap,
+        faceLeft: Float,
+        faceTop: Float,
+        faceRight: Float,
+        faceBottom: Float,
+        outputSize: Int
+    ): Bitmap? = runCatching {
+        val rectF = computeCenteredAvatarCropRect(
+            imageWidth = source.width,
+            imageHeight = source.height,
+            faceLeft = faceLeft,
+            faceTop = faceTop,
+            faceRight = faceRight,
+            faceBottom = faceBottom
+        ) ?: return@runCatching null
+
+        val srcLeft = rectF.left.roundToInt().coerceIn(0, (source.width - 1).coerceAtLeast(0))
+        val srcTop = rectF.top.roundToInt().coerceIn(0, (source.height - 1).coerceAtLeast(0))
+        val srcRight = rectF.right.roundToInt().coerceIn(srcLeft + 1, source.width)
+        val srcBottom = rectF.bottom.roundToInt().coerceIn(srcTop + 1, source.height)
+
+        val out = Bitmap.createBitmap(outputSize, outputSize, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(out)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        canvas.drawBitmap(
+            source,
+            Rect(srcLeft, srcTop, srcRight, srcBottom),
+            Rect(0, 0, outputSize, outputSize),
+            paint
+        )
+        out
+    }.getOrNull()
+
+    /**
      * Computes an L2-normalized MobileFaceNet embedding for a canonical 5-point aligned [face],
      * averaging original and horizontally-flipped passes for pose invariance.
      */
@@ -277,13 +355,13 @@ class FaceEmbeddingEngine(private val context: Context) {
     }
 
     /**
-     * Persists an already-extracted upright portrait bitmap to `noBackupFilesDir/face_crops/`.
+     * Persists a face-centered portrait bitmap to `noBackupFilesDir/face_crops/`.
      */
     fun saveAvatarBitmap(avatar: Bitmap, faceId: String): String? = try {
         val safeName = faceId.replace(Regex("[^A-Za-z0-9_-]"), "_").take(80)
         val file = File(faceCropsDir, "$safeName.jpg")
         FileOutputStream(file).use { out ->
-            avatar.compress(Bitmap.CompressFormat.JPEG, 88, out)
+            avatar.compress(Bitmap.CompressFormat.JPEG, 90, out)
         }
         file.absolutePath
     } catch (_: Throwable) {
@@ -308,11 +386,73 @@ class FaceEmbeddingEngine(private val context: Context) {
         }
     }
 
+    data class CropRectF(
+        val left: Float,
+        val top: Float,
+        val right: Float,
+        val bottom: Float
+    )
+
     companion object {
         private const val MODEL_ASSET_NAME = "mobilefacenet.tflite"
         private const val DEFAULT_INPUT_SIZE = 112
         private const val DEFAULT_EMBEDDING_DIM = 192
         const val AVATAR_PADDING_FACTOR = 1.62f
-        const val AVATAR_SIZE_PX = 160
+        const val MIN_CENTERED_AVATAR_FACTOR = 1.12f
+        const val AVATAR_SIZE_PX = 192
+
+        /**
+         * Computes an unrotated, strictly in-bounds square crop centered on the detected face.
+         * Never extends outside `[0..imageWidth] x [0..imageHeight]`, eliminating black triangles
+         * or black bars in circular People avatars while keeping the face centered in the circle.
+         */
+        internal fun computeCenteredAvatarCropRect(
+            imageWidth: Int,
+            imageHeight: Int,
+            faceLeft: Float,
+            faceTop: Float,
+            faceRight: Float,
+            faceBottom: Float,
+            paddingFactor: Float = AVATAR_PADDING_FACTOR
+        ): CropRectF? {
+            if (imageWidth <= 0 || imageHeight <= 0) return null
+            val imgW = imageWidth.toFloat()
+            val imgH = imageHeight.toFloat()
+            val fLeft = faceLeft.coerceIn(0f, imgW)
+            val fTop = faceTop.coerceIn(0f, imgH)
+            val fRight = faceRight.coerceIn(fLeft, imgW)
+            val fBottom = faceBottom.coerceIn(fTop, imgH)
+            val faceW = (fRight - fLeft).coerceAtLeast(16f)
+            val faceH = (fBottom - fTop).coerceAtLeast(16f)
+            val baseSize = max(faceW, faceH)
+
+            val cx = (fLeft + fRight) * 0.5f
+            // Subtle 6% upward bias centers eyes + hair naturally inside a circular avatar
+            val targetCy = ((fTop + fBottom) * 0.5f - baseSize * 0.06f).coerceIn(0f, imgH)
+
+            val maxPossibleSide = min(imgW, imgH)
+            val desiredSide = (baseSize * paddingFactor).coerceAtMost(maxPossibleSide)
+            val minCenteredSide = (baseSize * MIN_CENTERED_AVATAR_FACTOR).coerceAtMost(maxPossibleSide)
+
+            // Largest symmetric square around (cx, targetCy) that stays 100% inside the photo
+            val maxSymmetricHalf = minOf(cx, imgW - cx, targetCy, imgH - targetCy).coerceAtLeast(0f)
+            val maxSymmetricSide = maxSymmetricHalf * 2f
+
+            val finalSide = when {
+                maxSymmetricSide >= desiredSide -> desiredSide
+                maxSymmetricSide >= minCenteredSide -> maxSymmetricSide
+                else -> minCenteredSide
+            }.coerceIn(1f, maxPossibleSide)
+
+            val half = finalSide * 0.5f
+            val left = (cx - half).coerceIn(0f, (imgW - finalSide).coerceAtLeast(0f))
+            val top = (targetCy - half).coerceIn(0f, (imgH - finalSide).coerceAtLeast(0f))
+            return CropRectF(
+                left = left,
+                top = top,
+                right = (left + finalSide).coerceAtMost(imgW),
+                bottom = (top + finalSide).coerceAtMost(imgH)
+            )
+        }
     }
 }

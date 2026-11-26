@@ -1,8 +1,10 @@
 package com.luminagallery.drive
 
 import com.luminagallery.drive.data.repository.LocalFileOperationsManager
+import com.luminagallery.drive.data.repository.ai.PersonSummary
 import com.luminagallery.drive.domain.model.UserPreferences
 import com.luminagallery.drive.ui.components.computeSteppedPinchColumns
+import com.luminagallery.drive.ui.screens.people.PeopleViewModel
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -67,5 +69,44 @@ class GalleryUxInteractionsTest {
         assertEquals(4, prefs.gridColumns)
         assertEquals(3, prefs.albumGridColumns)
         assertTrue(prefs.showAlbumSidebarDefault)
+    }
+
+    @Test
+    fun resolveCombineOrder_prefersNamedTargetAndLargerClusterWhenBothUnnamed() {
+        fun fakePerson(id: String, name: String, count: Int) = PersonSummary(
+            personId = id,
+            name = name,
+            isHidden = false,
+            isFavorite = false,
+            coverCropPath = null,
+            coverPhotoId = null,
+            photoCount = count,
+            photoIds = emptySet()
+        )
+
+        val unnamedSmall = fakePerson("u1", "", 2)
+        val unnamedLarge = fakePerson("u2", "", 9)
+        val namedTarget = fakePerson("n1", "Mom", 4)
+        val namedDragged = fakePerson("n2", "Alex", 12)
+
+        // Unnamed dragged onto named -> named stays primary
+        val r1 = PeopleViewModel.resolveCombineOrder(dragged = unnamedLarge, target = namedTarget)
+        assertEquals("n1", r1.first.personId)
+        assertEquals("u2", r1.second.personId)
+
+        // Named dragged onto unnamed -> named stays primary
+        val r2 = PeopleViewModel.resolveCombineOrder(dragged = namedDragged, target = unnamedLarge)
+        assertEquals("n2", r2.first.personId)
+        assertEquals("u2", r2.second.personId)
+
+        // Both named -> the circle dropped onto (target) stays primary
+        val r3 = PeopleViewModel.resolveCombineOrder(dragged = namedDragged, target = namedTarget)
+        assertEquals("n1", r3.first.personId)
+        assertEquals("n2", r3.second.personId)
+
+        // Both unnamed -> larger cluster stays primary
+        val r4 = PeopleViewModel.resolveCombineOrder(dragged = unnamedLarge, target = unnamedSmall)
+        assertEquals("u2", r4.first.personId)
+        assertEquals("u1", r4.second.personId)
     }
 }

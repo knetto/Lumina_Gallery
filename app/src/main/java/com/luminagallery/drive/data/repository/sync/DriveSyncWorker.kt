@@ -11,6 +11,7 @@ import androidx.work.WorkManager
 import androidx.work.WorkerFactory
 import androidx.work.WorkerParameters
 import com.luminagallery.drive.data.local.LocalMediaRepository
+import com.luminagallery.drive.data.remote.NetworkMonitor
 import com.luminagallery.drive.data.remote.auth.DriveAuthException
 import com.luminagallery.drive.data.repository.GalleryExtrasRepository
 import com.luminagallery.drive.data.repository.GalleryRepository
@@ -68,8 +69,14 @@ class MediaIndexWorker(
                 runCatching { ocrIndexerManager.syncOcrIndex(localItems, maxNewItemsPerRun = 150) }
             }
         }
-        // Scan both local photos & connected Google Drive thumbnails (strictly skipping locked/hidden folders)
-        runCatching { smartRecognitionManager.syncSmartIndex(maxNewItemsPerRun = 260, includeDrive = true) }
+        // Incrementally scan ONLY new/modified local & Google Drive items (locked/hidden always skipped)
+        runCatching {
+            smartRecognitionManager.syncSmartIndex(
+                maxNewItemsPerRun = 1_500,
+                includeDrive = true,
+                respectWifiOnlyForDrive = true
+            )
+        }
         return Result.success()
     }
 }
@@ -79,7 +86,8 @@ class LuminaWorkerFactory(
     private val localMediaRepository: LocalMediaRepository,
     private val extrasRepository: GalleryExtrasRepository,
     private val ocrIndexerManager: OcrIndexerManager,
-    private val smartRecognitionManager: SmartRecognitionManager
+    private val smartRecognitionManager: SmartRecognitionManager,
+    private val networkMonitor: NetworkMonitor
 ) : WorkerFactory() {
 
     override fun createWorker(
@@ -100,6 +108,12 @@ class LuminaWorkerFactory(
             ocrIndexerManager = ocrIndexerManager,
             smartRecognitionManager = smartRecognitionManager
         )
+        SmartLibraryScanWorker::class.java.name -> SmartLibraryScanWorker(
+            appContext = appContext,
+            workerParams = workerParameters,
+            smartRecognitionManager = smartRecognitionManager,
+            networkMonitor = networkMonitor
+        )
         else -> null
     }
 }
@@ -108,21 +122,23 @@ object MediaIndexScheduler {
     private const val UNIQUE_WORK_NAME = "lumina_media_background_indexer"
 
     fun ensureScheduled(context: Context) {
+        // Periodically scans ONLY new/unindexed photos while on Wi-Fi & battery not low
+        // so once the full library is scanned, new photos stay automatically up to date!
         val constraints = Constraints.Builder()
+            .setRequiredNetworkType(NetworkType.UNMETERED)
             .setRequiresBatteryNotLow(true)
-            .setRequiresCharging(true)
             .build()
         val request = PeriodicWorkRequestBuilder<MediaIndexWorker>(
-            repeatInterval = 24,
+            repeatInterval = 6,
             repeatIntervalTimeUnit = TimeUnit.HOURS,
-            flexTimeInterval = 4,
+            flexTimeInterval = 1,
             flexTimeIntervalUnit = TimeUnit.HOURS
         )
             .setConstraints(constraints)
             .build()
         WorkManager.getInstance(context).enqueueUniquePeriodicWork(
             UNIQUE_WORK_NAME,
-            ExistingPeriodicWorkPolicy.KEEP,
+            ExistingPeriodicWorkPolicy.UPDATE,
             request
         )
     }

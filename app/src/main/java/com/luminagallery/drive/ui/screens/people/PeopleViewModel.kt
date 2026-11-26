@@ -1,5 +1,6 @@
 package com.luminagallery.drive.ui.screens.people
 
+import android.content.Context
 import android.net.Uri
 import androidx.compose.runtime.Immutable
 import androidx.lifecycle.ViewModel
@@ -17,6 +18,7 @@ import com.luminagallery.drive.data.repository.ai.PersonMergeSuggestionUi
 import com.luminagallery.drive.data.repository.ai.PersonSummary
 import com.luminagallery.drive.data.repository.ai.SmartIndexProgress
 import com.luminagallery.drive.data.repository.ai.SmartRecognitionManager
+import com.luminagallery.drive.data.repository.sync.SmartScanScheduler
 import com.luminagallery.drive.domain.model.MediaItem
 import com.luminagallery.drive.domain.usecase.ExportMediaUseCase
 import kotlinx.coroutines.Dispatchers
@@ -43,10 +45,12 @@ data class PeopleUiState(
 )
 
 class PeopleViewModel(
+    private val appContext: Context,
     private val repository: GalleryRepository,
     private val localMediaRepository: LocalMediaRepository,
     private val extrasRepository: GalleryExtrasRepository,
-    private val smartRecognitionManager: SmartRecognitionManager
+    private val smartRecognitionManager: SmartRecognitionManager,
+    private val networkMonitor: NetworkMonitor
 ) : ViewModel() {
 
     private val showHiddenFlow = MutableStateFlow(false)
@@ -144,29 +148,29 @@ class PeopleViewModel(
     }
 
     fun scanEntireLibrary() {
-        viewModelScope.launch(Dispatchers.IO) {
-            smartRecognitionManager.syncSmartIndex(
-                maxNewItemsPerRun = Int.MAX_VALUE,
-                includeDrive = true,
-                respectWifiOnlyForDrive = true
-            )
+        val onWifi = networkMonitor.networkState.value.isUnmeteredWifi
+        SmartScanScheduler.startBackgroundLibraryScan(appContext, wifiOnly = onWifi)
+        snackbarFlow.value = if (onWifi) {
+            "Scanning in background on Wi-Fi · safe to lock screen"
+        } else {
+            "Scanning local photos in background · connect to Wi-Fi for Drive"
         }
     }
 
     fun pauseScan() {
         smartRecognitionManager.pauseActiveScan()
+        SmartScanScheduler.cancelActiveScan(appContext)
     }
 
     fun rebuildAllSmartIndex() {
         viewModelScope.launch(Dispatchers.IO) {
             clearSelection()
-            snackbarFlow.value = "Rebuilding People & Objects (keeping saved names)…"
+            smartRecognitionManager.pauseActiveScan()
+            SmartScanScheduler.cancelActiveScan(appContext)
+            snackbarFlow.value = "Rebuilding People & Objects in background (keeping saved names)…"
             smartRecognitionManager.resetAllIndexData(preserveNames = true)
-            smartRecognitionManager.syncSmartIndex(
-                maxNewItemsPerRun = Int.MAX_VALUE,
-                includeDrive = true,
-                respectWifiOnlyForDrive = true
-            )
+            val onWifi = networkMonitor.networkState.value.isUnmeteredWifi
+            SmartScanScheduler.startBackgroundLibraryScan(appContext, wifiOnly = onWifi)
         }
     }
 
@@ -258,6 +262,29 @@ class PeopleViewModel(
         }
     }
 
+    fun combineTwoPersons(
+        draggedPersonId: String,
+        targetPersonId: String,
+        combinedName: String
+    ) {
+        if (draggedPersonId == targetPersonId) return
+        viewModelScope.launch {
+            val all = uiState.value.visiblePersons + uiState.value.hiddenPersons
+            val dragged = all.firstOrNull { it.personId == draggedPersonId } ?: return@launch
+            val target = all.firstOrNull { it.personId == targetPersonId } ?: return@launch
+            val (primary, secondary) = resolveCombineOrder(dragged = dragged, target = target)
+            val cleanName = combinedName.trim()
+            smartRecognitionManager.mergePersons(
+                targetPersonId = primary.personId,
+                sourcePersonIds = listOf(secondary.personId),
+                overrideName = cleanName.takeIf { it.isNotEmpty() }
+            )
+            clearSelection()
+            val label = cleanName.ifBlank { primary.name }.ifBlank { "1 person" }
+            snackbarFlow.value = "Combined into $label"
+        }
+    }
+
     fun setSelectedHidden(hidden: Boolean) {
         val ids = selectedIdsFlow.value.toList()
         if (ids.isEmpty()) return
@@ -279,11 +306,32 @@ class PeopleViewModel(
     class Factory(private val container: AppContainer) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T = PeopleViewModel(
+            appContext = container.appContext,
             repository = container.galleryRepository,
             localMediaRepository = container.localMediaRepository,
             extrasRepository = container.galleryExtrasRepository,
-            smartRecognitionManager = container.smartRecognitionManager
+            smartRecognitionManager = container.smartRecognitionManager,
+            networkMonitor = container.networkMonitor
         ) as T
+    }
+
+    internal companion object {
+        /**
+         * Resolves which person stays as the merge target when dragging [dragged] onto [target]:
+         *  - Named person always takes priority over an unnamed face.
+         *  - When both are named, the target circle dropped onto stays primary.
+         *  - When both are unnamed, the cluster with more photos stays primary.
+         */
+        internal fun resolveCombineOrder(
+            dragged: PersonSummary,
+            target: PersonSummary
+        ): Pair<PersonSummary, PersonSummary> = when {
+            target.isNamed && !dragged.isNamed -> target to dragged
+            dragged.isNamed && !target.isNamed -> dragged to target
+            target.isNamed && dragged.isNamed -> target to dragged
+            dragged.photoCount > target.photoCount -> dragged to target
+            else -> target to dragged
+        }
     }
 }
 

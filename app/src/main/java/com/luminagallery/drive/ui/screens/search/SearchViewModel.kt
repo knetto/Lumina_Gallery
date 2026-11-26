@@ -1,5 +1,6 @@
 package com.luminagallery.drive.ui.screens.search
 
+import android.content.Context
 import android.net.Uri
 import androidx.compose.runtime.Immutable
 import androidx.lifecycle.ViewModel
@@ -24,6 +25,7 @@ import com.luminagallery.drive.data.repository.ai.SmartIndexProgress
 import com.luminagallery.drive.data.repository.ai.SmartObjectChip
 import com.luminagallery.drive.data.repository.ai.SmartObjectVocabulary
 import com.luminagallery.drive.data.repository.ai.SmartRecognitionManager
+import com.luminagallery.drive.data.repository.sync.SmartScanScheduler
 import com.luminagallery.drive.domain.model.MediaItem
 import com.luminagallery.drive.domain.model.MediaType
 import com.luminagallery.drive.domain.usecase.ExportMediaUseCase
@@ -99,6 +101,7 @@ private data class SearchQueryParams(
 )
 
 class SearchViewModel(
+    private val appContext: Context,
     private val repository: GalleryRepository,
     private val localMediaRepository: LocalMediaRepository,
     private val extrasRepository: GalleryExtrasRepository,
@@ -106,7 +109,7 @@ class SearchViewModel(
     private val smartRecognitionManager: SmartRecognitionManager,
     private val preferencesManager: PreferencesManager,
     private val exportMediaUseCase: ExportMediaUseCase,
-    networkMonitor: NetworkMonitor
+    private val networkMonitor: NetworkMonitor
 ) : ViewModel() {
 
     private val queryFlow = MutableStateFlow("")
@@ -506,17 +509,18 @@ class SearchViewModel(
     }
 
     fun scanEntireLibrary() {
-        viewModelScope.launch(Dispatchers.IO) {
-            smartRecognitionManager.syncSmartIndex(
-                maxNewItemsPerRun = Int.MAX_VALUE,
-                includeDrive = true,
-                respectWifiOnlyForDrive = true
-            )
+        val onWifi = networkMonitor.networkState.value.isUnmeteredWifi
+        SmartScanScheduler.startBackgroundLibraryScan(appContext, wifiOnly = onWifi)
+        snackbarFlow.value = if (onWifi) {
+            "Scanning in background on Wi-Fi · safe to lock screen"
+        } else {
+            "Scanning local photos in background · connect to Wi-Fi for Drive"
         }
     }
 
     fun pauseSmartScan() {
         smartRecognitionManager.pauseActiveScan()
+        SmartScanScheduler.cancelActiveScan(appContext)
     }
 
     fun toggleOnlyWithText() {
@@ -763,6 +767,7 @@ class SearchViewModel(
     class Factory(private val container: AppContainer) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T = SearchViewModel(
+            appContext = container.appContext,
             repository = container.galleryRepository,
             localMediaRepository = container.localMediaRepository,
             extrasRepository = container.galleryExtrasRepository,

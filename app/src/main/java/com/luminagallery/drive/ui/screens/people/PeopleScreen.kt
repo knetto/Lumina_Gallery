@@ -1,7 +1,15 @@
 package com.luminagallery.drive.ui.screens.people
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -10,7 +18,10 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,13 +40,14 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.CompareArrows
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.CompareArrows
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
@@ -68,18 +80,29 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -88,7 +111,12 @@ import com.luminagallery.drive.data.repository.ai.PersonSummary
 import com.luminagallery.drive.data.repository.ai.SmartIndexProgress
 import com.luminagallery.drive.ui.components.LuminaSnackbarHost
 import com.luminagallery.drive.ui.components.PersonAvatar
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlin.math.hypot
+import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -98,9 +126,25 @@ fun PeopleScreen(
     onOpenPerson: (personId: String) -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
+    val density = LocalDensity.current
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
+    val gridState = rememberLazyGridState()
+
+    val notifPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { /* Background scan runs either way; permission only enables lock-screen progress notification */ }
+
+    val startBackgroundScan: () -> Unit = {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        viewModel.scanEntireLibrary()
+    }
 
     var showOverflowMenu by remember { mutableStateOf(false) }
     var showCombineDialog by remember { mutableStateOf(false) }
@@ -108,8 +152,21 @@ fun PeopleScreen(
     var showSingleFacesExpanded by remember { mutableStateOf(false) }
     var renameTargetPerson by remember { mutableStateOf<PersonSummary?>(null) }
 
-    BackHandler(enabled = uiState.isSelectionMode) {
-        viewModel.clearSelection()
+    // Drag-to-combine state (hold & drag any person circle onto another person circle)
+    var draggedPerson by remember { mutableStateOf<PersonSummary?>(null) }
+    var dragPointerOffset by remember { mutableStateOf(Offset.Zero) }
+    var hoveredMergeTargetId by remember { mutableStateOf<String?>(null) }
+    var pendingDragCombinePair by remember { mutableStateOf<Pair<PersonSummary, PersonSummary>?>(null) }
+    var autoScrollSpeed by remember { mutableFloatStateOf(0f) }
+
+    BackHandler(enabled = uiState.isSelectionMode || draggedPerson != null) {
+        if (draggedPerson != null) {
+            draggedPerson = null
+            hoveredMergeTargetId = null
+            autoScrollSpeed = 0f
+        } else {
+            viewModel.clearSelection()
+        }
     }
 
     LaunchedEffect(uiState.snackbarMessage) {
@@ -119,6 +176,50 @@ fun PeopleScreen(
     }
 
     val activeList = if (uiState.showHiddenSection) uiState.hiddenPersons else uiState.visiblePersons
+    val activeById = remember(activeList) { activeList.associateBy { it.personId } }
+
+    val latestActiveById by rememberUpdatedState(activeById)
+    val latestIsSelectionMode by rememberUpdatedState(uiState.isSelectionMode)
+    val latestCanDragCombine by rememberUpdatedState(!uiState.isSelectionMode && activeList.size >= 2)
+    val dragTravelThresholdPx = remember(density) { with(density) { 18.dp.toPx() } }
+    val autoScrollZonePx = remember(density) { with(density) { 64.dp.toPx() } }
+    val maxAutoScrollSpeedPx = remember(density) { with(density) { 16.dp.toPx() } }
+    val floatingAvatarSizeDp = 96.dp
+    val floatingAvatarHalfPx = remember(density) { with(density) { (floatingAvatarSizeDp / 2).toPx() } }
+    val floatingLiftUpPx = remember(density) { with(density) { 18.dp.toPx() } }
+
+    fun findPersonAt(offset: Offset, excludePersonId: String? = null): PersonSummary? {
+        val layoutInfo = gridState.layoutInfo
+        val adjustedY = offset.y - layoutInfo.beforeContentPadding
+        val hit = layoutInfo.visibleItemsInfo.firstOrNull { itemInfo ->
+            val personId = itemInfo.key as? String ?: return@firstOrNull false
+            if (personId == excludePersonId || personId !in latestActiveById) return@firstOrNull false
+            val left = itemInfo.offset.x.toFloat()
+            val top = itemInfo.offset.y.toFloat()
+            val right = left + itemInfo.size.width
+            val bottom = top + itemInfo.size.height
+            offset.x in left..right && adjustedY in top..bottom
+        } ?: return null
+        return latestActiveById[hit.key as? String]
+    }
+
+    LaunchedEffect(autoScrollSpeed) {
+        if (autoScrollSpeed == 0f) return@LaunchedEffect
+        while (isActive && autoScrollSpeed != 0f) {
+            gridState.scrollBy(autoScrollSpeed)
+            val activeDrag = draggedPerson
+            if (activeDrag != null) {
+                val targetId = findPersonAt(dragPointerOffset, excludePersonId = activeDrag.personId)?.personId
+                if (targetId != hoveredMergeTargetId) {
+                    hoveredMergeTargetId = targetId
+                    if (targetId != null) {
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    }
+                }
+            }
+            delay(16L)
+        }
+    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -138,12 +239,15 @@ fun PeopleScreen(
                         val subtitle = when {
                             uiState.isSelectionMode -> "Tap people to combine or manage"
                             uiState.showHiddenSection -> "${uiState.hiddenPersons.size} hidden"
+                            uiState.visiblePersons.size >= 2 -> "${uiState.visiblePersons.size} detected · Drag onto another to combine"
                             else -> "${uiState.visiblePersons.size} detected · Local & Drive"
                         }
                         Text(
                             text = subtitle,
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 },
@@ -204,7 +308,7 @@ fun PeopleScreen(
                                     text = { Text("Scan entire library") },
                                     onClick = {
                                         showOverflowMenu = false
-                                        viewModel.scanEntireLibrary()
+                                        startBackgroundScan()
                                     }
                                 )
                                 DropdownMenuItem(
@@ -231,6 +335,7 @@ fun PeopleScreen(
         ) {
             LazyVerticalGrid(
                 columns = GridCells.Fixed(3),
+                state = gridState,
                 contentPadding = PaddingValues(
                     start = 16.dp,
                     end = 16.dp,
@@ -239,7 +344,105 @@ fun PeopleScreen(
                 ),
                 horizontalArrangement = Arrangement.spacedBy(14.dp),
                 verticalArrangement = Arrangement.spacedBy(18.dp),
-                modifier = Modifier.fillMaxSize()
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(gridState) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            val longPress = awaitLongPressOrCancellation(down.id) ?: return@awaitEachGesture
+                            val hitPerson = findPersonAt(longPress.position) ?: return@awaitEachGesture
+
+                            // If already in selection mode or only 1 person exists, toggle selection cleanly
+                            // and consume UP on Initial so releasing never fires a phantom click!
+                            if (!latestCanDragCombine) {
+                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                if (latestIsSelectionMode) {
+                                    viewModel.togglePersonSelected(hitPerson.personId)
+                                } else {
+                                    viewModel.enterSelectionMode(hitPerson.personId)
+                                }
+                                while (true) {
+                                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                                    event.changes.forEach { it.consume() }
+                                    if (event.changes.none { it.pressed }) {
+                                        break
+                                    }
+                                }
+                                return@awaitEachGesture
+                            }
+
+                            var lastPos = longPress.position
+                            var totalTravelPx = 0f
+                            draggedPerson = hitPerson
+                            dragPointerOffset = longPress.position
+                            hoveredMergeTargetId = null
+                            autoScrollSpeed = 0f
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+
+                            try {
+                                while (true) {
+                                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                                    val activeChange = event.changes.firstOrNull { it.id == longPress.id }
+                                        ?: event.changes.firstOrNull()
+                                        ?: break
+                                    event.changes.forEach { it.consume() }
+
+                                    if (!activeChange.pressed) {
+                                        val activeDragged = draggedPerson
+                                        val dropTargetId = hoveredMergeTargetId
+                                        val travel = totalTravelPx
+                                        draggedPerson = null
+                                        hoveredMergeTargetId = null
+                                        autoScrollSpeed = 0f
+
+                                        val dropTarget = dropTargetId?.let { latestActiveById[it] }
+                                        when {
+                                            activeDragged != null && dropTarget != null && dropTarget.personId != activeDragged.personId -> {
+                                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                pendingDragCombinePair = activeDragged to dropTarget
+                                            }
+                                            activeDragged != null && travel < dragTravelThresholdPx -> {
+                                                viewModel.enterSelectionMode(activeDragged.personId)
+                                            }
+                                        }
+                                        break
+                                    }
+                                    if (activeChange.positionChanged()) {
+                                        val pos = activeChange.position
+                                        totalTravelPx += hypot(pos.x - lastPos.x, pos.y - lastPos.y)
+                                        lastPos = pos
+                                        dragPointerOffset = pos
+
+                                        val nextTargetId = findPersonAt(pos, excludePersonId = hitPerson.personId)?.personId
+                                        if (nextTargetId != hoveredMergeTargetId) {
+                                            hoveredMergeTargetId = nextTargetId
+                                            if (nextTargetId != null) {
+                                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                            }
+                                        }
+
+                                        val viewportH = gridState.layoutInfo.viewportSize.height.toFloat()
+                                        autoScrollSpeed = when {
+                                            viewportH > 0f && pos.y < autoScrollZonePx -> {
+                                                val f = ((autoScrollZonePx - pos.y) / autoScrollZonePx).coerceIn(0f, 1f)
+                                                -maxAutoScrollSpeedPx * f
+                                            }
+                                            viewportH > 0f && pos.y > viewportH - autoScrollZonePx -> {
+                                                val f = ((pos.y - (viewportH - autoScrollZonePx)) / autoScrollZonePx).coerceIn(0f, 1f)
+                                                maxAutoScrollSpeedPx * f
+                                            }
+                                            else -> 0f
+                                        }
+                                    }
+                                }
+                            } catch (ce: CancellationException) {
+                                draggedPerson = null
+                                hoveredMergeTargetId = null
+                                autoScrollSpeed = 0f
+                                throw ce
+                            }
+                        }
+                    }
             ) {
                 // Live scan status banner (shown while scanning or if remaining unindexed items exist)
                 val prog = uiState.progress
@@ -247,7 +450,7 @@ fun PeopleScreen(
                     item(key = "smart_scan_banner", span = { GridItemSpan(maxLineSpan) }) {
                         SmartScanProgressBanner(
                             progress = prog,
-                            onScanAll = viewModel::scanEntireLibrary,
+                            onScanAll = startBackgroundScan,
                             onPause = viewModel::pauseScan
                         )
                     }
@@ -277,7 +480,7 @@ fun PeopleScreen(
                         PeopleEmptyState(
                             isHiddenView = uiState.showHiddenSection,
                             isScanning = prog.isIndexing || prog.isDownloadingModels,
-                            onScanNow = viewModel::scanEntireLibrary
+                            onScanNow = startBackgroundScan
                         )
                     }
                 } else {
@@ -303,17 +506,16 @@ fun PeopleScreen(
                         PersonGridCard(
                             person = person,
                             isSelected = isSelected,
+                            isBeingDragged = draggedPerson?.personId == person.personId,
+                            isDropTarget = hoveredMergeTargetId == person.personId,
                             onClick = {
+                                if (draggedPerson != null) return@PersonGridCard
                                 if (uiState.isSelectionMode) {
                                     haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                     viewModel.togglePersonSelected(person.personId)
                                 } else {
                                     onOpenPerson(person.personId)
                                 }
-                            },
-                            onLongClick = {
-                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                viewModel.enterSelectionMode(person.personId)
                             },
                             modifier = Modifier.animateItem()
                         )
@@ -344,7 +546,7 @@ fun PeopleScreen(
                                             color = MaterialTheme.colorScheme.onSurface
                                         )
                                         Text(
-                                            text = "Single-photo faces · tap to expand, name, or combine",
+                                            text = "Single-photo faces · tap to expand, drag onto another to combine",
                                             style = MaterialTheme.typography.labelSmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
@@ -367,7 +569,10 @@ fun PeopleScreen(
                                 PersonGridCard(
                                     person = person,
                                     isSelected = isSelected,
+                                    isBeingDragged = draggedPerson?.personId == person.personId,
+                                    isDropTarget = hoveredMergeTargetId == person.personId,
                                     onClick = {
+                                        if (draggedPerson != null) return@PersonGridCard
                                         if (uiState.isSelectionMode) {
                                             haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                             viewModel.togglePersonSelected(person.personId)
@@ -375,15 +580,106 @@ fun PeopleScreen(
                                             onOpenPerson(person.personId)
                                         }
                                     },
-                                    onLongClick = {
-                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                        viewModel.enterSelectionMode(person.personId)
-                                    },
                                     modifier = Modifier.animateItem()
                                 )
                             }
                         }
                     }
+                }
+            }
+
+            // Floating drag-to-combine status pill at top while dragging a person circle
+            AnimatedVisibility(
+                visible = draggedPerson != null,
+                enter = slideInVertically { -it } + fadeIn(),
+                exit = slideOutVertically { -it } + fadeOut(),
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 10.dp, start = 20.dp, end = 20.dp)
+            ) {
+                val targetPerson = hoveredMergeTargetId?.let { activeById[it] }
+                val isHoveringTarget = targetPerson != null
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = if (isHoveringTarget) {
+                        MaterialTheme.colorScheme.primaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.94f)
+                    },
+                    shadowElevation = 8.dp,
+                    modifier = Modifier.border(
+                        width = if (isHoveringTarget) 1.2.dp else 0.7.dp,
+                        color = if (isHoveringTarget) {
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.65f)
+                        } else {
+                            MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                        },
+                        shape = RoundedCornerShape(50)
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(7.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Merge,
+                            contentDescription = null,
+                            tint = if (isHoveringTarget) {
+                                MaterialTheme.colorScheme.onPrimaryContainer
+                            } else {
+                                MaterialTheme.colorScheme.primary
+                            },
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = when {
+                                targetPerson == null -> "Drag onto another person to combine"
+                                targetPerson.isNamed -> "Release to combine with ${targetPerson.name}"
+                                else -> "Release to combine into 1 person"
+                            },
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (isHoveringTarget) {
+                                MaterialTheme.colorScheme.onPrimaryContainer
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            },
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+
+            // Floating lifted circular person avatar following finger smoothly at 120Hz
+            draggedPerson?.let { lifting ->
+                val ghostScale by animateFloatAsState(
+                    targetValue = if (hoveredMergeTargetId != null) 0.92f else 1.08f,
+                    animationSpec = spring(dampingRatio = 0.68f, stiffness = 500f),
+                    label = "dragPersonGhostScale"
+                )
+                Box(
+                    modifier = Modifier
+                        .offset {
+                            IntOffset(
+                                x = (dragPointerOffset.x - floatingAvatarHalfPx).roundToInt(),
+                                y = (dragPointerOffset.y - floatingAvatarHalfPx - floatingLiftUpPx).roundToInt()
+                            )
+                        }
+                        .graphicsLayer {
+                            scaleX = ghostScale
+                            scaleY = ghostScale
+                            alpha = 0.95f
+                        }
+                        .shadow(16.dp, CircleShape)
+                ) {
+                    PersonAvatar(
+                        cropPath = lifting.coverCropPath,
+                        contentDescription = lifting.displayTitle,
+                        size = floatingAvatarSizeDp,
+                        borderColor = MaterialTheme.colorScheme.primary
+                    )
                 }
             }
 
@@ -457,6 +753,93 @@ fun PeopleScreen(
                 }
             }
         }
+    }
+
+    // Drag-to-Combine confirmation dialog (dropping one person circle onto another)
+    pendingDragCombinePair?.let { (dragged, target) ->
+        val (primary, secondary) = remember(dragged.personId, target.personId) {
+            PeopleViewModel.resolveCombineOrder(dragged = dragged, target = target)
+        }
+        val defaultName = remember(primary.personId, secondary.personId) {
+            primary.name.ifBlank { secondary.name }
+        }
+        var combinedName by remember(primary.personId, secondary.personId) {
+            mutableStateOf(defaultName)
+        }
+
+        AlertDialog(
+            onDismissRequest = { pendingDragCombinePair = null },
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            shape = RoundedCornerShape(28.dp),
+            title = {
+                Text(
+                    text = if (defaultName.isNotBlank()) "Combine into $defaultName?" else "Combine into 1 person?",
+                    fontWeight = FontWeight.SemiBold
+                )
+            },
+            text = {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        PersonAvatar(
+                            cropPath = primary.coverCropPath,
+                            contentDescription = primary.displayTitle,
+                            size = 62.dp,
+                            borderColor = MaterialTheme.colorScheme.surfaceContainerHigh
+                        )
+                        PersonAvatar(
+                            cropPath = secondary.coverCropPath,
+                            contentDescription = secondary.displayTitle,
+                            size = 62.dp,
+                            borderColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                            modifier = Modifier.offset(x = (-14).dp)
+                        )
+                    }
+                    Text(
+                        text = "All photos from both circles will be merged into one person, improving future recognition automatically.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center
+                    )
+                    OutlinedTextField(
+                        value = combinedName,
+                        onValueChange = { combinedName = it },
+                        label = { Text("Person's name (optional)") },
+                        placeholder = { Text("e.g. Alex, Mom…") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        pendingDragCombinePair = null
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        viewModel.combineTwoPersons(
+                            draggedPersonId = dragged.personId,
+                            targetPersonId = target.personId,
+                            combinedName = combinedName
+                        )
+                    },
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Icon(Icons.Rounded.Merge, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(5.dp))
+                    Text("Combine", fontWeight = FontWeight.SemiBold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDragCombinePair = null }) { Text("Cancel") }
+            }
+        )
     }
 
     // Combine Selected People Dialog
@@ -626,24 +1009,45 @@ fun PeopleScreen(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun PersonGridCard(
     person: PersonSummary,
     isSelected: Boolean,
+    isBeingDragged: Boolean,
+    isDropTarget: Boolean,
     onClick: () -> Unit,
-    onLongClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val cardScale by animateFloatAsState(
+        targetValue = when {
+            isDropTarget -> 1.11f
+            isBeingDragged -> 0.90f
+            else -> 1f
+        },
+        animationSpec = spring(dampingRatio = 0.66f, stiffness = 460f),
+        label = "personCardScale"
+    )
+    val cardAlpha by animateFloatAsState(
+        targetValue = if (isBeingDragged) 0.24f else 1f,
+        animationSpec = spring(stiffness = 500f),
+        label = "personCardAlpha"
+    )
+
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = modifier
             .fillMaxWidth()
+            .graphicsLayer {
+                scaleX = cardScale
+                scaleY = cardScale
+                alpha = cardAlpha
+            }
             .clip(RoundedCornerShape(20.dp))
-            .combinedClickable(
-                onClick = onClick,
-                onLongClick = onLongClick
+            .background(
+                if (isDropTarget) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.34f)
+                else MaterialTheme.colorScheme.background.copy(alpha = 0f)
             )
+            .clickable(onClick = onClick)
             .padding(vertical = 6.dp, horizontal = 4.dp)
     ) {
         PersonAvatar(
@@ -651,17 +1055,22 @@ private fun PersonGridCard(
             contentDescription = person.displayTitle,
             size = 90.dp,
             isSelected = isSelected,
-            isFavorite = person.isFavorite
+            isFavorite = person.isFavorite,
+            borderColor = if (isDropTarget) MaterialTheme.colorScheme.primary else null
         )
         Spacer(Modifier.height(8.dp))
         Text(
-            text = if (person.isNamed) person.name else "Add name",
+            text = when {
+                isDropTarget -> "Drop to combine"
+                person.isNamed -> person.name
+                else -> "Add name"
+            },
             fontSize = 13.5.sp,
-            fontWeight = if (person.isNamed) FontWeight.SemiBold else FontWeight.Medium,
-            color = if (person.isNamed) {
-                MaterialTheme.colorScheme.onSurface
-            } else {
-                MaterialTheme.colorScheme.primary
+            fontWeight = if (person.isNamed || isDropTarget) FontWeight.SemiBold else FontWeight.Medium,
+            color = when {
+                isDropTarget -> MaterialTheme.colorScheme.primary
+                person.isNamed -> MaterialTheme.colorScheme.onSurface
+                else -> MaterialTheme.colorScheme.primary
             },
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -757,7 +1166,7 @@ private fun MergeSuggestionCard(
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        imageVector = Icons.Rounded.CompareArrows,
+                        imageVector = Icons.AutoMirrored.Rounded.CompareArrows,
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.size(18.dp)
