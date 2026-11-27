@@ -649,13 +649,39 @@ class PersonDetailViewModel(
     fun removeSelectedFromPerson() {
         val ids = selectedIdsFlow.value
         if (ids.isEmpty()) return
+        val totalBefore = uiState.value.person?.photoIds?.size ?: 0
         viewModelScope.launch {
             smartRecognitionManager.removePhotosFromPerson(personId, ids)
             selectedIdsFlow.value = emptySet()
+            val label = if (uiState.value.person?.isPet == true) "pet" else "person"
             snackbarFlow.value = if (ids.size == 1) {
-                "Removed 1 photo from this person"
+                "Removed 1 photo from this $label"
             } else {
-                "Removed ${ids.size} photos from this person"
+                "Removed ${ids.size} photos from this $label"
+            }
+            if (totalBefore > 0 && ids.size >= totalBefore) {
+                mergedAwayFlow.value = true
+            }
+        }
+    }
+
+    fun reassignSelectedToPerson(targetPersonId: String?, newPersonName: String = "") {
+        val ids = selectedIdsFlow.value
+        if (ids.isEmpty()) return
+        viewModelScope.launch {
+            val result = smartRecognitionManager.reassignPhotosFromPerson(
+                sourcePersonId = personId,
+                photoIds = ids,
+                targetPersonId = targetPersonId,
+                newPersonName = newPersonName
+            )
+            selectedIdsFlow.value = emptySet()
+            if (result.movedFaceCount > 0) {
+                val countLabel = if (ids.size == 1) "1 photo" else "${ids.size} photos"
+                snackbarFlow.value = "Moved $countLabel to ${result.destinationDisplayName}"
+                if (result.sourceClusterDeleted) {
+                    mergedAwayFlow.value = true
+                }
             }
         }
     }

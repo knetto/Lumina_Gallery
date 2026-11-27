@@ -1061,22 +1061,20 @@ fun ExifMetadataBottomSheet(
                         Icon(Icons.Rounded.Edit, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface)
                         Text(if (currentName.isNotBlank()) "Rename" else "Add name", style = MaterialTheme.typography.bodyLarge)
                     }
-                    if (otherPeople.isNotEmpty()) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .clickable {
-                                    actionTargetFace = null
-                                    moveFaceIdAndCurrentPerson = faceId to personId
-                                }
-                                .padding(horizontal = 8.dp, vertical = 10.dp)
-                        ) {
-                            Icon(Icons.Rounded.SwapHoriz, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface)
-                            Text("Move to another person…", style = MaterialTheme.typography.bodyLarge)
-                        }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable {
+                                actionTargetFace = null
+                                moveFaceIdAndCurrentPerson = faceId to personId
+                            }
+                            .padding(horizontal = 8.dp, vertical = 10.dp)
+                    ) {
+                        Icon(Icons.Rounded.SwapHoriz, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface)
+                        Text("Move to another person…", style = MaterialTheme.typography.bodyLarge)
                     }
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -1106,50 +1104,97 @@ fun ExifMetadataBottomSheet(
 
     // Move Face to Another Person Picker
     moveFaceIdAndCurrentPerson?.let { (faceId, currentPersonId) ->
-        val candidates = remember(allPersons, currentPersonId) {
-            allPersons.filter { it.personId != currentPersonId && !it.isHidden }
+        val sourceKind = remember(allPersons, currentPersonId) {
+            allPersons.firstOrNull { it.personId == currentPersonId }?.entityKind
         }
+        val candidates = remember(allPersons, currentPersonId, sourceKind) {
+            allPersons.filter {
+                it.personId != currentPersonId &&
+                    !it.isHidden &&
+                    (sourceKind == null || it.entityKind == sourceKind)
+            }
+        }
+        var newNameDraft by remember(faceId) { mutableStateOf("") }
         AlertDialog(
             onDismissRequest = { moveFaceIdAndCurrentPerson = null },
             containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
             shape = RoundedCornerShape(26.dp),
-            title = { Text("Move face to person", fontWeight = FontWeight.SemiBold) },
+            title = { Text("It's this person instead", fontWeight = FontWeight.SemiBold) },
             text = {
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(3),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 300.dp)
-                ) {
-                    gridItems(candidates, key = { it.personId }) { dest ->
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    if (candidates.isNotEmpty()) {
+                        LazyVerticalGrid(
+                            columns = GridCells.Fixed(3),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp),
                             modifier = Modifier
-                                .clip(RoundedCornerShape(14.dp))
-                                .clickable {
-                                    moveFaceIdAndCurrentPerson = null
-                                    scope.launch {
-                                        container.smartRecognitionManager.reassignFaceToPerson(faceId, dest.personId)
-                                        onCopiedMessage("Moved to ${dest.name.ifBlank { "person" }}")
-                                    }
-                                }
-                                .padding(4.dp)
+                                .fillMaxWidth()
+                                .heightIn(max = 260.dp)
                         ) {
-                            PersonAvatar(
-                                cropPath = dest.coverCropPath,
-                                contentDescription = dest.name.ifBlank { "Unnamed" },
-                                size = 56.dp
-                            )
-                            Spacer(Modifier.height(4.dp))
-                            Text(
-                                text = dest.name.ifBlank { "Unnamed" },
-                                style = MaterialTheme.typography.labelSmall,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                textAlign = TextAlign.Center
-                            )
+                            gridItems(candidates, key = { it.personId }) { dest ->
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .clickable {
+                                            moveFaceIdAndCurrentPerson = null
+                                            scope.launch {
+                                                container.smartRecognitionManager.reassignFaceToPerson(faceId, dest.personId)
+                                                onCopiedMessage("Moved to ${dest.name.ifBlank { "person" }}")
+                                            }
+                                        }
+                                        .padding(4.dp)
+                                ) {
+                                    PersonAvatar(
+                                        cropPath = dest.coverCropPath,
+                                        contentDescription = dest.name.ifBlank { "Unnamed" },
+                                        size = 56.dp,
+                                        isPet = dest.isPet
+                                    )
+                                    Spacer(Modifier.height(4.dp))
+                                    Text(
+                                        text = dest.name.ifBlank { "Unnamed" },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        textAlign = TextAlign.Center
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        OutlinedTextField(
+                            value = newNameDraft,
+                            onValueChange = { newNameDraft = it },
+                            placeholder = { Text("Or new name…") },
+                            singleLine = true,
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(
+                            onClick = {
+                                val chosenName = newNameDraft.trim()
+                                moveFaceIdAndCurrentPerson = null
+                                scope.launch {
+                                    container.smartRecognitionManager.reassignFaceToPerson(
+                                        faceId = faceId,
+                                        targetPersonId = null,
+                                        newPersonName = chosenName
+                                    )
+                                    onCopiedMessage(
+                                        if (chosenName.isNotEmpty()) "Moved to $chosenName"
+                                        else "Moved to new person"
+                                    )
+                                }
+                            }
+                        ) {
+                            Text("New", fontWeight = FontWeight.SemiBold)
                         }
                     }
                 }

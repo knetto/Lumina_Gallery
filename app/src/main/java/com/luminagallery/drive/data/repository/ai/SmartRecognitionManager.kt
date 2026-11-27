@@ -2502,6 +2502,13 @@ class SmartRecognitionManager(
         targetPersonId
     }
 
+    data class ReassignPhotosResult(
+        val movedFaceCount: Int,
+        val destinationPersonId: String?,
+        val destinationDisplayName: String,
+        val sourceClusterDeleted: Boolean
+    )
+
     /**
      * Removes misclassified photo(s) from [personId] so they never re-attach automatically (even
      * after future AI rebuilds!), recalculating the person's centroid and cover portrait cleanly.
@@ -2529,14 +2536,16 @@ class SmartRecognitionManager(
                             name = personBefore.name.trim(),
                             isFavorite = personBefore.isFavorite,
                             isHidden = personBefore.isHidden,
-                            updatedAtEpochMs = now
+                            updatedAtEpochMs = now,
+                            entityKind = personBefore.entityKind
                         )).copy(
                             coverItemId = if (clearCover) null else existingMem?.coverItemId,
                             coverBboxLeft = if (clearCover) null else existingMem?.coverBboxLeft,
                             coverBboxTop = if (clearCover) null else existingMem?.coverBboxTop,
                             coverBboxRight = if (clearCover) null else existingMem?.coverBboxRight,
                             coverBboxBottom = if (clearCover) null else existingMem?.coverBboxBottom,
-                            updatedAtEpochMs = now
+                            updatedAtEpochMs = now,
+                            entityKind = personBefore.entityKind
                         )
                         smartDao.upsertSavedPersonMemory(updatedMem)
                         if (personStillExists && personBefore.memoryId != memId) {
@@ -2559,118 +2568,346 @@ class SmartRecognitionManager(
         }
 
     /**
-     * Moves a single detected face to another person cluster (or creates a brand-new person if
-     * [targetPersonId] is null), recalculates both clusters' centroids, and durably remembers
-     * both the exclusion from the old person and the assignment to the destination person.
+     * Moves one or more misclassified photos' faces from [sourcePersonId] directly to an existing
+     * [targetPersonId] (or creates a brand-new person/pet cluster if [targetPersonId] is null,
+     * optionally named [newPersonName]).
+     *
+     * Atomically updates both clusters' centroids & covers and durably records both:
+     *  - negative exclusion anchors on [sourcePersonId] so these faces never drift back, and
+     *  - positive user-assigned anchors on the destination so they stay assigned across AI rebuilds.
      */
-    suspend fun reassignFaceToPerson(faceId: String, targetPersonId: String?) =
-        withContext(Dispatchers.IO) {
-            val now = System.currentTimeMillis()
-            database.withTransaction {
-                val face = smartDao.getFaceById(faceId) ?: return@withTransaction
-                val oldPersonId = face.personId
-                val oldPersonBefore = oldPersonId?.let { smartDao.getPersonById(it) }
-                val destId = targetPersonId ?: run {
-                    val createdId = "person_${UUID.randomUUID().toString().take(12)}"
-                    smartDao.upsertPerson(
-                        PersonClusterEntity(
-                            personId = createdId,
-                            name = "",
-                            isHidden = false,
-                            isFavorite = false,
-                            coverFaceId = face.faceId,
-                            coverPhotoId = face.itemId,
-                            coverCropPath = face.cropPath,
-                            centroidBlob = face.embeddingBlob,
-                            sampleCount = 1,
-                            updatedAtEpochMs = now
-                        )
-                    )
-                    createdId
-                }
-                smartDao.reassignSingleFace(faceId, destId)
-                if (oldPersonId != null && oldPersonId != destId) {
-                    recalculateClusterAfterRemoval(oldPersonId)
-                    if (oldPersonBefore != null) {
-                        val oldStillExists = smartDao.getPersonById(oldPersonId) != null
-                        val oldMemId = oldPersonBefore.memoryId?.takeIf { it.isNotBlank() }
-                            ?: if (oldStillExists) newMemoryId() else null
-                        if (oldMemId != null) {
-                            val existingOldMem = smartDao.getSavedPersonMemoryById(oldMemId)
-                            val updatedOldMem = (existingOldMem ?: SavedPersonMemoryEntity(
-                                memoryId = oldMemId,
-                                name = oldPersonBefore.name.trim(),
-                                isFavorite = oldPersonBefore.isFavorite,
-                                isHidden = oldPersonBefore.isHidden,
-                                updatedAtEpochMs = now
-                            )).copy(updatedAtEpochMs = now)
-                            smartDao.upsertSavedPersonMemory(updatedOldMem)
-                            if (oldStillExists && oldPersonBefore.memoryId != oldMemId) {
-                                smartDao.updatePersonMemoryId(oldPersonId, oldMemId, now)
-                            }
-                            val remainingOldAnchors = if (oldStillExists) {
-                                smartDao.getFacesForPerson(oldPersonId).map {
-                                    it.toSavedAnchor(oldMemId, oldPersonId, isUserAssigned = false, isExcluded = false, now = now)
-                                }
-                            } else emptyList()
-                            val excl = face.toSavedAnchor(oldMemId, oldPersonId, isUserAssigned = true, isExcluded = true, now = now)
-                            mergeAnchorsForMemoryLocked(oldMemId, updatedOldMem, remainingOldAnchors + excl)
-                        }
-                    }
-                }
-                recalculateClusterAfterRemoval(destId)
+    suspend fun reassignPhotosFromPerson(
+        sourcePersonId: String,
+        photoIds: Collection<String>,
+        targetPersonId: String?,
+        newPersonName: String = ""
+    ): ReassignPhotosResult = withContext(Dispatchers.IO) {
+        val photoIdSet = photoIds.toSet()
+        if (photoIdSet.isEmpty()) {
+            return@withContext ReassignPhotosResult(0, null, "", false)
+        }
+        val now = System.currentTimeMillis()
+        val cleanNewName = newPersonName.trim()
+        var movedCount = 0
+        var resolvedDestId: String? = null
+        var resolvedDestLabel = ""
+        var sourceDeleted = false
 
-                // Durably remember this face's positive assignment to destId
-                val destPerson = smartDao.getPersonById(destId)
-                if (destPerson != null) {
-                    val destMemId = destPerson.memoryId?.takeIf { it.isNotBlank() } ?: newMemoryId()
-                    val existingDestMem = smartDao.getSavedPersonMemoryById(destMemId)
-                    val updatedDestMem = SavedPersonMemoryEntity(
-                        memoryId = destMemId,
-                        name = destPerson.name.trim().ifBlank { existingDestMem?.name.orEmpty() },
-                        isFavorite = destPerson.isFavorite || existingDestMem?.isFavorite == true,
-                        isHidden = destPerson.isHidden,
-                        isUserMerged = (targetPersonId != null) || (existingDestMem?.isUserMerged == true),
-                        coverItemId = existingDestMem?.coverItemId,
-                        coverBboxLeft = existingDestMem?.coverBboxLeft,
-                        coverBboxTop = existingDestMem?.coverBboxTop,
-                        coverBboxRight = existingDestMem?.coverBboxRight,
-                        coverBboxBottom = existingDestMem?.coverBboxBottom,
-                        updatedAtEpochMs = now
+        database.withTransaction {
+            val sourceBefore = smartDao.getPersonById(sourcePersonId) ?: return@withTransaction
+            val facesToMove = smartDao.getFacesForPerson(sourcePersonId).filter { it.itemId in photoIdSet }
+            if (facesToMove.isEmpty()) return@withTransaction
+
+            // Resolve destination: explicit target, or match existing by typed name, or create new cluster
+            val explicitTarget = targetPersonId?.takeIf { it != sourcePersonId }?.let { smartDao.getPersonById(it) }
+            val matchedByName = if (explicitTarget == null && cleanNewName.isNotEmpty()) {
+                smartDao.getAllPersons().firstOrNull {
+                    it.personId != sourcePersonId &&
+                        it.entityKind == sourceBefore.entityKind &&
+                        it.name.equals(cleanNewName, ignoreCase = true)
+                }
+            } else null
+
+            val existingDest = explicitTarget ?: matchedByName
+            if (existingDest != null && existingDest.entityKind != sourceBefore.entityKind) {
+                // Never mix 192-dim human embeddings with 160-dim pet embeddings
+                return@withTransaction
+            }
+
+            val destId = existingDest?.personId ?: run {
+                val createdId = "person_${UUID.randomUUID().toString().take(12)}"
+                val leadFace = facesToMove.maxByOrNull { it.qualityScore } ?: facesToMove.first()
+                val centroid = FaceClusteringEngine.averageNormalizedEmbeddings(
+                    facesToMove.map { FaceClusteringEngine.decodeEmbedding(it.embeddingBlob) }
+                )
+                smartDao.upsertPerson(
+                    PersonClusterEntity(
+                        personId = createdId,
+                        name = cleanNewName,
+                        isHidden = false,
+                        isFavorite = false,
+                        coverFaceId = leadFace.faceId,
+                        coverPhotoId = leadFace.itemId,
+                        coverCropPath = leadFace.cropPath,
+                        centroidBlob = if (centroid.isNotEmpty()) {
+                            FaceClusteringEngine.encodeEmbedding(centroid)
+                        } else {
+                            leadFace.embeddingBlob
+                        },
+                        sampleCount = facesToMove.size,
+                        updatedAtEpochMs = now,
+                        entityKind = sourceBefore.entityKind
                     )
-                    smartDao.upsertSavedPersonMemory(updatedDestMem)
-                    if (destPerson.memoryId != destMemId) {
-                        smartDao.updatePersonMemoryId(destId, destMemId, now)
+                )
+                createdId
+            }
+
+            for (face in facesToMove) {
+                smartDao.reassignSingleFace(face.faceId, destId)
+            }
+            movedCount = facesToMove.size
+            resolvedDestId = destId
+
+            // Recalculate source cluster and durably record exclusion anchors on source
+            recalculateClusterAfterRemoval(sourcePersonId)
+            val sourceStillExists = smartDao.getPersonById(sourcePersonId) != null
+            sourceDeleted = !sourceStillExists
+
+            val oldMemId = sourceBefore.memoryId?.takeIf { it.isNotBlank() }
+                ?: if (sourceStillExists) newMemoryId() else null
+            if (oldMemId != null) {
+                val existingOldMem = smartDao.getSavedPersonMemoryById(oldMemId)
+                val clearOldCover = existingOldMem?.coverItemId in photoIdSet
+                val updatedOldMem = (existingOldMem ?: SavedPersonMemoryEntity(
+                    memoryId = oldMemId,
+                    name = sourceBefore.name.trim(),
+                    isFavorite = sourceBefore.isFavorite,
+                    isHidden = sourceBefore.isHidden,
+                    updatedAtEpochMs = now,
+                    entityKind = sourceBefore.entityKind
+                )).copy(
+                    coverItemId = if (clearOldCover) null else existingOldMem?.coverItemId,
+                    coverBboxLeft = if (clearOldCover) null else existingOldMem?.coverBboxLeft,
+                    coverBboxTop = if (clearOldCover) null else existingOldMem?.coverBboxTop,
+                    coverBboxRight = if (clearOldCover) null else existingOldMem?.coverBboxRight,
+                    coverBboxBottom = if (clearOldCover) null else existingOldMem?.coverBboxBottom,
+                    updatedAtEpochMs = now,
+                    entityKind = sourceBefore.entityKind
+                )
+                smartDao.upsertSavedPersonMemory(updatedOldMem)
+                if (sourceStillExists && sourceBefore.memoryId != oldMemId) {
+                    smartDao.updatePersonMemoryId(sourcePersonId, oldMemId, now)
+                }
+                val remainingOldAnchors = if (sourceStillExists) {
+                    smartDao.getFacesForPerson(sourcePersonId).map {
+                        it.toSavedAnchor(oldMemId, sourcePersonId, isUserAssigned = false, isExcluded = false, now = now)
                     }
-                    // Drop any stale exclusion on destMemId for this exact face
-                    val existingDestAnchors = smartDao.getAnchorsForMemory(destMemId).filterNot { anc ->
-                        anc.isExcluded && anc.itemId == face.itemId && PersonMemoryEngine.isSameFaceLocation(
-                            PersonMemoryEngine.FaceBox(face.bboxLeft, face.bboxTop, face.bboxRight, face.bboxBottom),
+                } else emptyList()
+                val exclusionAnchors = facesToMove.map {
+                    it.toSavedAnchor(oldMemId, sourcePersonId, isUserAssigned = true, isExcluded = true, now = now)
+                }
+                mergeAnchorsForMemoryLocked(oldMemId, updatedOldMem, remainingOldAnchors + exclusionAnchors)
+            }
+
+            // Recalculate destination cluster and durably record positive user-assigned anchors
+            recalculateClusterAfterRemoval(destId)
+            val destPerson = smartDao.getPersonById(destId)
+            if (destPerson != null) {
+                resolvedDestLabel = destPerson.name.trim().ifBlank {
+                    when (destPerson.entityKind) {
+                        PersonClusterEntity.KIND_PET_DOG -> "dog"
+                        PersonClusterEntity.KIND_PET_CAT -> "cat"
+                        else -> if (existingDest == null) "new person" else "person"
+                    }
+                }
+                val destMemId = destPerson.memoryId?.takeIf { it.isNotBlank() } ?: newMemoryId()
+                val existingDestMem = smartDao.getSavedPersonMemoryById(destMemId)
+                val updatedDestMem = SavedPersonMemoryEntity(
+                    memoryId = destMemId,
+                    name = destPerson.name.trim().ifBlank { existingDestMem?.name.orEmpty() },
+                    isFavorite = destPerson.isFavorite || existingDestMem?.isFavorite == true,
+                    isHidden = destPerson.isHidden,
+                    isUserMerged = true,
+                    coverItemId = existingDestMem?.coverItemId,
+                    coverBboxLeft = existingDestMem?.coverBboxLeft,
+                    coverBboxTop = existingDestMem?.coverBboxTop,
+                    coverBboxRight = existingDestMem?.coverBboxRight,
+                    coverBboxBottom = existingDestMem?.coverBboxBottom,
+                    updatedAtEpochMs = now,
+                    entityKind = destPerson.entityKind
+                )
+                smartDao.upsertSavedPersonMemory(updatedDestMem)
+                if (destPerson.memoryId != destMemId) {
+                    smartDao.updatePersonMemoryId(destId, destMemId, now)
+                }
+                val movedFaceIds = facesToMove.mapTo(HashSet(facesToMove.size)) { it.faceId }
+                val movedBoxesByItem = facesToMove.groupBy { it.itemId }
+                // Drop any stale exclusion on destination for these exact moved faces
+                val existingDestAnchors = smartDao.getAnchorsForMemory(destMemId).filterNot { anc ->
+                    if (!anc.isExcluded) return@filterNot false
+                    val movedForItem = movedBoxesByItem[anc.itemId].orEmpty()
+                    movedForItem.any { mf ->
+                        PersonMemoryEngine.isSameFaceLocation(
+                            PersonMemoryEngine.FaceBox(mf.bboxLeft, mf.bboxTop, mf.bboxRight, mf.bboxBottom),
                             anc.toFaceBox(),
                             singleFaceInPhoto = false
                         )
                     }
-                    val destFaceAnchors = smartDao.getFacesForPerson(destId).map { f ->
-                        f.toSavedAnchor(
-                            memoryId = destMemId,
-                            originGroupId = if (f.faceId == face.faceId) "reassigned_${face.faceId}" else destId,
-                            isUserAssigned = f.faceId == face.faceId,
-                            isExcluded = false,
-                            now = now
-                        )
-                    }
-                    val prunedDest = PersonMemoryEngine.pruneAndDeduplicateAnchors(
-                        anchors = existingDestAnchors + destFaceAnchors,
-                        coverItemId = updatedDestMem.coverItemId,
-                        coverBox = updatedDestMem.coverBoxOrNull()
+                }
+                val batchOrigin = "reassigned_${now}"
+                val destFaceAnchors = smartDao.getFacesForPerson(destId).map { f ->
+                    val wasMoved = f.faceId in movedFaceIds
+                    f.toSavedAnchor(
+                        memoryId = destMemId,
+                        originGroupId = if (wasMoved) batchOrigin else destId,
+                        isUserAssigned = wasMoved,
+                        isExcluded = false,
+                        now = now
                     )
-                    smartDao.deleteAnchorsForMemory(destMemId)
-                    if (prunedDest.isNotEmpty()) {
-                        smartDao.upsertSavedPersonAnchors(prunedDest)
-                    }
+                }
+                val prunedDest = PersonMemoryEngine.pruneAndDeduplicateAnchors(
+                    anchors = existingDestAnchors + destFaceAnchors,
+                    coverItemId = updatedDestMem.coverItemId,
+                    coverBox = updatedDestMem.coverBoxOrNull()
+                )
+                smartDao.deleteAnchorsForMemory(destMemId)
+                if (prunedDest.isNotEmpty()) {
+                    smartDao.upsertSavedPersonAnchors(prunedDest)
                 }
             }
         }
+
+        ReassignPhotosResult(
+            movedFaceCount = movedCount,
+            destinationPersonId = resolvedDestId,
+            destinationDisplayName = resolvedDestLabel,
+            sourceClusterDeleted = sourceDeleted
+        )
+    }
+
+    /**
+     * Moves a single detected face to another person cluster (or creates a brand-new person if
+     * [targetPersonId] is null), recalculates both clusters' centroids, and durably remembers
+     * both the exclusion from the old person and the assignment to the destination person.
+     */
+    suspend fun reassignFaceToPerson(
+        faceId: String,
+        targetPersonId: String?,
+        newPersonName: String = ""
+    ) = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        val cleanNewName = newPersonName.trim()
+        database.withTransaction {
+            val face = smartDao.getFaceById(faceId) ?: return@withTransaction
+            val oldPersonId = face.personId
+            val oldPersonBefore = oldPersonId?.let { smartDao.getPersonById(it) }
+            val sourceKind = oldPersonBefore?.entityKind ?: PersonClusterEntity.KIND_HUMAN
+
+            val explicitTarget = targetPersonId?.let { smartDao.getPersonById(it) }
+            if (explicitTarget != null && explicitTarget.entityKind != sourceKind) {
+                return@withTransaction
+            }
+            val matchedByName = if (explicitTarget == null && cleanNewName.isNotEmpty()) {
+                smartDao.getAllPersons().firstOrNull {
+                    it.personId != oldPersonId &&
+                        it.entityKind == sourceKind &&
+                        it.name.equals(cleanNewName, ignoreCase = true)
+                }
+            } else null
+
+            val destId = explicitTarget?.personId ?: matchedByName?.personId ?: run {
+                val createdId = "person_${UUID.randomUUID().toString().take(12)}"
+                smartDao.upsertPerson(
+                    PersonClusterEntity(
+                        personId = createdId,
+                        name = cleanNewName,
+                        isHidden = false,
+                        isFavorite = false,
+                        coverFaceId = face.faceId,
+                        coverPhotoId = face.itemId,
+                        coverCropPath = face.cropPath,
+                        centroidBlob = face.embeddingBlob,
+                        sampleCount = 1,
+                        updatedAtEpochMs = now,
+                        entityKind = sourceKind
+                    )
+                )
+                createdId
+            }
+            smartDao.reassignSingleFace(faceId, destId)
+            if (oldPersonId != null && oldPersonId != destId) {
+                recalculateClusterAfterRemoval(oldPersonId)
+                if (oldPersonBefore != null) {
+                    val oldStillExists = smartDao.getPersonById(oldPersonId) != null
+                    val oldMemId = oldPersonBefore.memoryId?.takeIf { it.isNotBlank() }
+                        ?: if (oldStillExists) newMemoryId() else null
+                    if (oldMemId != null) {
+                        val existingOldMem = smartDao.getSavedPersonMemoryById(oldMemId)
+                        val clearOldCover = existingOldMem?.coverItemId == face.itemId
+                        val updatedOldMem = (existingOldMem ?: SavedPersonMemoryEntity(
+                            memoryId = oldMemId,
+                            name = oldPersonBefore.name.trim(),
+                            isFavorite = oldPersonBefore.isFavorite,
+                            isHidden = oldPersonBefore.isHidden,
+                            updatedAtEpochMs = now,
+                            entityKind = sourceKind
+                        )).copy(
+                            coverItemId = if (clearOldCover) null else existingOldMem?.coverItemId,
+                            coverBboxLeft = if (clearOldCover) null else existingOldMem?.coverBboxLeft,
+                            coverBboxTop = if (clearOldCover) null else existingOldMem?.coverBboxTop,
+                            coverBboxRight = if (clearOldCover) null else existingOldMem?.coverBboxRight,
+                            coverBboxBottom = if (clearOldCover) null else existingOldMem?.coverBboxBottom,
+                            updatedAtEpochMs = now,
+                            entityKind = sourceKind
+                        )
+                        smartDao.upsertSavedPersonMemory(updatedOldMem)
+                        if (oldStillExists && oldPersonBefore.memoryId != oldMemId) {
+                            smartDao.updatePersonMemoryId(oldPersonId, oldMemId, now)
+                        }
+                        val remainingOldAnchors = if (oldStillExists) {
+                            smartDao.getFacesForPerson(oldPersonId).map {
+                                it.toSavedAnchor(oldMemId, oldPersonId, isUserAssigned = false, isExcluded = false, now = now)
+                            }
+                        } else emptyList()
+                        val excl = face.toSavedAnchor(oldMemId, oldPersonId, isUserAssigned = true, isExcluded = true, now = now)
+                        mergeAnchorsForMemoryLocked(oldMemId, updatedOldMem, remainingOldAnchors + excl)
+                    }
+                }
+            }
+            recalculateClusterAfterRemoval(destId)
+
+            // Durably remember this face's positive assignment to destId
+            val destPerson = smartDao.getPersonById(destId)
+            if (destPerson != null) {
+                val destMemId = destPerson.memoryId?.takeIf { it.isNotBlank() } ?: newMemoryId()
+                val existingDestMem = smartDao.getSavedPersonMemoryById(destMemId)
+                val updatedDestMem = SavedPersonMemoryEntity(
+                    memoryId = destMemId,
+                    name = destPerson.name.trim().ifBlank { existingDestMem?.name.orEmpty() },
+                    isFavorite = destPerson.isFavorite || existingDestMem?.isFavorite == true,
+                    isHidden = destPerson.isHidden,
+                    isUserMerged = true,
+                    coverItemId = existingDestMem?.coverItemId,
+                    coverBboxLeft = existingDestMem?.coverBboxLeft,
+                    coverBboxTop = existingDestMem?.coverBboxTop,
+                    coverBboxRight = existingDestMem?.coverBboxRight,
+                    coverBboxBottom = existingDestMem?.coverBboxBottom,
+                    updatedAtEpochMs = now,
+                    entityKind = destPerson.entityKind
+                )
+                smartDao.upsertSavedPersonMemory(updatedDestMem)
+                if (destPerson.memoryId != destMemId) {
+                    smartDao.updatePersonMemoryId(destId, destMemId, now)
+                }
+                // Drop any stale exclusion on destMemId for this exact face
+                val existingDestAnchors = smartDao.getAnchorsForMemory(destMemId).filterNot { anc ->
+                    anc.isExcluded && anc.itemId == face.itemId && PersonMemoryEngine.isSameFaceLocation(
+                        PersonMemoryEngine.FaceBox(face.bboxLeft, face.bboxTop, face.bboxRight, face.bboxBottom),
+                        anc.toFaceBox(),
+                        singleFaceInPhoto = false
+                    )
+                }
+                val destFaceAnchors = smartDao.getFacesForPerson(destId).map { f ->
+                    f.toSavedAnchor(
+                        memoryId = destMemId,
+                        originGroupId = if (f.faceId == face.faceId) "reassigned_${face.faceId}" else destId,
+                        isUserAssigned = f.faceId == face.faceId,
+                        isExcluded = false,
+                        now = now
+                    )
+                }
+                val prunedDest = PersonMemoryEngine.pruneAndDeduplicateAnchors(
+                    anchors = existingDestAnchors + destFaceAnchors,
+                    coverItemId = updatedDestMem.coverItemId,
+                    coverBox = updatedDestMem.coverBoxOrNull()
+                )
+                smartDao.deleteAnchorsForMemory(destMemId)
+                if (prunedDest.isNotEmpty()) {
+                    smartDao.upsertSavedPersonAnchors(prunedDest)
+                }
+            }
+        }
+    }
 
     private suspend fun recalculateClusterAfterRemoval(personId: String) {
         val person = smartDao.getPersonById(personId) ?: return

@@ -776,4 +776,77 @@ class SmartRecognitionTest {
         assertTrue(FaceClusteringEngine.findAutoConsolidationPairs(crossKindClusters).isEmpty())
         assertTrue(FaceClusteringEngine.findInteractiveMergeSuggestions(crossKindClusters).isEmpty())
     }
+
+    @Test
+    fun durableReassignment_excludesOldPersonAndPinsNewPersonAcrossRebuilds() {
+        val originalBox = PersonMemoryEngine.FaceBox(0.20f, 0.15f, 0.45f, 0.45f)
+        // Slightly shifted box as if a future face detector framed the face slightly looser
+        val rebuiltBox = PersonMemoryEngine.FaceBox(0.18f, 0.13f, 0.47f, 0.47f)
+
+        val anchorsForPhoto = listOf(
+            // Old auto-anchor on Alex + explicit exclusion added when user moved photo from Alex -> Sarah
+            SavedPersonAnchorEntity(
+                anchorId = "anc_old_pos",
+                memoryId = "mem_alex",
+                itemId = "photo_wrong",
+                bboxLeft = originalBox.left,
+                bboxTop = originalBox.top,
+                bboxRight = originalBox.right,
+                bboxBottom = originalBox.bottom,
+                originGroupId = "p_alex",
+                isUserAssigned = false,
+                isExcluded = false,
+                qualityScore = 0.8f,
+                updatedAtEpochMs = 1L
+            ),
+            SavedPersonAnchorEntity(
+                anchorId = "anc_old_excl",
+                memoryId = "mem_alex",
+                itemId = "photo_wrong",
+                bboxLeft = originalBox.left,
+                bboxTop = originalBox.top,
+                bboxRight = originalBox.right,
+                bboxBottom = originalBox.bottom,
+                originGroupId = "p_alex",
+                isUserAssigned = true,
+                isExcluded = true,
+                qualityScore = 0.8f,
+                updatedAtEpochMs = 2L
+            ),
+            // User-assigned positive anchor on Sarah
+            SavedPersonAnchorEntity(
+                anchorId = "anc_new_pos",
+                memoryId = "mem_sarah",
+                itemId = "photo_wrong",
+                bboxLeft = originalBox.left,
+                bboxTop = originalBox.top,
+                bboxRight = originalBox.right,
+                bboxBottom = originalBox.bottom,
+                originGroupId = "reassigned_2",
+                isUserAssigned = true,
+                isExcluded = false,
+                qualityScore = 0.8f,
+                updatedAtEpochMs = 2L
+            )
+        )
+
+        val prunedAlex = PersonMemoryEngine.pruneAndDeduplicateAnchors(
+            anchorsForPhoto.filter { it.memoryId == "mem_alex" }
+        )
+        // Pruning must drop the stale positive anchor on Alex and keep the exclusion!
+        assertEquals(1, prunedAlex.size)
+        assertTrue(prunedAlex.single().isExcluded)
+
+        val combinedAfterPrune = prunedAlex + anchorsForPhoto.filter { it.memoryId == "mem_sarah" }
+        val excluded = PersonMemoryEngine.findExcludedMemoryIds(rebuiltBox, combinedAfterPrune)
+        assertEquals(setOf("mem_alex"), excluded)
+
+        val winner = PersonMemoryEngine.findBestPositiveMemoryId(
+            detected = rebuiltBox,
+            anchorsForItem = combinedAfterPrune,
+            validMemoryIds = setOf("mem_alex", "mem_sarah"),
+            excludedMemoryIds = excluded
+        )
+        assertEquals("mem_sarah", winner)
+    }
 }

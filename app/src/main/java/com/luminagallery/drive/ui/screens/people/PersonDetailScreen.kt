@@ -1,6 +1,8 @@
 package com.luminagallery.drive.ui.screens.people
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -31,8 +33,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Merge
+import androidx.compose.material.icons.rounded.PersonAdd
 import androidx.compose.material.icons.rounded.PersonRemove
 import androidx.compose.material.icons.rounded.PhotoCamera
+import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material.icons.rounded.StarOutline
 import androidx.compose.material.icons.rounded.Visibility
@@ -42,6 +46,7 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -111,11 +116,18 @@ fun PersonDetailScreen(
 
     var showRenameDialog by remember { mutableStateOf(false) }
     var showCombineSheet by remember { mutableStateOf(false) }
+    var showWrongPersonSheet by remember { mutableStateOf(false) }
     var showCoverPickerSheet by remember { mutableStateOf(false) }
     var showCollagePdfSheet by remember { mutableStateOf(false) }
 
     BackHandler(enabled = uiState.isSelectionMode) {
         viewModel.clearSelection()
+    }
+
+    LaunchedEffect(uiState.isSelectionMode) {
+        if (!uiState.isSelectionMode) {
+            showWrongPersonSheet = false
+        }
     }
 
     LaunchedEffect(uiState.personRemovedOrMerged) {
@@ -137,6 +149,10 @@ fun PersonDetailScreen(
     }
 
     val person = uiState.person
+    val sameKindOtherPersons = remember(uiState.otherPersons, person) {
+        if (person == null) emptyList()
+        else uiState.otherPersons.filter { it.entityKind == person.entityKind }
+    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -171,8 +187,8 @@ fun PersonDetailScreen(
                     if (uiState.isSelectionMode) {
                         TextButton(
                             onClick = {
-                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                viewModel.removeSelectedFromPerson()
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                showWrongPersonSheet = true
                             }
                         ) {
                             Icon(
@@ -181,7 +197,10 @@ fun PersonDetailScreen(
                                 modifier = Modifier.size(18.dp)
                             )
                             Spacer(Modifier.width(5.dp))
-                            Text("Not this person", fontWeight = FontWeight.SemiBold)
+                            Text(
+                                text = if (person?.isPet == true) "Not this pet" else "Not this person",
+                                fontWeight = FontWeight.SemiBold
+                            )
                         }
                     } else if (person != null) {
                         IconButton(onClick = { showRenameDialog = true }) {
@@ -347,7 +366,7 @@ fun PersonDetailScreen(
                                             label = { Text(if (person.isFavorite) "Pinned" else "Pin") }
                                         )
                                     }
-                                    if (uiState.otherPersons.isNotEmpty()) {
+                                    if (sameKindOtherPersons.isNotEmpty()) {
                                         item(key = "act_combine") {
                                             AssistChip(
                                                 onClick = { showCombineSheet = true },
@@ -654,7 +673,7 @@ fun PersonDetailScreen(
                         .fillMaxWidth()
                         .heightIn(max = 380.dp)
                 ) {
-                    items(uiState.otherPersons, key = { it.personId }) { candidate ->
+                    items(sameKindOtherPersons, key = { it.personId }) { candidate ->
                         val picked = candidate.personId in pickedIds
                         Column(
                             horizontalAlignment = Alignment.CenterHorizontally,
@@ -670,7 +689,8 @@ fun PersonDetailScreen(
                                 cropPath = candidate.coverCropPath,
                                 contentDescription = candidate.displayTitle,
                                 size = 66.dp,
-                                isSelected = picked
+                                isSelected = picked,
+                                isPet = candidate.isPet
                             )
                             Spacer(Modifier.height(5.dp))
                             Text(
@@ -690,6 +710,248 @@ fun PersonDetailScreen(
                     }
                 }
                 Spacer(Modifier.height(6.dp))
+            }
+        }
+    }
+
+    // "Not this person — move to right person / new person / just remove" Bottom Sheet
+    if (showWrongPersonSheet && person != null && uiState.isSelectionMode) {
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        val kindWord = if (person.isPet) "pet" else "person"
+        val selectedCount = uiState.selectedIds.size
+        var searchQuery by remember { mutableStateOf("") }
+        var showCreateNewField by remember { mutableStateOf(false) }
+        var newPersonName by remember { mutableStateOf("") }
+
+        val filteredCandidates = remember(sameKindOtherPersons, searchQuery) {
+            val q = searchQuery.trim()
+            if (q.isEmpty()) sameKindOtherPersons
+            else sameKindOtherPersons.filter { it.displayTitle.contains(q, ignoreCase = true) }
+        }
+
+        ModalBottomSheet(
+            onDismissRequest = { showWrongPersonSheet = false },
+            sheetState = sheetState,
+            shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(horizontal = 20.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text(
+                        text = "Not ${person.displayTitle}?",
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                    )
+                    Text(
+                        text = if (selectedCount == 1) {
+                            "Choose who is in this photo instead, or just remove it from ${person.displayTitle}."
+                        } else {
+                            "Choose who is in these $selectedCount photos instead, or just remove them from ${person.displayTitle}."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                // Quick "+ New person" inline creation card
+                Surface(
+                    shape = RoundedCornerShape(18.dp),
+                    color = if (showCreateNewField) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
+                    else MaterialTheme.colorScheme.surfaceContainer,
+                    border = BorderStroke(
+                        width = if (showCreateNewField) 1.2.dp else 0.75.dp,
+                        color = if (showCreateNewField) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(enabled = !showCreateNewField) { showCreateNewField = true }
+                            .padding(horizontal = 14.dp, vertical = 11.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(34.dp)
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.PersonAdd,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Move to a new $kindWord",
+                                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold)
+                                )
+                                Text(
+                                    text = "Create a separate $kindWord group (name optional)",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+
+                        AnimatedVisibility(visible = showCreateNewField) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                OutlinedTextField(
+                                    value = newPersonName,
+                                    onValueChange = { newPersonName = it },
+                                    placeholder = { Text("Name (optional)…") },
+                                    singleLine = true,
+                                    shape = RoundedCornerShape(14.dp),
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Button(
+                                    onClick = {
+                                        showWrongPersonSheet = false
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        viewModel.reassignSelectedToPerson(
+                                            targetPersonId = null,
+                                            newPersonName = newPersonName
+                                        )
+                                    },
+                                    shape = RoundedCornerShape(14.dp)
+                                ) {
+                                    Text("Move", fontWeight = FontWeight.SemiBold)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Existing people / pets picker grid ("It's this person instead")
+                if (sameKindOtherPersons.isNotEmpty()) {
+                    Text(
+                        text = "It's this $kindWord instead",
+                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                        color = MaterialTheme.colorScheme.primary
+                    )
+
+                    if (sameKindOtherPersons.size >= 6) {
+                        OutlinedTextField(
+                            value = searchQuery,
+                            onValueChange = { searchQuery = it },
+                            placeholder = { Text("Search ${if (person.isPet) "pets" else "people"}…") },
+                            leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null) },
+                            singleLine = true,
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+
+                    if (filteredCandidates.isEmpty()) {
+                        Text(
+                            text = "No matching ${if (person.isPet) "pets" else "people"} found.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(vertical = 8.dp)
+                        )
+                    } else {
+                        LazyVerticalGrid(
+                            columns = GridCells.Fixed(4),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 280.dp)
+                        ) {
+                            items(filteredCandidates, key = { "move_${it.personId}" }) { candidate ->
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(16.dp))
+                                        .clickable {
+                                            showWrongPersonSheet = false
+                                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                            viewModel.reassignSelectedToPerson(targetPersonId = candidate.personId)
+                                        }
+                                        .padding(4.dp)
+                                ) {
+                                    PersonAvatar(
+                                        cropPath = candidate.coverCropPath,
+                                        contentDescription = candidate.displayTitle,
+                                        size = 64.dp,
+                                        isFavorite = candidate.isFavorite,
+                                        isPet = candidate.isPet
+                                    )
+                                    Spacer(Modifier.height(5.dp))
+                                    Text(
+                                        text = candidate.displayTitle,
+                                        fontSize = 11.5.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        textAlign = TextAlign.Center
+                                    )
+                                    Text(
+                                        text = "${candidate.photoCount}",
+                                        fontSize = 10.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+
+                // Destructive fallback: just remove without assigning to anyone else
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.45f),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .clickable {
+                            showWrongPersonSheet = false
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            viewModel.removeSelectedFromPerson()
+                        }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.PersonRemove,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "Just remove from ${person.displayTitle}",
+                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(4.dp))
             }
         }
     }
