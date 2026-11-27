@@ -1086,6 +1086,10 @@ class SmartRecognitionManager(
             // Pets without re-scanning the rest of the library!
             backfillPetsFromIndexedPhotosIfNeeded(allEligible)
 
+            // One-time fast verification pruning previously detected 3D prints, figurines & inanimate
+            // false positives from unnamed, unpinned human clusters (never touches named/pinned people!)
+            pruneExistingInanimateFalseFacesIfNeeded()
+
             // Fast 2-column SQLite stamp lookup (scales cleanly to 30,000+ photos in ~20ms)
             val stampRows = smartDao.getIndexedItemStamps()
             val existingStamps = HashMap<String, Long>(stampRows.size * 2)
@@ -1369,6 +1373,7 @@ class SmartRecognitionManager(
                             clusters = inMemoryClusters,
                             forbiddenPersonIds = usedPersonIdsInThisPhoto,
                             wholePhotoAnimal = wholeAnimal,
+                            wholePhotoMlLabels = rawMlLabels,
                             savedMemoryLookup = savedMemoryLookup,
                             detectedFacesInPhoto = detectedFaces.size
                         )
@@ -1503,6 +1508,7 @@ class SmartRecognitionManager(
         clusters: LinkedHashMap<String, MutableClusterState>,
         forbiddenPersonIds: Set<String>,
         wholePhotoAnimal: AnimalTaxonomy.Analysis? = null,
+        wholePhotoMlLabels: List<Pair<String, Float>> = emptyList(),
         savedMemoryLookup: SavedMemoryLookup = SavedMemoryLookup.EMPTY,
         detectedFacesInPhoto: Int = 1
     ): DetectedFaceEntity? {
@@ -1578,10 +1584,21 @@ class SmartRecognitionManager(
                 .asSequence()
                 .filter { (label, _) -> label.trim().lowercase(Locale.US) in MLKIT_STRONG_HUMAN_PORTRAIT_LABELS }
                 .maxOfOrNull { it.second } ?: 0f
-            if (cropAnimal != null && AnimalTaxonomy.isNonHumanFace(cropAnimal, wholePhotoAnimal, mlKitHumanConf)) {
+            if (cropAnimal != null && AnimalTaxonomy.isNonHumanFace(
+                    crop = cropAnimal,
+                    wholePhoto = wholePhotoAnimal,
+                    mlKitHumanConfidence = mlKitHumanConf,
+                    hasMlKitCropLabels = cropMlLabels.isNotEmpty()
+                )
+            ) {
                 return null
             }
-            if (SmartObjectVocabulary.isNonHumanFaceCrop(cropMlLabels, cropImageNetLabels)) {
+            if (SmartObjectVocabulary.isNonHumanFaceCrop(
+                    cropMlKitLabels = cropMlLabels,
+                    cropImageNetLabels = cropImageNetLabels,
+                    wholePhotoMlKitLabels = wholePhotoMlLabels
+                )
+            ) {
                 return null
             }
 
@@ -2145,6 +2162,113 @@ class SmartRecognitionManager(
             metaPrefs.edit().putInt(KEY_PET_GROUPING_VERSION, CURRENT_PET_GROUPING_VERSION).apply()
         }
     }
+
+    /**
+     * One-time lightweight verification pass over already-cached `160x160` portrait crops of
+     * unnamed, unpinned human clusters to remove 3D prints, figurines, statues, and inanimate
+     * pareidolia false positives without re-scanning the entire library or touching named people.
+     */
+    private suspend fun pruneExistingInanimateFalseFacesIfNeeded() {
+        if (metaPrefs.getInt(KEY_INANIMATE_PRUNE_VERSION, 0) >= CURRENT_INANIMATE_PRUNE_VERSION) return
+        val persons = smartDao.getAllPersons()
+        val candidatePersonIds = persons
+            .filter {
+                !it.isPet &&
+                    it.name.isBlank() &&
+                    !it.isFavorite &&
+                    !it.isHidden &&
+                    it.memoryId.isNullOrBlank()
+            }
+            .mapTo(HashSet()) { it.personId }
+        if (candidatePersonIds.isEmpty()) {
+            metaPrefs.edit().putInt(KEY_INANIMATE_PRUNE_VERSION, CURRENT_INANIMATE_PRUNE_VERSION).apply()
+            return
+        }
+
+        val activeFaces = smartDao.getAllActiveFacesSync()
+            .filter { it.personId in candidatePersonIds && !it.cropPath.isNullOrBlank() }
+        if (activeFaces.isEmpty()) {
+            metaPrefs.edit().putInt(KEY_INANIMATE_PRUNE_VERSION, CURRENT_INANIMATE_PRUNE_VERSION).apply()
+            return
+        }
+
+        val badFaceIds = ArrayList<String>()
+        val affectedPersonIds = HashSet<String>()
+        var interrupted = false
+
+        for (face in activeFaces) {
+            if (pauseRequested) {
+                interrupted = true
+                break
+            }
+            val path = face.cropPath ?: continue
+            val cropFile = File(path)
+            if (!cropFile.isFile) continue
+            val bmp = runCatching { BitmapFactory.decodeFile(cropFile.absolutePath) }.getOrNull() ?: continue
+            try {
+                val cropMlLabels = runCatching {
+                    Tasks.await(
+                        cropVerifierLabeler.process(InputImage.fromBitmap(bmp, 0)),
+                        ML_TIMEOUT_SEC,
+                        TimeUnit.SECONDS
+                    ).map { it.text to it.confidence }
+                }.getOrDefault(emptyList())
+                val cropProbs = objectEngine.classifyProbabilities(bmp)
+                val cropImageNetLabels = cropProbs?.let {
+                    objectEngine.topLabels(it, topK = 5, minConfidence = 0.16f)
+                }.orEmpty()
+                val cropAnimal = cropProbs?.let { AnimalTaxonomy.analyze(it) }
+                val mlKitHumanConf = cropMlLabels
+                    .asSequence()
+                    .filter { (label, _) -> label.trim().lowercase(Locale.US) in MLKIT_STRONG_HUMAN_PORTRAIT_LABELS }
+                    .maxOfOrNull { it.second } ?: 0f
+
+                val isFake = (cropAnimal != null && AnimalTaxonomy.isNonHumanFace(
+                    crop = cropAnimal,
+                    wholePhoto = null,
+                    mlKitHumanConfidence = mlKitHumanConf,
+                    hasMlKitCropLabels = cropMlLabels.isNotEmpty()
+                )) || SmartObjectVocabulary.isNonHumanFaceCrop(
+                    cropMlKitLabels = cropMlLabels,
+                    cropImageNetLabels = cropImageNetLabels
+                )
+                if (isFake) {
+                    badFaceIds.add(face.faceId)
+                    face.personId?.let { affectedPersonIds.add(it) }
+                    faceEngine.deleteCropFile(path)
+                }
+            } finally {
+                bmp.recycle()
+            }
+        }
+
+        if (badFaceIds.isNotEmpty()) {
+            database.withTransaction {
+                for (fid in badFaceIds) {
+                    smartDao.excludeFaceFromPerson(fid)
+                }
+                for (pid in affectedPersonIds) {
+                    recalculateClusterAfterRemoval(pid)
+                }
+            }
+        }
+        if (!interrupted) {
+            metaPrefs.edit().putInt(KEY_INANIMATE_PRUNE_VERSION, CURRENT_INANIMATE_PRUNE_VERSION).apply()
+        }
+    }
+
+    /**
+     * Loads all active (non-excluded) detected faces across [photoIds] so the "Not this person"
+     * sheet can highlight the exact detected face bounding box and list other faces in group photos.
+     */
+    suspend fun getActiveFacesForPhotos(photoIds: Collection<String>): List<DetectedFaceEntity> =
+        withContext(Dispatchers.IO) {
+            val distinct = photoIds.distinct()
+            if (distinct.isEmpty()) return@withContext emptyList()
+            distinct.chunked(400)
+                .flatMap { chunk -> smartDao.getFacesForPhotos(chunk) }
+                .filterNot { it.isExcludedByUser }
+        }
 
     private suspend fun consolidateSplitClusters() {
         val allPersons = smartDao.getAllPersons().filterNot { it.isHidden }
@@ -3385,12 +3509,14 @@ class SmartRecognitionManager(
         private const val KEY_AVATAR_CROP_VERSION = "smart_avatar_crop_version"
         private const val KEY_PERSON_MEMORY_MIGRATED = "smart_person_memory_migrated_v"
         private const val KEY_PET_GROUPING_VERSION = "smart_pet_grouping_version"
+        private const val KEY_INANIMATE_PRUNE_VERSION = "smart_inanimate_prune_version"
         private const val KEY_REJECTED_MERGE_PAIRS = "rejected_merge_pairs"
         private const val KEY_PRESERVED_PROFILES = "preserved_person_profiles_json"
         private const val CURRENT_AI_INDEX_VERSION = 4
         private const val CURRENT_AVATAR_CROP_VERSION = 2
         private const val CURRENT_PERSON_MEMORY_VERSION = 1
         private const val CURRENT_PET_GROUPING_VERSION = 1
+        private const val CURRENT_INANIMATE_PRUNE_VERSION = 1
 
         /** High-precision ML Kit portrait cues specific to humans (excludes eye/nose/mouth shared with animals). */
         private val MLKIT_STRONG_HUMAN_PORTRAIT_LABELS: Set<String> = setOf(

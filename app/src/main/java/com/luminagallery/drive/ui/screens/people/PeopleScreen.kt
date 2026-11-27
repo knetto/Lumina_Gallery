@@ -15,6 +15,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -36,13 +37,16 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items as lazyItems
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -57,14 +61,18 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.CompareArrows
 import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Face
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Merge
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.AlertDialog
@@ -174,6 +182,7 @@ fun PeopleScreen(
 
     var showOverflowMenu by remember { mutableStateOf(false) }
     var showCombineDialog by remember { mutableStateOf(false) }
+    var combineSingleSourcePerson by remember { mutableStateOf<PersonSummary?>(null) }
     var showRebuildConfirmDialog by remember { mutableStateOf(false) }
     var renameTargetPerson by remember { mutableStateOf<PersonSummary?>(null) }
     var fullPhotoPreview by remember { mutableStateOf<PersonPhotoPreviewRequest?>(null) }
@@ -750,37 +759,65 @@ fun PeopleScreen(
                             Button(
                                 onClick = { showCombineDialog = true },
                                 shape = RoundedCornerShape(20.dp),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
                                 modifier = Modifier.weight(1.3f)
                             ) {
                                 Icon(Icons.Rounded.Merge, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(Modifier.width(6.dp))
-                                Text("Combine ($count)", fontWeight = FontWeight.SemiBold)
+                                Text("Combine ($count)", fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
                             }
                         } else if (count == 1) {
                             val single = activeList.firstOrNull { it.personId in uiState.selectedPersonIds }
+                            val hasCombineTargets = remember(single, uiState.visiblePersons) {
+                                single != null && uiState.visiblePersons.any {
+                                    it.personId != single.personId && it.entityKind == single.entityKind
+                                }
+                            }
                             FilledTonalButton(
                                 onClick = { if (single != null) renameTargetPerson = single },
                                 shape = RoundedCornerShape(20.dp),
-                                modifier = Modifier.weight(1.1f)
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
+                                modifier = Modifier.weight(0.95f)
                             ) {
-                                Icon(Icons.Rounded.Edit, contentDescription = null, modifier = Modifier.size(17.dp))
-                                Spacer(Modifier.width(6.dp))
-                                Text("Name", fontWeight = FontWeight.SemiBold)
+                                Icon(Icons.Rounded.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("Name", fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
+                            }
+                            if (hasCombineTargets && single != null) {
+                                Button(
+                                    onClick = {
+                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                        combineSingleSourcePerson = single
+                                    },
+                                    shape = RoundedCornerShape(20.dp),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
+                                    modifier = Modifier.weight(1.15f)
+                                ) {
+                                    Icon(Icons.Rounded.Merge, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Combine", fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
+                                }
                             }
                         }
 
                         FilledTonalButton(
                             onClick = { viewModel.setSelectedHidden(!uiState.showHiddenSection) },
                             shape = RoundedCornerShape(20.dp),
-                            modifier = Modifier.weight(1f)
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
+                            modifier = Modifier.weight(0.95f)
                         ) {
                             Icon(
                                 imageVector = if (uiState.showHiddenSection) Icons.Rounded.Visibility else Icons.Rounded.VisibilityOff,
                                 contentDescription = null,
-                                modifier = Modifier.size(17.dp)
+                                modifier = Modifier.size(16.dp)
                             )
-                            Spacer(Modifier.width(6.dp))
-                            Text(if (uiState.showHiddenSection) "Unhide" else "Hide")
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                text = if (uiState.showHiddenSection) "Unhide" else "Hide",
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                softWrap = false
+                            )
                         }
                     }
                 }
@@ -1010,6 +1047,352 @@ fun PeopleScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showCombineDialog = false }) { Text("Cancel") }
+            }
+        )
+    }
+
+    // Combine Single Selected Person via searchable avatar dropdown
+    combineSingleSourcePerson?.let { source ->
+        val candidates = remember(uiState.visiblePersons, source.personId, source.entityKind) {
+            uiState.visiblePersons
+                .filter { it.personId != source.personId && it.entityKind == source.entityKind }
+                .sortedWith(
+                    compareByDescending<PersonSummary> { it.isNamed }
+                        .thenByDescending { it.isFavorite }
+                        .thenByDescending { it.photoCount }
+                        .thenBy { it.name.lowercase() }
+                )
+        }
+        var selectedTarget by remember(source.personId) { mutableStateOf<PersonSummary?>(null) }
+        var dropdownExpanded by remember(source.personId) { mutableStateOf(true) }
+        var searchQuery by remember(source.personId) { mutableStateOf("") }
+        var combinedName by remember(source.personId) { mutableStateOf(source.name) }
+
+        val filteredCandidates = remember(candidates, searchQuery) {
+            val q = searchQuery.trim()
+            if (q.isEmpty()) candidates
+            else candidates.filter { it.displayTitle.contains(q, ignoreCase = true) }
+        }
+        val kindWord = if (source.isPet) "pet" else "person"
+
+        AlertDialog(
+            onDismissRequest = { combineSingleSourcePerson = null },
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            shape = RoundedCornerShape(28.dp),
+            title = {
+                Text(
+                    text = if (source.isNamed) "Combine ${source.name} with…" else "Combine $kindWord with…",
+                    fontWeight = FontWeight.SemiBold
+                )
+            },
+            text = {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    // Tappable side-by-side avatar preview (tap either to inspect full photos)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterHorizontally),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(14.dp))
+                                .clickable {
+                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    val peopleForPreview = listOfNotNull(source, selectedTarget)
+                                    fullPhotoPreview = PersonPhotoPreviewRequest(
+                                        people = peopleForPreview,
+                                        initialIndex = 0
+                                    )
+                                }
+                                .padding(horizontal = 6.dp, vertical = 4.dp)
+                        ) {
+                            PersonAvatar(
+                                cropPath = source.coverCropPath,
+                                contentDescription = source.displayTitle,
+                                size = 56.dp,
+                                isPet = source.isPet,
+                                borderColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                text = source.displayTitle,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+
+                        Icon(
+                            imageVector = Icons.Rounded.Merge,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp)
+                        )
+
+                        val chosen = selectedTarget
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(14.dp))
+                                .clickable(enabled = chosen != null) {
+                                    if (chosen != null) {
+                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                        fullPhotoPreview = PersonPhotoPreviewRequest(
+                                            people = listOf(source, chosen),
+                                            initialIndex = 1
+                                        )
+                                    }
+                                }
+                                .padding(horizontal = 6.dp, vertical = 4.dp)
+                        ) {
+                            if (chosen != null) {
+                                PersonAvatar(
+                                    cropPath = chosen.coverCropPath,
+                                    contentDescription = chosen.displayTitle,
+                                    size = 56.dp,
+                                    isPet = chosen.isPet,
+                                    borderColor = MaterialTheme.colorScheme.primary
+                                )
+                            } else {
+                                Box(
+                                    modifier = Modifier
+                                        .size(56.dp)
+                                        .clip(CircleShape)
+                                        .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+                                        .border(1.2.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Face,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                }
+                            }
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                text = chosen?.displayTitle ?: "Choose below",
+                                fontSize = 11.sp,
+                                fontWeight = if (chosen != null) FontWeight.SemiBold else FontWeight.Normal,
+                                color = if (chosen != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+
+                    // Sleek dropdown selector header showing chosen avatar + name
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainer,
+                        border = BorderStroke(
+                            width = if (dropdownExpanded) 1.3.dp else 0.9.dp,
+                            color = if (dropdownExpanded) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(16.dp))
+                            .clickable { dropdownExpanded = !dropdownExpanded }
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            val chosen = selectedTarget
+                            if (chosen != null) {
+                                PersonAvatar(
+                                    cropPath = chosen.coverCropPath,
+                                    contentDescription = chosen.displayTitle,
+                                    size = 34.dp,
+                                    isPet = chosen.isPet
+                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = chosen.displayTitle,
+                                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = if (chosen.photoCount == 1) "1 photo" else "${chosen.photoCount} photos",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            } else {
+                                Text(
+                                    text = "Select a $kindWord…",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                            Icon(
+                                imageVector = if (dropdownExpanded) Icons.Rounded.KeyboardArrowUp else Icons.Rounded.KeyboardArrowDown,
+                                contentDescription = if (dropdownExpanded) "Collapse list" else "Expand list",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    // Expandable dropdown panel with search + avatar rows
+                    AnimatedVisibility(visible = dropdownExpanded) {
+                        Surface(
+                            shape = RoundedCornerShape(18.dp),
+                            color = MaterialTheme.colorScheme.surfaceContainerLow,
+                            border = BorderStroke(0.8.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                if (candidates.size >= 5) {
+                                    OutlinedTextField(
+                                        value = searchQuery,
+                                        onValueChange = { searchQuery = it },
+                                        placeholder = { Text("Search name…") },
+                                        leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                                        singleLine = true,
+                                        shape = RoundedCornerShape(12.dp),
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
+                                if (filteredCandidates.isEmpty()) {
+                                    Text(
+                                        text = "No matching ${if (source.isPet) "pets" else "people"} found.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        textAlign = TextAlign.Center,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 12.dp)
+                                    )
+                                } else {
+                                    LazyColumn(
+                                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .heightIn(max = 220.dp)
+                                    ) {
+                                        lazyItems(filteredCandidates, key = { "drop_${it.personId}" }) { candidate ->
+                                            val isPicked = selectedTarget?.personId == candidate.personId
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clip(RoundedCornerShape(12.dp))
+                                                    .background(
+                                                        if (isPicked) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
+                                                        else Color.Transparent
+                                                    )
+                                                    .clickable {
+                                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                        selectedTarget = candidate
+                                                        combinedName = candidate.name.ifBlank { source.name }
+                                                        dropdownExpanded = false
+                                                    }
+                                                    .padding(horizontal = 8.dp, vertical = 6.dp)
+                                            ) {
+                                                PersonAvatar(
+                                                    cropPath = candidate.coverCropPath,
+                                                    contentDescription = candidate.displayTitle,
+                                                    size = 42.dp,
+                                                    isSelected = isPicked,
+                                                    isFavorite = candidate.isFavorite,
+                                                    isPet = candidate.isPet,
+                                                    modifier = Modifier
+                                                        .clip(CircleShape)
+                                                        .clickable {
+                                                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                            fullPhotoPreview = PersonPhotoPreviewRequest(
+                                                                people = listOf(source, candidate),
+                                                                initialIndex = 1
+                                                            )
+                                                        }
+                                                )
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(
+                                                        text = candidate.displayTitle,
+                                                        style = MaterialTheme.typography.bodyMedium.copy(
+                                                            fontWeight = if (candidate.isNamed || isPicked) FontWeight.SemiBold else FontWeight.Normal
+                                                        ),
+                                                        color = if (candidate.isNamed || isPicked) {
+                                                            MaterialTheme.colorScheme.onSurface
+                                                        } else {
+                                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                                        },
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                    Text(
+                                                        text = if (candidate.photoCount == 1) "1 photo" else "${candidate.photoCount} photos",
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                    )
+                                                }
+                                                if (isPicked) {
+                                                    Icon(
+                                                        imageVector = Icons.Rounded.Check,
+                                                        contentDescription = "Selected",
+                                                        tint = MaterialTheme.colorScheme.primary,
+                                                        modifier = Modifier.size(18.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (selectedTarget != null) {
+                        OutlinedTextField(
+                            value = combinedName,
+                            onValueChange = { combinedName = it },
+                            label = { Text("Combined name (optional)") },
+                            placeholder = { Text("e.g. Alex, Mom…") },
+                            singleLine = true,
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = selectedTarget != null,
+                    onClick = {
+                        val target = selectedTarget ?: return@Button
+                        combineSingleSourcePerson = null
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        viewModel.combineTwoPersons(
+                            draggedPersonId = source.personId,
+                            targetPersonId = target.personId,
+                            combinedName = combinedName
+                        )
+                    },
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Icon(Icons.Rounded.Merge, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(5.dp))
+                    Text("Combine", fontWeight = FontWeight.SemiBold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { combineSingleSourcePerson = null }) { Text("Cancel") }
             }
         )
     }

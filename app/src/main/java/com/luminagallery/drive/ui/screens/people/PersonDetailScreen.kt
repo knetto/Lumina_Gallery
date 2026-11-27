@@ -1,13 +1,16 @@
 package com.luminagallery.drive.ui.screens.people
 
+import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -17,21 +20,30 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items as lazyRowItems
+import androidx.compose.foundation.lazy.itemsIndexed as lazyRowItemsIndexed
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.Groups
 import androidx.compose.material.icons.rounded.Merge
 import androidx.compose.material.icons.rounded.PersonAdd
 import androidx.compose.material.icons.rounded.PersonRemove
@@ -41,6 +53,7 @@ import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material.icons.rounded.StarOutline
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
+import androidx.compose.material.icons.rounded.ZoomIn
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -70,16 +83,31 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import coil3.compose.AsyncImage
+import coil3.request.ImageRequest
+import coil3.request.crossfade
 import com.luminagallery.drive.LocalAppContainer
+import com.luminagallery.drive.LocalGalleryImageLoader
+import com.luminagallery.drive.data.repository.DriveThumbnailRequest
 import com.luminagallery.drive.ui.components.CollagePdfBottomSheet
 import com.luminagallery.drive.ui.components.ExifMetadataBottomSheet
 import com.luminagallery.drive.ui.components.FastScrollThumb
@@ -90,7 +118,10 @@ import com.luminagallery.drive.ui.components.MultiSelectActionBar
 import com.luminagallery.drive.ui.components.PersonAvatar
 import com.luminagallery.drive.ui.components.PinchZoomGridContainer
 import com.luminagallery.drive.ui.components.photoGridDragSelect
+import java.io.File
 import kotlinx.coroutines.launch
+import kotlin.math.min
+import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -722,6 +753,17 @@ fun PersonDetailScreen(
         var searchQuery by remember { mutableStateOf("") }
         var showCreateNewField by remember { mutableStateOf(false) }
         var newPersonName by remember { mutableStateOf("") }
+        var selectedFaceDetails by remember { mutableStateOf<List<SelectedWrongPersonPhotoInfo>>(emptyList()) }
+        var inspectorInitialIndex by remember { mutableStateOf<Int?>(null) }
+
+        LaunchedEffect(uiState.selectedIds) {
+            selectedFaceDetails = viewModel.loadSelectedPhotoFaceDetails(uiState.selectedIds)
+        }
+
+        val singlePhotoDetail = selectedFaceDetails.singleOrNull()
+        val alreadyTaggedPersonIdsInSingle = remember(singlePhotoDetail) {
+            singlePhotoDetail?.otherFacesInPhoto?.mapNotNullTo(HashSet()) { it.personId }.orEmpty()
+        }
 
         val filteredCandidates = remember(sameKindOtherPersons, searchQuery) {
             val q = searchQuery.trim()
@@ -738,6 +780,7 @@ fun PersonDetailScreen(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
                     .navigationBarsPadding()
                     .padding(horizontal = 20.dp, vertical = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -749,13 +792,228 @@ fun PersonDetailScreen(
                     )
                     Text(
                         text = if (selectedCount == 1) {
-                            "Choose who is in this photo instead, or just remove it from ${person.displayTitle}."
+                            "Check which face was detected as ${person.displayTitle}, then move it to the right $kindWord or remove it."
                         } else {
-                            "Choose who is in these $selectedCount photos instead, or just remove them from ${person.displayTitle}."
+                            "Check the detected faces in these $selectedCount photos, then move them or remove them from ${person.displayTitle}."
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                }
+
+                // Clear visual proof of WHICH face was detected as this person (especially for group photos!)
+                if (singlePhotoDetail != null) {
+                    val primaryFace = singlePhotoDetail.primaryDetectedFace
+                    val otherNamed = singlePhotoDetail.otherFacesInPhoto
+                        .map { it.personName }
+                        .filter { it.isNotBlank() }
+                        .distinct()
+                    Surface(
+                        shape = RoundedCornerShape(20.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainer,
+                        border = BorderStroke(0.8.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            if (singlePhotoDetail.isGroupPhoto) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(196.dp)
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .background(Color(0xFF101318))
+                                        .clickable {
+                                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                            inspectorInitialIndex = 0
+                                        }
+                                ) {
+                                    FaceHighlightedPhotoOverlay(
+                                        info = singlePhotoDetail,
+                                        currentPersonName = person.displayTitle,
+                                        compactLabels = true,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                    Surface(
+                                        shape = RoundedCornerShape(50),
+                                        color = Color(0xAA000000),
+                                        modifier = Modifier
+                                            .align(Alignment.BottomEnd)
+                                            .padding(8.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.ZoomIn,
+                                                contentDescription = null,
+                                                tint = Color.White,
+                                                modifier = Modifier.size(13.dp)
+                                            )
+                                            Text(
+                                                text = "Tap to inspect",
+                                                color = Color.White,
+                                                fontSize = 10.5.sp,
+                                                fontWeight = FontWeight.Medium
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .clickable {
+                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                        inspectorInitialIndex = 0
+                                    }
+                                    .padding(horizontal = 2.dp, vertical = 2.dp)
+                            ) {
+                                PersonAvatar(
+                                    cropPath = primaryFace?.cropPath ?: person.coverCropPath,
+                                    contentDescription = "Detected face",
+                                    size = 48.dp,
+                                    isPet = person.isPet,
+                                    borderColor = MaterialTheme.colorScheme.primary
+                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "Detected as ${person.displayTitle}",
+                                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                                        color = MaterialTheme.colorScheme.primary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    val detailSubtitle = when {
+                                        singlePhotoDetail.isGroupPhoto && otherNamed.isNotEmpty() ->
+                                            "Group photo (${singlePhotoDetail.totalFacesCount} faces) · Also tagged: ${otherNamed.joinToString(", ")}"
+                                        singlePhotoDetail.isGroupPhoto ->
+                                            "Group photo (${singlePhotoDetail.totalFacesCount} faces) · Highlighted face will be changed"
+                                        else ->
+                                            "1 face detected · Tap to inspect full photo"
+                                    }
+                                    Text(
+                                        text = detailSubtitle,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                        }
+                    }
+                } else if (selectedFaceDetails.size >= 2) {
+                    val groupCount = selectedFaceDetails.count { it.isGroupPhoto }
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(
+                            text = if (groupCount > 0) {
+                                "Detected faces (${selectedFaceDetails.size} · $groupCount group) — tap to inspect, × to keep"
+                            } else {
+                                "Detected faces (${selectedFaceDetails.size}) — tap to inspect, × to keep"
+                            },
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        LazyRow(
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            contentPadding = PaddingValues(horizontal = 2.dp)
+                        ) {
+                            lazyRowItemsIndexed(
+                                items = selectedFaceDetails,
+                                key = { _, info -> "face_prev_${info.photo.id}" }
+                            ) { idx, info ->
+                                Surface(
+                                    shape = RoundedCornerShape(16.dp),
+                                    color = MaterialTheme.colorScheme.surfaceContainer,
+                                    border = BorderStroke(
+                                        width = if (info.isGroupPhoto) 1.1.dp else 0.75.dp,
+                                        color = if (info.isGroupPhoto) MaterialTheme.colorScheme.primary.copy(alpha = 0.65f)
+                                        else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
+                                    ),
+                                    modifier = Modifier
+                                        .width(86.dp)
+                                        .clip(RoundedCornerShape(16.dp))
+                                        .clickable {
+                                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                            inspectorInitialIndex = idx
+                                        }
+                                ) {
+                                    Box(modifier = Modifier.padding(6.dp)) {
+                                        Column(
+                                            horizontalAlignment = Alignment.CenterHorizontally,
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            Spacer(Modifier.height(4.dp))
+                                            PersonAvatar(
+                                                cropPath = info.primaryDetectedFace?.cropPath ?: person.coverCropPath,
+                                                contentDescription = "Detected face",
+                                                size = 54.dp,
+                                                isPet = person.isPet,
+                                                borderColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)
+                                            )
+                                            Spacer(Modifier.height(4.dp))
+                                            if (info.isGroupPhoto) {
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Rounded.Groups,
+                                                        contentDescription = null,
+                                                        tint = MaterialTheme.colorScheme.primary,
+                                                        modifier = Modifier.size(12.dp)
+                                                    )
+                                                    Text(
+                                                        text = "${info.totalFacesCount} faces",
+                                                        fontSize = 10.sp,
+                                                        fontWeight = FontWeight.SemiBold,
+                                                        color = MaterialTheme.colorScheme.primary,
+                                                        maxLines = 1
+                                                    )
+                                                }
+                                            } else {
+                                                Text(
+                                                    text = "1 face",
+                                                    fontSize = 10.sp,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    maxLines = 1
+                                                )
+                                            }
+                                        }
+                                        // 1-tap unselect if this face actually IS the right person!
+                                        Box(
+                                            modifier = Modifier
+                                                .align(Alignment.TopEnd)
+                                                .size(20.dp)
+                                                .clip(CircleShape)
+                                                .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+                                                .clickable {
+                                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                    viewModel.toggleSelection(info.photo.id)
+                                                },
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.Close,
+                                                contentDescription = "Keep in ${person.displayTitle}",
+                                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.size(12.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Quick "+ New person" inline creation card
@@ -875,9 +1133,10 @@ fun PersonDetailScreen(
                             verticalArrangement = Arrangement.spacedBy(12.dp),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .heightIn(max = 280.dp)
+                                .heightIn(max = 260.dp)
                         ) {
                             items(filteredCandidates, key = { "move_${it.personId}" }) { candidate ->
+                                val alreadyInPhoto = candidate.personId in alreadyTaggedPersonIdsInSingle
                                 Column(
                                     horizontalAlignment = Alignment.CenterHorizontally,
                                     modifier = Modifier
@@ -906,9 +1165,12 @@ fun PersonDetailScreen(
                                         textAlign = TextAlign.Center
                                     )
                                     Text(
-                                        text = "${candidate.photoCount}",
+                                        text = if (alreadyInPhoto) "In photo" else "${candidate.photoCount}",
                                         fontSize = 10.sp,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        fontWeight = if (alreadyInPhoto) FontWeight.SemiBold else FontWeight.Normal,
+                                        color = if (alreadyInPhoto) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1
                                     )
                                 }
                             }
@@ -952,6 +1214,24 @@ fun PersonDetailScreen(
                 }
 
                 Spacer(Modifier.height(4.dp))
+            }
+        }
+
+        // Full-Screen Face Box Inspector Dialog (back returns straight to "Not <Name>?" sheet!)
+        inspectorInitialIndex?.let { startIdx ->
+            if (selectedFaceDetails.isNotEmpty()) {
+                FaceBoxPhotoInspectorDialog(
+                    photos = selectedFaceDetails,
+                    initialIndex = startIdx.coerceIn(0, selectedFaceDetails.lastIndex),
+                    currentPersonName = person.displayTitle,
+                    onKeepPhoto = { photoId ->
+                        viewModel.toggleSelection(photoId)
+                        if (selectedFaceDetails.size <= 1) {
+                            inspectorInitialIndex = null
+                        }
+                    },
+                    onDismiss = { inspectorInitialIndex = null }
+                )
             }
         }
     }
@@ -1038,5 +1318,371 @@ fun PersonDetailScreen(
                 if (targetPid != personId) onOpenPerson(targetPid)
             }
         )
+    }
+}
+
+internal data class FittedFaceRect(
+    val left: Float,
+    val top: Float,
+    val width: Float,
+    val height: Float
+)
+
+/**
+ * Projects a normalized `[0..1]` face bounding box onto the exact pixel rectangle of a
+ * `ContentScale.Fit` image drawn inside a `(containerW x containerH)` box.
+ */
+internal fun computeFittedFaceRect(
+    containerW: Float,
+    containerH: Float,
+    imageW: Float,
+    imageH: Float,
+    bboxLeft: Float,
+    bboxTop: Float,
+    bboxRight: Float,
+    bboxBottom: Float
+): FittedFaceRect? {
+    if (containerW <= 0f || containerH <= 0f || imageW <= 0f || imageH <= 0f) return null
+    val scale = min(containerW / imageW, containerH / imageH)
+    val drawnW = imageW * scale
+    val drawnH = imageH * scale
+    val offsetX = (containerW - drawnW) * 0.5f
+    val offsetY = (containerH - drawnH) * 0.5f
+    val l = offsetX + bboxLeft.coerceIn(0f, 1f) * drawnW
+    val t = offsetY + bboxTop.coerceIn(0f, 1f) * drawnH
+    val r = offsetX + bboxRight.coerceIn(0f, 1f) * drawnW
+    val b = offsetY + bboxBottom.coerceIn(0f, 1f) * drawnH
+    val w = (r - l).coerceAtLeast(1f)
+    val h = (b - t).coerceAtLeast(1f)
+    return FittedFaceRect(left = l, top = t, width = w, height = h)
+}
+
+@Composable
+private fun FaceHighlightedPhotoOverlay(
+    info: SelectedWrongPersonPhotoInfo,
+    currentPersonName: String,
+    compactLabels: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val container = LocalAppContainer.current
+    val imageLoader = LocalGalleryImageLoader.current
+    val density = LocalDensity.current
+    val primaryColor = MaterialTheme.colorScheme.primary
+    val onPrimaryColor = MaterialTheme.colorScheme.onPrimary
+
+    val item = info.photo
+    val imageModel = remember(item.id, item.localContentUri, item.thumbnailLink) {
+        val data: Any? = when {
+            item.isLocal && !item.localContentUri.isNullOrBlank() -> Uri.parse(item.localContentUri)
+            else -> {
+                val offlinePath = container.offlineMediaManager.getOfflineFilePath(item.id)
+                val offlineFile = offlinePath?.let(::File)?.takeIf { it.exists() }
+                offlineFile ?: DriveThumbnailRequest(
+                    fileId = item.id,
+                    thumbnailLink = item.thumbnailLink,
+                    isUnmeteredWifi = true,
+                    isVideo = item.isVideo,
+                    sizeBytes = item.sizeBytes,
+                    requestedMaxPx = 1200
+                )
+            }
+        }
+        ImageRequest.Builder(context)
+            .data(data)
+            .crossfade(true)
+            .build()
+    }
+
+    var intrinsicSize by remember(item.id) {
+        val fallbackW = (item.effectiveWidth ?: 0).toFloat()
+        val fallbackH = (item.effectiveHeight ?: 0).toFloat()
+        mutableStateOf(
+            if (fallbackW > 0f && fallbackH > 0f) Size(fallbackW, fallbackH) else Size.Unspecified
+        )
+    }
+
+    BoxWithConstraints(modifier = modifier) {
+        val containerW = constraints.maxWidth.toFloat()
+        val containerH = constraints.maxHeight.toFloat()
+
+        AsyncImage(
+            model = imageModel,
+            imageLoader = imageLoader,
+            contentDescription = item.name,
+            contentScale = ContentScale.Fit,
+            onSuccess = { success ->
+                val s = success.painter.intrinsicSize
+                if (s.width.isFinite() && s.height.isFinite() && s.width > 0f && s.height > 0f) {
+                    intrinsicSize = s
+                }
+            },
+            modifier = Modifier.fillMaxSize()
+        )
+
+        if (intrinsicSize != Size.Unspecified && intrinsicSize.width > 0f && intrinsicSize.height > 0f) {
+            val otherRects = remember(info.otherFacesInPhoto, containerW, containerH, intrinsicSize) {
+                info.otherFacesInPhoto.mapNotNull { f ->
+                    computeFittedFaceRect(
+                        containerW = containerW,
+                        containerH = containerH,
+                        imageW = intrinsicSize.width,
+                        imageH = intrinsicSize.height,
+                        bboxLeft = f.bboxLeft,
+                        bboxTop = f.bboxTop,
+                        bboxRight = f.bboxRight,
+                        bboxBottom = f.bboxBottom
+                    )?.let { f to it }
+                }
+            }
+            val currentRects = remember(info.detectedFacesForCurrentPerson, containerW, containerH, intrinsicSize) {
+                info.detectedFacesForCurrentPerson.mapNotNull { f ->
+                    computeFittedFaceRect(
+                        containerW = containerW,
+                        containerH = containerH,
+                        imageW = intrinsicSize.width,
+                        imageH = intrinsicSize.height,
+                        bboxLeft = f.bboxLeft,
+                        bboxTop = f.bboxTop,
+                        bboxRight = f.bboxRight,
+                        bboxBottom = f.bboxBottom
+                    )?.let { f to it }
+                }
+            }
+
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val otherStroke = 1.6.dp.toPx()
+                val primaryGlow = 6.dp.toPx()
+                val primaryStroke = 2.6.dp.toPx()
+                val cornerPx = 10.dp.toPx()
+
+                for ((_, rect) in otherRects) {
+                    val cr = CornerRadius(min(cornerPx, min(rect.width, rect.height) * 0.25f))
+                    drawRoundRect(
+                        color = Color.White.copy(alpha = 0.65f),
+                        topLeft = Offset(rect.left, rect.top),
+                        size = Size(rect.width, rect.height),
+                        cornerRadius = cr,
+                        style = Stroke(width = otherStroke)
+                    )
+                }
+
+                for ((_, rect) in currentRects) {
+                    val cr = CornerRadius(min(cornerPx, min(rect.width, rect.height) * 0.25f))
+                    // Soft outer highlight halo
+                    drawRoundRect(
+                        color = primaryColor.copy(alpha = 0.34f),
+                        topLeft = Offset(rect.left, rect.top),
+                        size = Size(rect.width, rect.height),
+                        cornerRadius = cr,
+                        style = Stroke(width = primaryGlow)
+                    )
+                    // Crisp inner primary frame
+                    drawRoundRect(
+                        color = primaryColor,
+                        topLeft = Offset(rect.left, rect.top),
+                        size = Size(rect.width, rect.height),
+                        cornerRadius = cr,
+                        style = Stroke(width = primaryStroke)
+                    )
+                }
+            }
+
+            // Translucent name tags under other faces in group photos
+            val pillMarginPx = with(density) { 4.dp.toPx() }
+            val approxPillW = with(density) { if (compactLabels) 90.dp.toPx() else 120.dp.toPx() }
+            val approxPillH = with(density) { 22.dp.toPx() }
+
+            for ((face, rect) in otherRects) {
+                val label = face.personName.takeIf { it.isNotBlank() } ?: continue
+                val pillX = (rect.left + rect.width * 0.5f - approxPillW * 0.5f)
+                    .coerceIn(pillMarginPx, (containerW - approxPillW - pillMarginPx).coerceAtLeast(pillMarginPx))
+                val belowY = rect.top + rect.height + pillMarginPx
+                val pillY = if (belowY + approxPillH <= containerH - pillMarginPx) {
+                    belowY
+                } else {
+                    (rect.top - approxPillH - pillMarginPx).coerceAtLeast(pillMarginPx)
+                }
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = Color(0xB8000000),
+                    modifier = Modifier.offset { IntOffset(pillX.roundToInt(), pillY.roundToInt()) }
+                ) {
+                    Text(
+                        text = label,
+                        color = Color.White,
+                        fontSize = if (compactLabels) 9.5.sp else 11.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                    )
+                }
+            }
+
+            // Bold accent pill on the exact face detected as the current person
+            val targetPillW = with(density) { if (compactLabels) 118.dp.toPx() else 168.dp.toPx() }
+            for ((_, rect) in currentRects) {
+                val pillX = (rect.left + rect.width * 0.5f - targetPillW * 0.5f)
+                    .coerceIn(pillMarginPx, (containerW - targetPillW - pillMarginPx).coerceAtLeast(pillMarginPx))
+                val belowY = rect.top + rect.height + pillMarginPx
+                val pillY = if (belowY + approxPillH <= containerH - pillMarginPx) {
+                    belowY
+                } else {
+                    (rect.top - approxPillH - pillMarginPx).coerceAtLeast(pillMarginPx)
+                }
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = primaryColor,
+                    shadowElevation = 4.dp,
+                    modifier = Modifier.offset { IntOffset(pillX.roundToInt(), pillY.roundToInt()) }
+                ) {
+                    Text(
+                        text = if (compactLabels) currentPersonName else "Detected as $currentPersonName",
+                        color = onPrimaryColor,
+                        fontSize = if (compactLabels) 10.sp else 11.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FaceBoxPhotoInspectorDialog(
+    photos: List<SelectedWrongPersonPhotoInfo>,
+    initialIndex: Int,
+    currentPersonName: String,
+    onKeepPhoto: (photoId: String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val pagerState = rememberPagerState(
+        initialPage = initialIndex.coerceIn(0, (photos.size - 1).coerceAtLeast(0)),
+        pageCount = { photos.size }
+    )
+    val activeInfo = photos.getOrNull(pagerState.currentPage) ?: photos.firstOrNull() ?: return
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false
+        )
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+        ) {
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier.fillMaxSize()
+            ) { page ->
+                val info = photos[page]
+                FaceHighlightedPhotoOverlay(
+                    info = info,
+                    currentPersonName = currentPersonName,
+                    compactLabels = false,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(top = 84.dp, bottom = 112.dp, start = 8.dp, end = 8.dp)
+                )
+            }
+
+            // Top bar
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .align(Alignment.TopCenter)
+                    .background(Color.Black.copy(alpha = 0.65f))
+                    .statusBarsPadding()
+                    .padding(horizontal = 8.dp, vertical = 8.dp)
+            ) {
+                IconButton(onClick = onDismiss) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                        contentDescription = "Back",
+                        tint = Color.White
+                    )
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = if (activeInfo.isGroupPhoto) {
+                            "Group photo · ${activeInfo.totalFacesCount} faces"
+                        } else {
+                            "Detected face"
+                        },
+                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                        color = Color.White,
+                        maxLines = 1
+                    )
+                    Text(
+                        text = if (photos.size > 1) {
+                            "Photo ${pagerState.currentPage + 1} of ${photos.size} · Highlighted face is tagged as $currentPersonName"
+                        } else {
+                            "Highlighted face is tagged as $currentPersonName"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.White.copy(alpha = 0.78f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+
+            // Bottom legend & quick "Actually this IS <Name> — keep it" action
+            Surface(
+                color = Color.Black.copy(alpha = 0.72f),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .align(Alignment.BottomCenter)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .navigationBarsPadding()
+                        .padding(horizontal = 16.dp, vertical = 12.dp)
+                ) {
+                    PersonAvatar(
+                        cropPath = activeInfo.primaryDetectedFace?.cropPath,
+                        contentDescription = null,
+                        size = 44.dp,
+                        borderColor = MaterialTheme.colorScheme.primary
+                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Boxed face = $currentPersonName",
+                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                            color = Color.White
+                        )
+                        val others = activeInfo.otherFacesInPhoto.map { it.personName }.filter { it.isNotBlank() }.distinct()
+                        if (others.isNotEmpty()) {
+                            Text(
+                                text = "Also in photo: ${others.joinToString(", ")}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.White.copy(alpha = 0.76f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                    TextButton(onClick = { onKeepPhoto(activeInfo.photo.id) }) {
+                        Text(
+                            text = "Keep in $currentPersonName",
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1
+                        )
+                    }
+                }
+            }
+        }
     }
 }

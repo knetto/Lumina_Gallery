@@ -82,10 +82,32 @@ object SmartObjectVocabulary {
         "fish", "shark", "whale", "dolphin", "seal", "sea lion", "goldfish", "jellyfish",
         "starfish", "crab", "lobster", "octopus", "insect", "butterfly", "moth", "bee", "wasp",
         "ant", "beetle", "ladybug", "dragonfly", "spider", "scorpion", "snail", "slug",
-        // Toys, Statues, Cartoons & Masks
-        "teddy", "plush", "stuffed", "toy", "doll", "puppet", "figurine", "statue", "sculpture",
-        "bust", "totem", "mannequin", "mask", "gasmask", "ski mask", "comic", "cartoon", "anime",
-        "illustration", "drawing", "painting", "sketch", "graffiti", "poster", "jack-o'-lantern"
+        // Toys, 3D Prints, Figurines, Statues, Cartoons, Masks & Inanimate Pareidolia Objects
+        "teddy", "plush", "plushie", "stuffed", "toy", "action figure", "doll", "puppet", "marionette",
+        "figurine", "miniature", "statue", "sculpture", "bust", "monument", "totem", "mannequin",
+        "mask", "gasmask", "ski mask", "oxygen mask", "helmet", "armor", "breastplate", "cuirass",
+        "pickelhaube", "comic", "comics", "cartoon", "anime", "manga", "fictional character",
+        "animation", "illustration", "drawing", "painting", "sketch", "graffiti", "poster",
+        "jack-o'-lantern", "piggy bank", "3d", "3d modeling", "3d print", "printer", "plastic",
+        "resin", "ceramic", "porcelain", "pottery", "clay", "plaster", "bronze", "marble",
+        "carving", "artifact", "ornament", "collectible", "souvenir", "robot", "lego",
+        "visual arts", "craft", "origami", "vase", "teapot", "coffee mug", "pitcher", "goblet",
+        "grille", "manhole cover", "pedestal", "stupa", "megalith", "obelisk", "lampshade",
+        "table lamp", "book jacket", "jigsaw puzzle", "tableware", "kitchenware", "appliance",
+        "computer graphics"
+    )
+
+    /**
+     * General inanimate ML Kit scene/material labels that NEVER describe a real human portrait on
+     * their own (safe when human cues are also present, veto when zero human cues exist on crop).
+     */
+    private val INANIMATE_NO_HUMAN_MLKIT_LABELS: Set<String> = setOf(
+        "product", "object", "material property", "metal", "wood", "stone", "rock", "paper",
+        "paper product", "art", "gadget", "machine", "tool", "hardware", "furniture", "vehicle",
+        "car", "wheel", "tire", "building", "architecture", "plant", "flower", "food", "drinkware",
+        "mug", "cup", "bottle", "container", "display device", "television", "computer monitor",
+        "screenshot", "font", "text", "sign", "symbol", "logo", "electronic device", "electronics",
+        "clock", "candle", "balloon", "pot", "bowl", "plate", "shoe", "footwear", "bag", "luggage"
     )
 
     /** Strong positive cues confirming a crop contains a real human face/portrait. */
@@ -100,16 +122,20 @@ object SmartObjectVocabulary {
 
     /**
      * Checks ML Kit + EfficientNet-Lite2 classifications run directly on a `160x160` candidate
-     * face crop and vetoes parrots, pets, animals, toys, statues, cartoons, and pareidolia noise.
+     * face crop (plus optional whole-photo ML Kit context) and vetoes parrots, pets, animals,
+     * 3D prints, figurines, toys, statues, cartoons, and inanimate pareidolia noise.
      *
      * Returns `true` if the crop is non-human and MUST be excluded from People.
      */
     fun isNonHumanFaceCrop(
         cropMlKitLabels: List<Pair<String, Float>>,
-        cropImageNetLabels: List<Pair<String, Float>>
+        cropImageNetLabels: List<Pair<String, Float>>,
+        wholePhotoMlKitLabels: List<Pair<String, Float>> = emptyList()
     ): Boolean {
         var maxAnimalOrObjectVeto = 0f
         var maxHumanConfirm = 0f
+        var maxInanimateNoHumanConf = 0f
+        var inanimateNoHumanCount = 0
 
         for ((raw, conf) in cropImageNetLabels) {
             val lower = raw.trim().lowercase(Locale.US)
@@ -134,29 +160,57 @@ object SmartObjectVocabulary {
         }
 
         var mlKitHasAnyHuman = false
+        var maxMlKitHumanConf = 0f
         for ((raw, conf) in cropMlKitLabels) {
             val lower = raw.trim().lowercase(Locale.US)
             if (matchesAnyKeyword(lower, NON_HUMAN_VETO_KEYWORDS) && conf >= 0.45f) {
                 if (conf > maxAnimalOrObjectVeto) maxAnimalOrObjectVeto = conf
             }
+            if (lower in INANIMATE_NO_HUMAN_MLKIT_LABELS && conf >= 0.45f) {
+                inanimateNoHumanCount++
+                if (conf > maxInanimateNoHumanConf) maxInanimateNoHumanConf = conf
+            }
             if (lower in HUMAN_FACE_CONFIRM_KEYWORDS && conf >= 0.48f) {
                 mlKitHasAnyHuman = true
+                if (conf > maxMlKitHumanConf) maxMlKitHumanConf = conf
                 if (conf > maxHumanConfirm) maxHumanConfirm = conf
             }
         }
 
-        // 1. Direct animal / parrot / pet / toy / statue / cartoon veto!
+        // 1. Direct animal / parrot / pet / 3D print / toy / statue / cartoon veto!
         if (maxAnimalOrObjectVeto >= 0.20f) {
-            // Even if ML Kit weakly hallucinated "Eye" or "Face", a clear bird/pet/toy prediction vetoes it
+            // Even if ML Kit weakly hallucinated "Eye" or "Face", a clear bird/pet/toy/3D-print prediction vetoes it
             if (maxAnimalOrObjectVeto >= 0.35f || !mlKitHasAnyHuman || maxAnimalOrObjectVeto >= maxHumanConfirm * 0.55f) {
                 return true
             }
         }
 
-        // 2. If BOTH classifiers returned confident results and NEITHER saw any human cue, veto pareidolia noise
+        // 2. ML Kit ran on the tight upright face crop and saw ZERO human cues while confidently seeing
+        //    inanimate materials/objects (e.g. Plastic, Product, Metal, Wood, Art, Toy, Tableware) or ImageNet objects!
         val topImageNetConf = cropImageNetLabels.firstOrNull()?.second ?: 0f
-        if (cropMlKitLabels.isNotEmpty() && !mlKitHasAnyHuman && maxHumanConfirm < 0.25f && topImageNetConf >= 0.30f) {
-            return true
+        if (cropMlKitLabels.isNotEmpty() && !mlKitHasAnyHuman && maxHumanConfirm < 0.25f) {
+            if (maxInanimateNoHumanConf >= 0.52f || inanimateNoHumanCount >= 2 || topImageNetConf >= 0.25f) {
+                return true
+            }
+        }
+
+        // 3. Whole-photo context veto: when the entire photo is clearly a 3D print, toy, figurine,
+        //    statue, sculpture, or plastic product with zero human labels in the scene AND weak human cues on the crop.
+        if (wholePhotoMlKitLabels.isNotEmpty() && maxMlKitHumanConf < 0.58f && maxHumanConfirm < 0.35f) {
+            var wholeHuman = 0f
+            var wholeStrongInanimate = 0f
+            for ((raw, conf) in wholePhotoMlKitLabels) {
+                val lower = raw.trim().lowercase(Locale.US)
+                if (lower in HUMAN_FACE_CONFIRM_KEYWORDS && conf > wholeHuman) {
+                    wholeHuman = conf
+                }
+                if (matchesAnyKeyword(lower, NON_HUMAN_VETO_KEYWORDS) && conf > wholeStrongInanimate) {
+                    wholeStrongInanimate = conf
+                }
+            }
+            if (wholeHuman < 0.48f && wholeStrongInanimate >= 0.58f) {
+                return true
+            }
         }
 
         return false

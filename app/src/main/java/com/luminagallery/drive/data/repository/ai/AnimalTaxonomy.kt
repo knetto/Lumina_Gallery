@@ -83,17 +83,76 @@ object AnimalTaxonomy {
 
     /**
      * ImageNet classes that only ever show up on real people: clothing, accessories, make-up,
-     * headwear, masks worn by people. Used as the "human evidence" counterweight on face crops.
+     * headwear, uniforms worn by people. Used as the "human evidence" counterweight on face crops.
      */
     private val HUMAN_CUE_INDICES: IntArray = intArrayOf(
         399, 400, 411, 419, 445, 452, 457, 459, 474, 501, 515, 518, 552, 560, 568, 570, 578,
         584, 585, 608, 610, 614, 617, 629, 638, 639, 643, 652, 655, 667, 678, 691, 697, 735,
-        796, 808, 824, 834, 836, 837, 841, 869, 887, 903, 906, 982, 983,
+        796, 808, 824, 834, 836, 837, 841, 869, 887, 903, 906, 981, 982, 983,
         433 /* bathing cap */, 443 /* bib */, 529 /* diaper */, 793 /* shower cap */
     )
 
-    /** Toys / statues / dolls that produce human-looking "faces". */
-    private val FAKE_FACE_INDICES: IntArray = intArrayOf(850 /* teddy */)
+    /**
+     * Toys, figurines, sculptures, masks, helmets, pottery, 3D printers, screens, and mechanical
+     * pareidolia classes in ImageNet-1000 that frequently trigger false human face detections
+     * (e.g. 3D-printed busts, action figures, plush toys, statues, mugs, car grilles).
+     */
+    private val FAKE_FACE_INDICES: IntArray = intArrayOf(
+        417 /* balloon */,
+        458 /* brass */,
+        461 /* breastplate */,
+        470 /* candle */,
+        504 /* coffee mug */,
+        518 /* crash helmet */,
+        524 /* cuirass */,
+        560 /* football helmet */,
+        562 /* fountain */,
+        570 /* gasmask */,
+        572 /* goblet */,
+        581 /* grille */,
+        604 /* hourglass */,
+        607 /* jack-o'-lantern */,
+        611 /* jigsaw puzzle */,
+        619 /* lampshade */,
+        640 /* manhole cover */,
+        643 /* mask */,
+        649 /* megalith */,
+        682 /* obelisk */,
+        691 /* oxygen mask */,
+        708 /* pedestal */,
+        715 /* pickelhaube */,
+        719 /* piggy bank */,
+        723 /* pinwheel */,
+        725 /* pitcher */,
+        738 /* pot */,
+        739 /* potter's wheel */,
+        742 /* printer */,
+        787 /* shield */,
+        796 /* ski mask */,
+        832 /* stupa */,
+        846 /* table lamp */,
+        849 /* teapot */,
+        850 /* teddy */,
+        863 /* totem pole */,
+        865 /* toyshop */,
+        873 /* triumphal arch */,
+        883 /* vase */,
+        917 /* comic book */,
+        921 /* book jacket */
+    )
+
+    private val HUMAN_CUE_SET: BooleanArray = BooleanArray(1000).also { arr ->
+        for (idx in HUMAN_CUE_INDICES) {
+            if (idx in arr.indices) arr[idx] = true
+        }
+        // Remove mask/helmet overlaps from human credit so masks/helmets count as fake faces, not bare human cues
+        arr[518] = false
+        arr[560] = false
+        arr[570] = false
+        arr[643] = false
+        arr[691] = false
+        arr[796] = false
+    }
 
     fun groupOf(index: Int): Group? = GROUP_BY_INDEX.getOrNull(index)
 
@@ -102,6 +161,7 @@ object AnimalTaxonomy {
         val animalMass: Float,
         val humanCueMass: Float,
         val fakeFaceMass: Float,
+        val inanimateObjectMass: Float = 0f,
         val dominant: Group?,
         val dominantMass: Float,
         val runnerUpMass: Float,
@@ -117,18 +177,25 @@ object AnimalTaxonomy {
         val masses = HashMap<Group, Float>()
         val bestIndex = HashMap<Group, Int>()
         var animal = 0f
+        var inanimate = 0f
         val limit = minOf(probs.size, GROUP_BY_INDEX.size)
         for (i in 0 until limit) {
             val p = probs[i]
             if (p <= 0f) continue
-            val g = GROUP_BY_INDEX[i] ?: continue
-            masses[g] = (masses[g] ?: 0f) + p
-            animal += p
-            val prevBest = bestIndex[g]
-            if (prevBest == null || probs[prevBest] < p) bestIndex[g] = i
+            val g = GROUP_BY_INDEX[i]
+            if (g != null) {
+                masses[g] = (masses[g] ?: 0f) + p
+                animal += p
+                val prevBest = bestIndex[g]
+                if (prevBest == null || probs[prevBest] < p) bestIndex[g] = i
+            } else if (!HUMAN_CUE_SET[i]) {
+                inanimate += p
+            }
         }
         var human = 0f
-        for (i in HUMAN_CUE_INDICES) if (i < probs.size) human += probs[i]
+        for (i in HUMAN_CUE_SET.indices) {
+            if (HUMAN_CUE_SET[i] && i < probs.size) human += probs[i]
+        }
         var fake = 0f
         for (i in FAKE_FACE_INDICES) if (i < probs.size) fake += probs[i]
 
@@ -143,6 +210,7 @@ object AnimalTaxonomy {
             animalMass = animal,
             humanCueMass = human,
             fakeFaceMass = fake,
+            inanimateObjectMass = inanimate,
             dominant = top?.key,
             dominantMass = top?.value ?: 0f,
             runnerUpMass = second,
@@ -189,7 +257,8 @@ object AnimalTaxonomy {
     fun isNonHumanFace(
         crop: Analysis,
         wholePhoto: Analysis?,
-        mlKitHumanConfidence: Float = 0f
+        mlKitHumanConfidence: Float = 0f,
+        hasMlKitCropLabels: Boolean = false
     ): Boolean {
         val mlKitBoost = if (mlKitHumanConfidence >= 0.65f) mlKitHumanConfidence * 0.40f else 0f
         val humanEvidence = maxOf(crop.humanCueMass, mlKitBoost)
@@ -197,12 +266,19 @@ object AnimalTaxonomy {
         if (crop.primateMass >= 0.10f && crop.primateMass > humanEvidence * 0.8f) return true
         // Any clearly animal crop (dogs, cats, birds ... summed over all breeds / species).
         if (crop.animalMass >= 0.30f && crop.animalMass > humanEvidence * 1.5f) return true
-        if (crop.fakeFaceMass >= 0.25f && crop.fakeFaceMass > humanEvidence) return true
+        // Toys, 3D-printed busts, sculptures, figurines, masks, helmets, pottery, screens, car grilles
+        if (crop.fakeFaceMass >= 0.22f && crop.fakeFaceMass > humanEvidence) return true
+        // Purely inanimate object crop where ML Kit ran and saw zero strong human portrait cues
+        if (hasMlKitCropLabels && mlKitHumanConfidence < 0.48f && crop.humanCueMass < 0.12f && crop.inanimateObjectMass >= 0.62f) {
+            return true
+        }
         if (wholePhoto != null) {
             // A photo that is overwhelmingly a monkey: faces inside it are the monkey's.
             if (wholePhoto.primateMass >= 0.45f && crop.animalMass >= 0.05f && humanEvidence < 0.15f) return true
             // Pet close-up where the crop still leans animal.
             if (wholePhoto.animalMass >= 0.75f && crop.animalMass >= 0.15f && humanEvidence < 0.10f) return true
+            // Photo dominated by a statue, toy, figurine, 3D printer, pottery, or mask with no strong human evidence
+            if (wholePhoto.fakeFaceMass >= 0.35f && humanEvidence < 0.20f) return true
         }
         return false
     }

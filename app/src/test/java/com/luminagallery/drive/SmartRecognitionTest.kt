@@ -849,4 +849,114 @@ class SmartRecognitionTest {
         )
         assertEquals("mem_sarah", winner)
     }
+
+    @Test
+    fun nonHumanFaceGate_vetoes3dPrintsFigurinesAndInanimateObjectsWhileKeepingRealHumans() {
+        fun probsOf(vararg pairs: Pair<Int, Float>): FloatArray = FloatArray(1000).apply {
+            for ((idx, v) in pairs) this[idx] = v
+        }
+
+        // 1. 3D-printed bust: ML Kit sees Plastic/Product (no human cues), ImageNet spreads small mass across objects
+        assertTrue(
+            SmartObjectVocabulary.isNonHumanFaceCrop(
+                cropMlKitLabels = listOf("Plastic" to 0.74f, "Product" to 0.62f),
+                cropImageNetLabels = listOf("vase" to 0.14f, "teapot" to 0.11f)
+            )
+        )
+
+        // 2. Fragmented 3D-print / figurine probability mass summed across fake-face classes (mask + vase + piggy bank + pedestal)
+        val printProbs = probsOf(
+            643 to 0.10f, // mask
+            883 to 0.08f, // vase
+            719 to 0.07f, // piggy bank
+            708 to 0.06f  // pedestal
+        )
+        val printAnalysis = AnimalTaxonomy.analyze(printProbs)
+        assertTrue(
+            AnimalTaxonomy.isNonHumanFace(
+                crop = printAnalysis,
+                wholePhoto = null,
+                mlKitHumanConfidence = 0f,
+                hasMlKitCropLabels = true
+            )
+        )
+
+        // 3. Inanimate mechanical/household crop (e.g. car grille / clock / appliance) with zero ML Kit human cues
+        val inanimateProbs = probsOf(
+            581 to 0.20f, // grille
+            409 to 0.18f, // analog clock
+            742 to 0.16f, // printer
+            527 to 0.15f  // desktop computer
+        )
+        assertTrue(
+            AnimalTaxonomy.isNonHumanFace(
+                crop = AnimalTaxonomy.analyze(inanimateProbs),
+                wholePhoto = null,
+                mlKitHumanConfidence = 0f,
+                hasMlKitCropLabels = true
+            )
+        )
+
+        // 4. Whole-photo 3D-print / action-figure context with zero whole-photo human cues vetoes weak hallucinated crop
+        assertTrue(
+            SmartObjectVocabulary.isNonHumanFaceCrop(
+                cropMlKitLabels = listOf("Eye" to 0.42f),
+                cropImageNetLabels = emptyList(),
+                wholePhotoMlKitLabels = listOf("Toy" to 0.78f, "Plastic" to 0.71f, "Figurine" to 0.64f)
+            )
+        )
+
+        // 5. Real human portrait (even standing near wood/metal or holding a mug, with strong ML Kit human cues) MUST PASS
+        assertFalse(
+            SmartObjectVocabulary.isNonHumanFaceCrop(
+                cropMlKitLabels = listOf("Face" to 0.92f, "Person" to 0.89f, "Hair" to 0.80f, "Wood" to 0.55f),
+                cropImageNetLabels = listOf("sweatshirt" to 0.45f),
+                wholePhotoMlKitLabels = listOf("Person" to 0.94f, "Tableware" to 0.62f)
+            )
+        )
+        val humanProbs = probsOf(841 to 0.42f, 837 to 0.18f) // sweatshirt + sunglasses
+        assertFalse(
+            AnimalTaxonomy.isNonHumanFace(
+                crop = AnimalTaxonomy.analyze(humanProbs),
+                wholePhoto = null,
+                mlKitHumanConfidence = 0.88f,
+                hasMlKitCropLabels = true
+            )
+        )
+    }
+
+    @Test
+    fun computeFittedFaceRect_mapsNormalizedBoxesAccuratelyForLandscapeAndPortraitPhotos() {
+        // Landscape 2000x1000 photo inside a square 400x400 container -> drawn 400x200, offsetY = 100
+        val landscapeRect = com.luminagallery.drive.ui.screens.people.computeFittedFaceRect(
+            containerW = 400f,
+            containerH = 400f,
+            imageW = 2000f,
+            imageH = 1000f,
+            bboxLeft = 0.25f,
+            bboxTop = 0.20f,
+            bboxRight = 0.50f,
+            bboxBottom = 0.70f
+        )!!
+        assertEquals(100f, landscapeRect.left, 0.01f)
+        assertEquals(140f, landscapeRect.top, 0.01f)
+        assertEquals(100f, landscapeRect.width, 0.01f)
+        assertEquals(100f, landscapeRect.height, 0.01f)
+
+        // Portrait 1000x2000 photo inside a wide 400x200 container -> drawn 100x200, offsetX = 150
+        val portraitRect = com.luminagallery.drive.ui.screens.people.computeFittedFaceRect(
+            containerW = 400f,
+            containerH = 200f,
+            imageW = 1000f,
+            imageH = 2000f,
+            bboxLeft = 0.20f,
+            bboxTop = 0.10f,
+            bboxRight = 0.80f,
+            bboxBottom = 0.40f
+        )!!
+        assertEquals(170f, portraitRect.left, 0.01f)
+        assertEquals(20f, portraitRect.top, 0.01f)
+        assertEquals(60f, portraitRect.width, 0.01f)
+        assertEquals(60f, portraitRect.height, 0.01f)
+    }
 }

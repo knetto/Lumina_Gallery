@@ -393,6 +393,30 @@ class PeopleViewModel(
 }
 
 @Immutable
+data class PhotoFaceAnnotation(
+    val faceId: String,
+    val personId: String?,
+    val personName: String,
+    val isCurrentPerson: Boolean,
+    val bboxLeft: Float,
+    val bboxTop: Float,
+    val bboxRight: Float,
+    val bboxBottom: Float,
+    val cropPath: String?
+)
+
+@Immutable
+data class SelectedWrongPersonPhotoInfo(
+    val photo: MediaItem,
+    val detectedFacesForCurrentPerson: List<PhotoFaceAnnotation>,
+    val otherFacesInPhoto: List<PhotoFaceAnnotation>
+) {
+    val totalFacesCount: Int get() = detectedFacesForCurrentPerson.size + otherFacesInPhoto.size
+    val isGroupPhoto: Boolean get() = totalFacesCount > 1
+    val primaryDetectedFace: PhotoFaceAnnotation? get() = detectedFacesForCurrentPerson.firstOrNull()
+}
+
+@Immutable
 data class PersonDetailUiState(
     val person: PersonSummary? = null,
     val photos: List<MediaItem> = emptyList(),
@@ -701,6 +725,55 @@ class PersonDetailViewModel(
 
     fun clearSelection() {
         selectedIdsFlow.value = emptySet()
+    }
+
+    /**
+     * Loads exact normalized face bounding boxes + crops for the currently selected photos so the
+     * "Not this person?" sheet clearly highlights WHICH face in a group photo was detected as
+     * this person and shows who else is already tagged in the same photo.
+     */
+    suspend fun loadSelectedPhotoFaceDetails(photoIds: Set<String>): List<SelectedWrongPersonPhotoInfo> {
+        if (photoIds.isEmpty()) return emptyList()
+        val state = uiState.value
+        val selectedPhotos = state.photos.filter { it.id in photoIds }
+        if (selectedPhotos.isEmpty()) return emptyList()
+
+        val allPeopleById = HashMap<String, PersonSummary>().apply {
+            state.person?.let { put(it.personId, it) }
+            state.otherPersons.forEach { put(it.personId, it) }
+        }
+        val activeFaces = smartRecognitionManager.getActiveFacesForPhotos(selectedPhotos.map { it.id })
+        val facesByItem = activeFaces.groupBy { it.itemId }
+
+        return selectedPhotos.map { photo ->
+            val rawFaces = facesByItem[photo.id].orEmpty()
+            val annotations = rawFaces.map { face ->
+                val pid = face.personId
+                val summary = pid?.let { allPeopleById[it] }
+                val label = when {
+                    summary != null && summary.isNamed -> summary.name
+                    pid == personId -> state.person?.displayTitle ?: "This person"
+                    summary != null -> summary.displayTitle
+                    else -> "Unnamed"
+                }
+                PhotoFaceAnnotation(
+                    faceId = face.faceId,
+                    personId = pid,
+                    personName = label,
+                    isCurrentPerson = pid == personId,
+                    bboxLeft = face.bboxLeft,
+                    bboxTop = face.bboxTop,
+                    bboxRight = face.bboxRight,
+                    bboxBottom = face.bboxBottom,
+                    cropPath = face.cropPath
+                )
+            }
+            SelectedWrongPersonPhotoInfo(
+                photo = photo,
+                detectedFacesForCurrentPerson = annotations.filter { it.isCurrentPerson },
+                otherFacesInPhoto = annotations.filterNot { it.isCurrentPerson }
+            )
+        }
     }
 
     fun shareSelected() {
