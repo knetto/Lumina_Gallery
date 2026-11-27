@@ -75,6 +75,9 @@ interface SmartRecognitionDao {
     @Query("SELECT faceId, itemId, personId, qualityScore, cropPath FROM detected_faces WHERE isExcludedByUser = 0")
     fun observeAllActiveLightFaces(): Flow<List<LightFaceRow>>
 
+    @Query("SELECT faceId, itemId, personId, qualityScore, cropPath FROM detected_faces WHERE isExcludedByUser = 0")
+    suspend fun getAllActiveLightFacesSync(): List<LightFaceRow>
+
     @Query("SELECT * FROM detected_faces WHERE isExcludedByUser = 0")
     suspend fun getAllActiveFacesSync(): List<DetectedFaceEntity>
 

@@ -3,8 +3,8 @@
     <string name="app_name">Lumina Gallery</string>
     <string name="widget_photo_frame">Photo Frame</string>
     <string name="widget_photo_collage">Photo Collage</string>
-    <string name="widget_description">Single HyperOS glass photo frame. Resize to any size or edit to choose photos, albums, favorites, or random shuffle.</string>
-    <string name="widget_collage_description">Multi-photo glass collage &amp; photo strip. Resize to any shape (including 4×1 strip) or pick layouts and sources in Edit.</string>
+    <string name="widget_description">Single HyperOS glass photo frame. Resize to any size or edit to choose people, pets, animals, tags, albums, favorites, or random shuffle.</string>
+    <string name="widget_collage_description">Multi-photo glass collage &amp; photo strip. Resize to any shape or pick people, pets, animals, tags, layouts, and sources in Edit.</string>
     <string name="widget_settings">Widget settings</string>
     <string name="widget_shuffle_interval">Auto-shuffle interval</string>
     <string name="widget_memory_days">Days</string>
@@ -15,6 +15,9 @@
     <string name="widget_empty_favorites">Star photos as Favorites in Lumina Gallery to show them here.</string>
     <string name="widget_empty_selected_photos">Tap settings to pick photos for this widget.</string>
     <string name="widget_empty_selected_albums">Tap settings to choose one or more albums.</string>
+    <string name="widget_empty_people_and_pets">Tap settings to choose people or pets for this widget.</string>
+    <string name="widget_empty_people_together">No photos found with all selected people together. Tap settings to adjust.</string>
+    <string name="widget_empty_tags_and_animals">Tap settings to choose pets, animals, or tags for this widget.</string>
     <string name="widget_save">Apply widget</string>
     <string name="widget_save_failed">Could not update the widget. Try again.</string>
     <string name="widget_open_gallery">Open Lumina Gallery</string>

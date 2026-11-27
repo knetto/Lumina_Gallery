@@ -7,7 +7,11 @@ import android.provider.MediaStore
 import android.util.Log
 import com.luminagallery.drive.LuminaApplication
 import com.luminagallery.drive.data.local.LocalMediaRepository
+import com.luminagallery.drive.data.local.dao.LightFaceRow
+import com.luminagallery.drive.data.local.entity.MediaAnnotationEntity
+import com.luminagallery.drive.data.local.entity.PersonClusterEntity
 import com.luminagallery.drive.data.local.entity.PhotoLocationEntity
+import com.luminagallery.drive.data.local.entity.PhotoSmartIndexEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
@@ -44,11 +48,19 @@ internal object WidgetMediaRepository {
     private const val MAX_GROUP_SCAN_PHOTOS = 2400
     private const val RANDOM_RESERVOIR_SIZE = 72
 
+    private data class SmartWidgetData(
+        val persons: List<PersonClusterEntity>,
+        val faces: List<LightFaceRow>,
+        val smartIndex: List<PhotoSmartIndexEntity>,
+        val annotations: List<MediaAnnotationEntity>
+    )
+
     private data class PrivacyContext(
         val blockedBucketIds: Set<String>,
         val favoriteIds: Set<String>,
         val locations: Map<String, PhotoLocationEntity>,
-        val collectionToBuckets: Map<String, Set<String>>
+        val collectionToBuckets: Map<String, Set<String>>,
+        val smartData: SmartWidgetData? = null
     )
 
     /**
@@ -188,6 +200,118 @@ internal object WidgetMediaRepository {
     ): List<WidgetPhoto> = loadVerifiedPhotosByIds(context, photoIds).orEmpty()
 
     /**
+     * Loads all visible (non-hidden, non-locked) recognized people & pets that have local photos
+     * eligible for home screen widgets.
+     */
+    suspend fun loadPickerPeopleAndPets(context: Context): List<WidgetPersonOption> = withContext(Dispatchers.IO) {
+        val privacy = loadPrivacyContext(
+            context = context,
+            needFavorites = false,
+            needLocations = false,
+            needCollections = false,
+            needPeopleData = true
+        ) ?: return@withContext emptyList()
+        val smart = privacy.smartData ?: return@withContext emptyList()
+        val visibleLocalIds = queryVisibleLocalPhotoIds(context, privacy.blockedBucketIds)
+        WidgetSmartFilter.buildPersonOptions(
+            persons = smart.persons,
+            faces = smart.faces,
+            visibleLocalPhotoIds = visibleLocalIds
+        )
+    }
+
+    /**
+     * Loads selectable smart presets (All pets, All animals), detected animal & object/scene tags,
+     * and user custom #tags with accurate visible local photo counts.
+     */
+    suspend fun loadPickerTags(context: Context): List<WidgetTagOption> = withContext(Dispatchers.IO) {
+        val privacy = loadPrivacyContext(
+            context = context,
+            needFavorites = false,
+            needLocations = false,
+            needCollections = false,
+            needTagData = true
+        ) ?: return@withContext emptyList()
+        val smart = privacy.smartData ?: return@withContext emptyList()
+        val visibleLocalIds = queryVisibleLocalPhotoIds(context, privacy.blockedBucketIds)
+        WidgetSmartFilter.buildTagOptions(
+            visibleLocalPhotoIds = visibleLocalIds,
+            smartEntries = smart.smartIndex,
+            annotations = smart.annotations,
+            persons = smart.persons,
+            faces = smart.faces
+        )
+    }
+
+    /**
+     * Computes exact visible local photo count for a tag/preset combination (used for live feedback
+     * in widget settings when combining multiple tags with Any vs All).
+     */
+    suspend fun countMatchingPhotosForTags(
+        context: Context,
+        selectedTags: List<String>,
+        matchMode: WidgetTagMatchMode
+    ): Int = withContext(Dispatchers.IO) {
+        if (selectedTags.isEmpty()) return@withContext 0
+        val privacy = loadPrivacyContext(
+            context = context,
+            needFavorites = false,
+            needLocations = false,
+            needCollections = false,
+            needTagData = true
+        ) ?: return@withContext 0
+        val smart = privacy.smartData ?: return@withContext 0
+        val visibleLocalIds = queryVisibleLocalPhotoIds(context, privacy.blockedBucketIds)
+        WidgetSmartFilter.resolveMatchingPhotoIdsForTags(
+            selectedTags = selectedTags,
+            matchMode = matchMode,
+            visibleLocalPhotoIds = visibleLocalIds,
+            smartEntries = smart.smartIndex,
+            annotations = smart.annotations,
+            persons = smart.persons,
+            faces = smart.faces
+        ).size
+    }
+
+    /**
+     * Verifies that every selected person/pet in a [WidgetPhotoSource.PEOPLE_AND_PETS] widget
+     * is still non-hidden so hiding a person immediately invalidates fast-cached widget frames.
+     */
+    suspend fun areSelectedPeopleStillVisible(
+        context: Context,
+        settings: PhotoWidgetSettings
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (settings.source != WidgetPhotoSource.PEOPLE_AND_PETS) return@withContext true
+        if (settings.selectedPersonIds.isEmpty()) return@withContext false
+        val db = (context.applicationContext as? LuminaApplication)?.container?.database
+            ?: return@withContext false
+        val persons = runCatching { db.smartRecognitionDao().getAllPersons() }.getOrNull()
+            ?: return@withContext false
+        val visible = persons.filterNot { it.isHidden }
+        val byId = visible.associateBy { it.personId }
+        val byMem = visible.mapNotNull { p -> p.memoryId?.let { it to p } }.toMap()
+        val resolved = settings.selectedPersonIds.distinct().map { selId ->
+            WidgetSmartFilter.resolveClusterForSelection(
+                selectedId = selId,
+                selectedMemoryIds = settings.selectedPersonMemoryIds,
+                visiblePersonsById = byId,
+                visiblePersonsByMemoryId = byMem
+            )
+        }
+        when (settings.personMatchMode) {
+            WidgetPersonMatchMode.TOGETHER -> resolved.all { it != null }
+            WidgetPersonMatchMode.ANY -> resolved.any { it != null } &&
+                // If any selected person was explicitly hidden, re-resolve fresh so their photos never linger
+                settings.selectedPersonIds.none { selId ->
+                    val memId = settings.selectedPersonMemoryIds[selId]
+                    persons.any { p ->
+                        p.isHidden && (p.personId == selId || (memId != null && p.memoryId == memId))
+                    }
+                }
+        }
+    }
+
+    /**
      * Resolves widget frames while reporting whether privacy exclusions were verified so callers
      * can distinguish a truly empty source from a transient boot/storage/DB hiccup.
      */
@@ -207,9 +331,17 @@ internal object WidgetMediaRepository {
             settings.source == WidgetPhotoSource.MEMORIES_MIX
         val needCollections = settings.source == WidgetPhotoSource.SELECTED_ALBUMS &&
             settings.selectedAlbumIds.isNotEmpty()
+        val needPeopleData = settings.source == WidgetPhotoSource.PEOPLE_AND_PETS
+        val needTagData = settings.source == WidgetPhotoSource.TAGS_AND_ANIMALS
 
-        val privacy = loadPrivacyContext(context, needFavs, needLocations, needCollections)
-            ?: return@withContext WidgetFrameResolution(emptyList(), privacyVerified = false)
+        val privacy = loadPrivacyContext(
+            context = context,
+            needFavorites = needFavs,
+            needLocations = needLocations,
+            needCollections = needCollections,
+            needPeopleData = needPeopleData,
+            needTagData = needTagData
+        ) ?: return@withContext WidgetFrameResolution(emptyList(), privacyVerified = false)
 
         val frames = resolveWidgetFramesWithPrivacy(
             context = context,
@@ -433,6 +565,41 @@ internal object WidgetMediaRepository {
             WidgetPhotoSource.FAVORITES_AND_RECENT -> {
                 queryFavoritesOrRecent(context, privacy, favoritesOnly = false, excludeScreenshots = settings.excludeScreenshots)
             }
+            WidgetPhotoSource.PEOPLE_AND_PETS -> {
+                val smart = privacy.smartData
+                if (smart == null || settings.selectedPersonIds.isEmpty()) {
+                    emptyList()
+                } else {
+                    val visibleLocalIds = queryVisibleLocalPhotoIds(context, privacy.blockedBucketIds)
+                    val matchedIds = WidgetSmartFilter.resolveMatchingPhotoIdsForPeople(
+                        selectedPersonIds = settings.selectedPersonIds,
+                        selectedPersonMemoryIds = settings.selectedPersonMemoryIds,
+                        matchMode = settings.personMatchMode,
+                        persons = smart.persons,
+                        faces = smart.faces,
+                        visibleLocalPhotoIds = visibleLocalIds
+                    )
+                    queryMatchedPhotos(context, privacy, matchedIds, settings.excludeScreenshots)
+                }
+            }
+            WidgetPhotoSource.TAGS_AND_ANIMALS -> {
+                val smart = privacy.smartData
+                if (smart == null || settings.selectedTags.isEmpty()) {
+                    emptyList()
+                } else {
+                    val visibleLocalIds = queryVisibleLocalPhotoIds(context, privacy.blockedBucketIds)
+                    val matchedIds = WidgetSmartFilter.resolveMatchingPhotoIdsForTags(
+                        selectedTags = settings.selectedTags,
+                        matchMode = settings.tagMatchMode,
+                        visibleLocalPhotoIds = visibleLocalIds,
+                        smartEntries = smart.smartIndex,
+                        annotations = smart.annotations,
+                        persons = smart.persons,
+                        faces = smart.faces
+                    )
+                    queryMatchedPhotos(context, privacy, matchedIds, settings.excludeScreenshots)
+                }
+            }
             else -> {
                 queryUniformRandomPhotos(context, privacy, settings.excludeScreenshots)
             }
@@ -456,6 +623,16 @@ internal object WidgetMediaRepository {
                 val title = when {
                     settings.source == WidgetPhotoSource.FAVORITES_ONLY -> "Favorites"
                     settings.source == WidgetPhotoSource.SELECTED_PHOTOS && chosen.size > 1 -> "Selected Photos"
+                    settings.source == WidgetPhotoSource.PEOPLE_AND_PETS -> WidgetSmartFilter.formatPeopleCaption(
+                        selectedPersonIds = settings.selectedPersonIds,
+                        selectedPersonMemoryIds = settings.selectedPersonMemoryIds,
+                        matchMode = settings.personMatchMode,
+                        persons = privacy.smartData?.persons.orEmpty()
+                    )
+                    settings.source == WidgetPhotoSource.TAGS_AND_ANIMALS -> WidgetSmartFilter.formatTagsCaption(
+                        selectedTags = settings.selectedTags,
+                        matchMode = settings.tagMatchMode
+                    )
                     else -> first.albumName.ifBlank { "Photos" }
                 }
                 WidgetCaptionData(
@@ -673,6 +850,59 @@ internal object WidgetMediaRepository {
         return wantedIds.mapNotNull { found[it] }
     }
 
+    private fun queryMatchedPhotos(
+        context: Context,
+        privacy: PrivacyContext,
+        matchedIds: Set<String>,
+        excludeScreenshots: Boolean
+    ): List<WidgetPhoto> {
+        if (matchedIds.isEmpty()) return emptyList()
+        if (matchedIds.size <= 600) {
+            return querySpecificPhotos(context, privacy, matchedIds.toList())
+                .filterNot { excludeScreenshots && it.isScreenshot }
+                .sortedByDescending { it.takenAtMs }
+        }
+        val out = ArrayList<WidgetPhoto>(minOf(matchedIds.size, 256))
+        queryMediaStoreImages(context) { photo, _ ->
+            if (photo.bucketId in privacy.blockedBucketIds) return@queryMediaStoreImages true
+            if (photo.luminaItemId !in matchedIds) return@queryMediaStoreImages true
+            if (excludeScreenshots && photo.isScreenshot) return@queryMediaStoreImages true
+            out.add(photo)
+            out.size < 1200
+        }
+        return out.sortedByDescending { it.takenAtMs }
+    }
+
+    private fun queryVisibleLocalPhotoIds(
+        context: Context,
+        blockedBucketIds: Set<String>
+    ): Set<String> {
+        val visible = HashSet<String>(512)
+        val projection = arrayOf(
+            MediaStore.Images.Media._ID,
+            MediaStore.Images.Media.BUCKET_ID
+        )
+        runCatching {
+            context.contentResolver.query(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                projection,
+                "${MediaStore.MediaColumns.SIZE} > 0",
+                null,
+                null
+            )?.use { c ->
+                val idCol = c.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+                val bucketIdCol = c.getColumnIndex(MediaStore.Images.Media.BUCKET_ID)
+                while (c.moveToNext()) {
+                    val rawBucket = if (bucketIdCol >= 0) c.getString(bucketIdCol) else null
+                    val luminaBucketId = "${LocalMediaRepository.LOCAL_BUCKET_PREFIX}${rawBucket ?: "default"}"
+                    if (luminaBucketId in blockedBucketIds) continue
+                    visible.add("${LocalMediaRepository.LOCAL_ITEM_PREFIX}${c.getLong(idCol)}")
+                }
+            }
+        }.onFailure { Log.w(TAG, "Unable to query visible local photo IDs for widget", it) }
+        return visible
+    }
+
     private fun queryAlbumPhotos(
         context: Context,
         privacy: PrivacyContext,
@@ -831,7 +1061,9 @@ internal object WidgetMediaRepository {
         context: Context,
         needFavorites: Boolean,
         needLocations: Boolean,
-        needCollections: Boolean
+        needCollections: Boolean,
+        needPeopleData: Boolean = false,
+        needTagData: Boolean = false
     ): PrivacyContext? {
         val db = (context.applicationContext as? LuminaApplication)?.container?.database
             ?: return null
@@ -858,8 +1090,25 @@ internal object WidgetMediaRepository {
                 expandCollectionsToBuckets(cols, layouts, blocked)
             }.getOrDefault(emptyMap())
         } else emptyMap()
+        val smartData = if (needPeopleData || needTagData) {
+            val smartDao = db.smartRecognitionDao()
+            val persons = runCatching { smartDao.getAllPersons() }.getOrDefault(emptyList())
+            val faces = runCatching { smartDao.getAllActiveLightFacesSync() }.getOrDefault(emptyList())
+            val smartIndex = if (needTagData) {
+                runCatching { smartDao.getAllSmartIndex() }.getOrDefault(emptyList())
+            } else emptyList()
+            val annotations = if (needTagData) {
+                runCatching { extrasDao.getAllAnnotations() }.getOrDefault(emptyList())
+            } else emptyList()
+            SmartWidgetData(
+                persons = persons,
+                faces = faces,
+                smartIndex = smartIndex,
+                annotations = annotations
+            )
+        } else null
 
-        return PrivacyContext(blocked, favorites, locations, collections)
+        return PrivacyContext(blocked, favorites, locations, collections, smartData)
     }
 
     private fun expandSelectedAlbums(selectedIds: List<String>, privacy: PrivacyContext): Set<String> {

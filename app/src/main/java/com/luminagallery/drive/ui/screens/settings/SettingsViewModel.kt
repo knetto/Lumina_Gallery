@@ -18,8 +18,14 @@ import com.luminagallery.drive.data.repository.CloudProfileSyncStatus
 import com.luminagallery.drive.data.repository.CoilCacheManager
 import com.luminagallery.drive.data.repository.GalleryExtrasRepository
 import com.luminagallery.drive.data.repository.GalleryRepository
+import com.luminagallery.drive.data.repository.OcrIndexProgress
+import com.luminagallery.drive.data.repository.OcrIndexerManager
 import com.luminagallery.drive.data.repository.OfflineMediaManager
+import com.luminagallery.drive.data.repository.ai.PetRecognitionEngine
+import com.luminagallery.drive.data.repository.ai.SmartIndexProgress
+import com.luminagallery.drive.data.repository.ai.SmartRecognitionManager
 import com.luminagallery.drive.data.repository.sync.DriveSyncScheduler
+import com.luminagallery.drive.data.repository.sync.SmartScanScheduler
 import com.luminagallery.drive.domain.model.AlbumSortMode
 import com.luminagallery.drive.domain.model.MainTab
 import com.luminagallery.drive.domain.model.NetworkState
@@ -57,6 +63,11 @@ data class SettingsUiState(
     val offlinePinnedCount: Int = 0,
     val offlinePinnedBytes: Long = 0L,
     val isClearingCache: Boolean = false,
+    val smartProgress: SmartIndexProgress = SmartIndexProgress(),
+    val ocrProgress: OcrIndexProgress = OcrIndexProgress(),
+    val recognizedPeopleCount: Int = 0,
+    val recognizedPetsCount: Int = 0,
+    val ocrIndexedPhotoCount: Int = 0,
     val snackbarMessage: String? = null
 )
 
@@ -71,8 +82,10 @@ class SettingsViewModel(
     private val offlineMediaManager: OfflineMediaManager,
     private val appUpdateManager: AppUpdateManager,
     private val cloudProfileSyncManager: CloudProfileSyncManager,
+    private val smartRecognitionManager: SmartRecognitionManager,
+    private val ocrIndexerManager: OcrIndexerManager,
     private val syncUseCase: SyncGalleryUseCase,
-    networkMonitor: NetworkMonitor
+    private val networkMonitor: NetworkMonitor
 ) : ViewModel() {
 
     val updateState: StateFlow<AppUpdateState> = appUpdateManager.state
@@ -121,13 +134,45 @@ class SettingsViewModel(
         )
     }
 
+    private val smartStatusFlow = combine(
+        smartRecognitionManager.progress,
+        smartRecognitionManager.allPersonsFlow,
+        smartRecognitionManager.allActiveLightFacesFlow,
+        ocrIndexerManager.progress,
+        extrasRepository.ocrTextMapFlow
+    ) { smartProg, persons, faces, ocrProg, ocrMap ->
+        val photoCountByPerson = HashMap<String, MutableSet<String>>(persons.size)
+        for (f in faces) {
+            val pid = f.personId ?: continue
+            photoCountByPerson.getOrPut(pid) { HashSet() }.add(f.itemId)
+        }
+        var peopleCount = 0
+        var petsCount = 0
+        for (p in persons) {
+            if (p.isHidden) continue
+            val count = photoCountByPerson[p.personId]?.size ?: 0
+            if (count <= 0) continue
+            if (!PetRecognitionEngine.shouldDisplayCluster(p.entityKind, count, p.name.isNotBlank(), p.isFavorite)) {
+                continue
+            }
+            if (p.isPet) petsCount++ else peopleCount++
+        }
+        SettingsAiStatus(
+            smartProgress = smartProg,
+            ocrProgress = ocrProg,
+            peopleCount = peopleCount,
+            petsCount = petsCount,
+            ocrIndexedCount = ocrMap.size
+        )
+    }
+
     val uiState: StateFlow<SettingsUiState> = combine(
         credentialStore.state,
         preferencesManager.preferencesFlow,
         storageStatsFlow,
         localStatusFlow,
-        cloudProfileSyncManager.status
-    ) { account, prefs, stats, local, cloudSync ->
+        combine(cloudProfileSyncManager.status, smartStatusFlow) { cloud, ai -> cloud to ai }
+    ) { account, prefs, stats, local, (cloudSync, aiStatus) ->
         SettingsUiState(
             serviceAccountState = account,
             preferences = prefs,
@@ -140,6 +185,11 @@ class SettingsViewModel(
             offlinePinnedCount = local.offlineCount,
             offlinePinnedBytes = local.offlineBytes,
             isClearingCache = local.isClearingCache,
+            smartProgress = aiStatus.smartProgress,
+            ocrProgress = aiStatus.ocrProgress,
+            recognizedPeopleCount = aiStatus.peopleCount,
+            recognizedPetsCount = aiStatus.petsCount,
+            ocrIndexedPhotoCount = aiStatus.ocrIndexedCount,
             snackbarMessage = local.snackbarMessage
         )
     }.stateIn(
@@ -147,12 +197,44 @@ class SettingsViewModel(
         started = SharingStarted.WhileSubscribed(5_000L),
         initialValue = SettingsUiState(
             serviceAccountState = credentialStore.state.value,
-            networkState = networkMonitor.networkState.value
+            networkState = networkMonitor.networkState.value,
+            smartProgress = smartRecognitionManager.progress.value,
+            ocrProgress = ocrIndexerManager.progress.value
         )
     )
 
     init {
         refreshDiskUsage()
+        viewModelScope.launch {
+            smartRecognitionManager.refreshProgressSnapshot()
+        }
+    }
+
+    fun startFullSmartScan() {
+        val onWifi = networkMonitor.networkState.value.isUnmeteredWifi
+        SmartScanScheduler.startBackgroundLibraryScan(appContext, wifiOnly = onWifi)
+        snackbarFlow.value = if (onWifi) {
+            "Scanning people, pets & objects on Wi-Fi · safe to lock screen"
+        } else {
+            "Scanning local photos in background · connect to Wi-Fi for Drive"
+        }
+    }
+
+    fun pauseSmartScan() {
+        smartRecognitionManager.pauseActiveScan()
+        SmartScanScheduler.cancelActiveScan(appContext)
+        snackbarFlow.value = "Paused recognition scan"
+    }
+
+    fun rebuildSmartRecognitionIndex() {
+        viewModelScope.launch(Dispatchers.IO) {
+            smartRecognitionManager.pauseActiveScan()
+            SmartScanScheduler.cancelActiveScan(appContext)
+            snackbarFlow.value = "Rebuilding People, Pets & Objects (keeping saved names & combines)…"
+            smartRecognitionManager.resetAllIndexData(preserveNames = true)
+            val onWifi = networkMonitor.networkState.value.isUnmeteredWifi
+            SmartScanScheduler.startBackgroundLibraryScan(appContext, wifiOnly = onWifi)
+        }
     }
 
     fun refreshDiskUsage() {
@@ -543,6 +625,14 @@ class SettingsViewModel(
         val snackbarMessage: String?
     )
 
+    private data class SettingsAiStatus(
+        val smartProgress: SmartIndexProgress,
+        val ocrProgress: OcrIndexProgress,
+        val peopleCount: Int,
+        val petsCount: Int,
+        val ocrIndexedCount: Int
+    )
+
     class Factory(
         private val appContext: Context,
         private val container: AppContainer
@@ -559,6 +649,8 @@ class SettingsViewModel(
             offlineMediaManager = container.offlineMediaManager,
             appUpdateManager = container.appUpdateManager,
             cloudProfileSyncManager = container.cloudProfileSyncManager,
+            smartRecognitionManager = container.smartRecognitionManager,
+            ocrIndexerManager = container.ocrIndexerManager,
             syncUseCase = container.syncGalleryUseCase,
             networkMonitor = container.networkMonitor
         ) as T

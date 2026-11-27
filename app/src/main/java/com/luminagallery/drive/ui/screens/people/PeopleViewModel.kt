@@ -96,7 +96,8 @@ class PeopleViewModel(
                 sampleCount = s.photoCount,
                 isNamed = s.isNamed,
                 photoIds = s.photoIds,
-                memoryId = entity.memoryId
+                memoryId = entity.memoryId,
+                entityKind = entity.entityKind
             )
         }
         FaceClusteringEngine.findInteractiveMergeSuggestions(
@@ -325,6 +326,32 @@ class PeopleViewModel(
                 if (ids.size == 1) "Hidden 1 person" else "Hidden ${ids.size} people"
             } else {
                 if (ids.size == 1) "Restored 1 person" else "Restored ${ids.size} people"
+            }
+        }
+    }
+
+    /**
+     * Synchronously resolves visible (unlocked) full [MediaItem]s for [person] with the person's
+     * cover photo placed first so tapping an avatar inside "Same person?" / Combine popups opens
+     * the exact full-resolution photo immediately.
+     */
+    fun getPhotosForPerson(person: PersonSummary): List<MediaItem> {
+        val blocked = repository.expandBlockedFolderIds(
+            extrasRepository.latestLockedAlbumIds + extrasRepository.latestHiddenAlbumIds
+        )
+        val localById = localMediaRepository.getCachedMediaById()
+        val driveById = repository.getCachedMediaById()
+        val items = person.photoIds.mapNotNull { id ->
+            val item = localById[id] ?: driveById[id]
+            if (item != null && item.parentId !in blocked) item else null
+        }.sortedByDescending { it.createdTimeEpochMs }
+        val coverId = person.coverPhotoId ?: return items
+        val coverIndex = items.indexOfFirst { it.id == coverId }
+        if (coverIndex <= 0) return items
+        return buildList(items.size) {
+            add(items[coverIndex])
+            for (i in items.indices) {
+                if (i != coverIndex) add(items[i])
             }
         }
     }

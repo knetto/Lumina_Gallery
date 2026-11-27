@@ -30,6 +30,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -60,12 +62,16 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.Folder
+import androidx.compose.material.icons.rounded.Groups
+import androidx.compose.material.icons.rounded.LocalOffer
 import androidx.compose.material.icons.rounded.LocationOn
+import androidx.compose.material.icons.rounded.Pets
 import androidx.compose.material.icons.rounded.PhotoLibrary
 import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Shuffle
+import androidx.compose.material.icons.rounded.Tag
 import androidx.compose.material.icons.rounded.Today
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.Button
@@ -83,6 +89,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -115,13 +122,17 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
+import coil3.SingletonImageLoader
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import coil3.request.crossfade
+import com.luminagallery.drive.LocalGalleryImageLoader
 import com.luminagallery.drive.LuminaApplication
 import com.luminagallery.drive.R
 import com.luminagallery.drive.domain.model.ThemeMode
 import com.luminagallery.drive.domain.model.UserPreferences
+import com.luminagallery.drive.ui.components.PersonAvatar
+import com.luminagallery.drive.ui.components.iconForObjectCategory
 import com.luminagallery.drive.ui.theme.LuminaTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -133,7 +144,9 @@ import kotlin.math.roundToInt
 private enum class ActiveWidgetPicker {
     NONE,
     ALBUMS,
-    PHOTOS
+    PHOTOS,
+    PEOPLE_AND_PETS,
+    TAGS_AND_ANIMALS
 }
 
 class PhotoWidgetSettingsActivity : ComponentActivity() {
@@ -192,46 +205,48 @@ class PhotoWidgetSettingsActivity : ComponentActivity() {
                 )
             }
 
-            LuminaTheme(themeMode = prefs.themeMode, dynamicColor = prefs.dynamicColor) {
-                WidgetSettingsRoot(
-                    widgetId = widgetId,
-                    kind = kind,
-                    actualWidgetSizeDp = actualWidgetSizeDp,
-                    initialSettings = initialSettings,
-                    onCancel = { finish() },
-                    onSave = { updated, onResult ->
-                        val sourceChanged = updated.source != initialSettings.source ||
-                            updated.selectedAlbumIds != initialSettings.selectedAlbumIds ||
-                            updated.selectedPhotoIds != initialSettings.selectedPhotoIds ||
-                            updated.excludeScreenshots != initialSettings.excludeScreenshots ||
-                            updated.avoidSimilarPhotos != initialSettings.avoidSimilarPhotos ||
-                            updated.memorySource != initialSettings.memorySource ||
-                            updated.groupByAlbum != initialSettings.groupByAlbum
-                        lifecycleScope.launch {
-                            try {
-                                updated.save(applicationContext, widgetId, resetState = sourceChanged)
-                                if (sourceChanged) {
-                                    LuminaPhotoWidgetProvider.deleteCachedRender(applicationContext, widgetId)
+            val activeImageLoader = if (appContainer != null) {
+                appContainer.coilCacheManager.imageLoaderFlow.collectAsStateWithLifecycle().value
+            } else {
+                remember { SingletonImageLoader.get(this@PhotoWidgetSettingsActivity) }
+            }
+
+            CompositionLocalProvider(LocalGalleryImageLoader provides activeImageLoader) {
+                LuminaTheme(themeMode = prefs.themeMode, dynamicColor = prefs.dynamicColor) {
+                    WidgetSettingsRoot(
+                        widgetId = widgetId,
+                        kind = kind,
+                        actualWidgetSizeDp = actualWidgetSizeDp,
+                        initialSettings = initialSettings,
+                        onCancel = { finish() },
+                        onSave = { updated, onResult ->
+                            val sourceChanged = !updated.hasSamePhotoPoolAs(initialSettings)
+                            lifecycleScope.launch {
+                                try {
+                                    updated.save(applicationContext, widgetId, resetState = sourceChanged)
+                                    if (sourceChanged) {
+                                        LuminaPhotoWidgetProvider.deleteCachedRender(applicationContext, widgetId)
+                                    }
+                                    WidgetRefreshScheduler.syncSchedule(applicationContext)
+                                    provider.renderWidgets(
+                                        applicationContext,
+                                        manager,
+                                        intArrayOf(widgetId),
+                                        advance = false
+                                    )
+                                    setResult(
+                                        RESULT_OK,
+                                        Intent().putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, widgetId)
+                                    )
+                                    onResult(true)
+                                    finish()
+                                } catch (_: RuntimeException) {
+                                    onResult(false)
                                 }
-                                WidgetRefreshScheduler.syncSchedule(applicationContext)
-                                provider.renderWidgets(
-                                    applicationContext,
-                                    manager,
-                                    intArrayOf(widgetId),
-                                    advance = false
-                                )
-                                setResult(
-                                    RESULT_OK,
-                                    Intent().putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, widgetId)
-                                )
-                                onResult(true)
-                                finish()
-                            } catch (_: RuntimeException) {
-                                onResult(false)
                             }
                         }
-                    }
-                )
+                    )
+                }
             }
         }
     }
@@ -259,6 +274,66 @@ private fun WidgetSettingsRoot(
     }
     val albumById = remember(albums) { albums.associateBy { it.id } }
     val albumNameById = remember(albums) { albums.associate { it.id to it.name } }
+
+    val peopleAndPets by produceState<List<WidgetPersonOption>>(initialValue = emptyList()) {
+        value = WidgetMediaRepository.loadPickerPeopleAndPets(context)
+    }
+    val peopleById = remember(peopleAndPets) { peopleAndPets.associateBy { it.personId } }
+    val peopleByMemoryId = remember(peopleAndPets) {
+        peopleAndPets.mapNotNull { p -> p.memoryId?.let { it to p } }.toMap()
+    }
+    val resolvedSelectedPeople = remember(
+        settings.selectedPersonIds,
+        settings.selectedPersonMemoryIds,
+        peopleById,
+        peopleByMemoryId
+    ) {
+        settings.selectedPersonIds.distinct().mapNotNull { selId ->
+            peopleById[selId]
+                ?: settings.selectedPersonMemoryIds[selId]?.let { peopleByMemoryId[it] }
+                ?: peopleByMemoryId[selId]
+        }
+    }
+    val selectedPeopleMatchCount = remember(
+        settings.selectedPersonIds,
+        settings.personMatchMode,
+        resolvedSelectedPeople,
+        peopleById
+    ) {
+        val distinctSelectedCount = settings.selectedPersonIds.distinct().size
+        if (distinctSelectedCount == 0) {
+            0
+        } else if (resolvedSelectedPeople.size < distinctSelectedCount &&
+            settings.personMatchMode == WidgetPersonMatchMode.TOGETHER
+        ) {
+            0
+        } else {
+            WidgetSmartFilter.computeMatchingPhotoCountForSelectedOptions(
+                selectedIds = resolvedSelectedPeople.map { it.personId },
+                matchMode = settings.personMatchMode,
+                optionsById = peopleById
+            )
+        }
+    }
+
+    val tagOptions by produceState<List<WidgetTagOption>>(initialValue = emptyList()) {
+        value = WidgetMediaRepository.loadPickerTags(context)
+    }
+    val tagOptionByKey = remember(tagOptions) { tagOptions.associateBy { it.key } }
+    val selectedTagsMatchCount by produceState<Int?>(
+        initialValue = null,
+        key1 = settings.source,
+        key2 = settings.selectedTags,
+        key3 = settings.tagMatchMode
+    ) {
+        value = if (settings.source == WidgetPhotoSource.TAGS_AND_ANIMALS && settings.selectedTags.isNotEmpty()) {
+            WidgetMediaRepository.countMatchingPhotosForTags(
+                context = context,
+                selectedTags = settings.selectedTags,
+                matchMode = settings.tagMatchMode
+            )
+        } else null
+    }
 
     // Inline thumbnails when user has picked specific photos
     val pickedPhotoPreviews by produceState<List<WidgetPhoto>>(
@@ -306,17 +381,53 @@ private fun WidgetSettingsRoot(
             return
         }
 
+        ActiveWidgetPicker.PEOPLE_AND_PETS -> {
+            PeopleAndPetsPickerScreen(
+                people = peopleAndPets,
+                initialSelectedIds = resolvedSelectedPeople.map { it.personId },
+                initialMatchMode = settings.personMatchMode,
+                onDone = { pickedIds, pickedMode ->
+                    val memMap = buildMap {
+                        for (id in pickedIds) {
+                            peopleById[id]?.memoryId?.let { put(id, it) }
+                        }
+                    }
+                    settings = settings.copy(
+                        source = WidgetPhotoSource.PEOPLE_AND_PETS,
+                        selectedPersonIds = pickedIds,
+                        selectedPersonMemoryIds = memMap,
+                        personMatchMode = pickedMode
+                    )
+                    activePicker = ActiveWidgetPicker.NONE
+                },
+                onBack = { activePicker = ActiveWidgetPicker.NONE }
+            )
+            return
+        }
+
+        ActiveWidgetPicker.TAGS_AND_ANIMALS -> {
+            TagMultiPickerScreen(
+                tags = tagOptions,
+                initialSelectedTags = settings.selectedTags,
+                initialMatchMode = settings.tagMatchMode,
+                onDone = { pickedTags, pickedMode ->
+                    settings = settings.copy(
+                        source = WidgetPhotoSource.TAGS_AND_ANIMALS,
+                        selectedTags = pickedTags,
+                        tagMatchMode = pickedMode
+                    )
+                    activePicker = ActiveWidgetPicker.NONE
+                },
+                onBack = { activePicker = ActiveWidgetPicker.NONE }
+            )
+            return
+        }
+
         ActiveWidgetPicker.NONE -> Unit
     }
 
     val isUsingOriginalSource = remember(settings, initialSettings) {
-        settings.source == initialSettings.source &&
-            settings.selectedAlbumIds == initialSettings.selectedAlbumIds &&
-            settings.selectedPhotoIds == initialSettings.selectedPhotoIds &&
-            settings.excludeScreenshots == initialSettings.excludeScreenshots &&
-            settings.avoidSimilarPhotos == initialSettings.avoidSimilarPhotos &&
-            settings.memorySource == initialSettings.memorySource &&
-            settings.groupByAlbum == initialSettings.groupByAlbum
+        settings.hasSamePhotoPoolAs(initialSettings)
     }
 
     Scaffold(
@@ -511,7 +622,12 @@ private fun WidgetSettingsRoot(
                             SourceOptionRow(
                                 icon = sourceIcon(src),
                                 title = sourceLabel(src),
-                                subtitle = sourceDescription(src, settings, albumNameById),
+                                subtitle = sourceDescription(
+                                    source = src,
+                                    settings = settings,
+                                    albumNames = albumNameById,
+                                    resolvedPeople = resolvedSelectedPeople
+                                ),
                                 selected = selected,
                                 onClick = {
                                     haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
@@ -520,8 +636,244 @@ private fun WidgetSettingsRoot(
                                         activePicker = ActiveWidgetPicker.ALBUMS
                                     } else if (src == WidgetPhotoSource.SELECTED_PHOTOS && settings.selectedPhotoIds.isEmpty()) {
                                         activePicker = ActiveWidgetPicker.PHOTOS
+                                    } else if (src == WidgetPhotoSource.PEOPLE_AND_PETS && settings.selectedPersonIds.isEmpty()) {
+                                        activePicker = ActiveWidgetPicker.PEOPLE_AND_PETS
                                     }
                                 }
+                            )
+                        }
+                    }
+
+                    // Inline panel for People & Pets
+                    AnimatedVisibility(visible = settings.source == WidgetPhotoSource.PEOPLE_AND_PETS) {
+                        Column(
+                            modifier = Modifier.padding(top = 12.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            if (resolvedSelectedPeople.isNotEmpty()) {
+                                LazyRow(
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    items(resolvedSelectedPeople, key = { it.personId }) { person ->
+                                        Column(
+                                            horizontalAlignment = Alignment.CenterHorizontally,
+                                            modifier = Modifier
+                                                .width(64.dp)
+                                                .clip(RoundedCornerShape(14.dp))
+                                                .clickable { activePicker = ActiveWidgetPicker.PEOPLE_AND_PETS }
+                                                .padding(vertical = 2.dp)
+                                        ) {
+                                            PersonAvatar(
+                                                cropPath = person.coverCropPath,
+                                                contentDescription = person.displayName,
+                                                size = 52.dp,
+                                                isFavorite = person.isFavorite,
+                                                isPet = person.isPet
+                                            )
+                                            Spacer(Modifier.height(4.dp))
+                                            Text(
+                                                text = person.displayName,
+                                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Medium),
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                textAlign = TextAlign.Center
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (settings.selectedPersonIds.distinct().size >= 2) {
+                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Text(
+                                        text = "When multiple people or pets are selected",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    SegmentedPillRow(
+                                        options = WidgetPersonMatchMode.entries,
+                                        selected = settings.personMatchMode,
+                                        labelOf = {
+                                            when (it) {
+                                                WidgetPersonMatchMode.ANY -> "Any of them"
+                                                WidgetPersonMatchMode.TOGETHER -> "Together in photo"
+                                            }
+                                        },
+                                        onSelect = {
+                                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                            settings = settings.copy(personMatchMode = it)
+                                        }
+                                    )
+                                }
+                            }
+
+                            if (settings.selectedPersonIds.isNotEmpty()) {
+                                val countText = when {
+                                    selectedPeopleMatchCount > 0 && settings.personMatchMode == WidgetPersonMatchMode.TOGETHER &&
+                                        settings.selectedPersonIds.distinct().size >= 2 ->
+                                        "$selectedPeopleMatchCount photo${if (selectedPeopleMatchCount == 1) "" else "s"} together on this device"
+                                    selectedPeopleMatchCount > 0 ->
+                                        "$selectedPeopleMatchCount matching photo${if (selectedPeopleMatchCount == 1) "" else "s"} on this device"
+                                    settings.personMatchMode == WidgetPersonMatchMode.TOGETHER &&
+                                        settings.selectedPersonIds.distinct().size >= 2 ->
+                                        "No local photos have everyone selected together — switch to \"Any of them\" or adjust selection."
+                                    else ->
+                                        "No matching local photos found yet for this selection."
+                                }
+                                Text(
+                                    text = countText,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (selectedPeopleMatchCount > 0) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.error
+                                )
+                            }
+
+                            TonalActionButton(
+                                icon = Icons.Rounded.Groups,
+                                label = if (settings.selectedPersonIds.isEmpty()) "Choose people or pets"
+                                else "Edit people & pets (${settings.selectedPersonIds.distinct().size} selected)",
+                                onClick = { activePicker = ActiveWidgetPicker.PEOPLE_AND_PETS }
+                            )
+                        }
+                    }
+
+                    // Inline panel for Pets, Animals & Other Tags
+                    AnimatedVisibility(visible = settings.source == WidgetPhotoSource.TAGS_AND_ANIMALS) {
+                        Column(
+                            modifier = Modifier.padding(top = 12.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Text(
+                                text = "Quick picks",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                val petsOpt = tagOptionByKey[WidgetSmartFilter.TAG_ALL_PETS]
+                                val animalsOpt = tagOptionByKey[WidgetSmartFilter.TAG_ALL_ANIMALS]
+                                val petsSelected = WidgetSmartFilter.TAG_ALL_PETS in settings.selectedTags
+                                val animalsSelected = WidgetSmartFilter.TAG_ALL_ANIMALS in settings.selectedTags
+
+                                QuickTagPresetCard(
+                                    icon = Icons.Rounded.Pets,
+                                    title = "All pets",
+                                    subtitle = petsOpt?.let { "${it.photoCount} photo${if (it.photoCount == 1) "" else "s"}" } ?: "Dogs & cats",
+                                    selected = petsSelected,
+                                    onClick = {
+                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                        val next = if (petsSelected) {
+                                            settings.selectedTags - WidgetSmartFilter.TAG_ALL_PETS
+                                        } else {
+                                            (settings.selectedTags + WidgetSmartFilter.TAG_ALL_PETS).distinct()
+                                        }
+                                        settings = settings.copy(selectedTags = next)
+                                    },
+                                    modifier = Modifier.weight(1f)
+                                )
+                                QuickTagPresetCard(
+                                    icon = Icons.Rounded.AutoAwesome,
+                                    title = "All animals",
+                                    subtitle = animalsOpt?.let { "${it.photoCount} photo${if (it.photoCount == 1) "" else "s"}" } ?: "Pets & wildlife",
+                                    selected = animalsSelected,
+                                    onClick = {
+                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                        val next = if (animalsSelected) {
+                                            settings.selectedTags - WidgetSmartFilter.TAG_ALL_ANIMALS
+                                        } else {
+                                            (settings.selectedTags + WidgetSmartFilter.TAG_ALL_ANIMALS).distinct()
+                                        }
+                                        settings = settings.copy(selectedTags = next)
+                                    },
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+
+                            val specificTags = remember(settings.selectedTags) {
+                                settings.selectedTags.filter {
+                                    it != WidgetSmartFilter.TAG_ALL_PETS && it != WidgetSmartFilter.TAG_ALL_ANIMALS
+                                }
+                            }
+                            if (specificTags.isNotEmpty()) {
+                                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    items(specificTags, key = { it }) { tag ->
+                                        Surface(
+                                            shape = RoundedCornerShape(14.dp),
+                                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f),
+                                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)),
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(14.dp))
+                                                .clickable {
+                                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                    settings = settings.copy(selectedTags = settings.selectedTags - tag)
+                                                }
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                            ) {
+                                                Text(
+                                                    text = WidgetSmartFilter.displayLabelForTagKey(tag),
+                                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                                )
+                                                Icon(
+                                                    Icons.Rounded.Close,
+                                                    contentDescription = "Remove",
+                                                    tint = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f),
+                                                    modifier = Modifier.size(14.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (settings.selectedTags.distinct().size >= 2) {
+                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Text(
+                                        text = "When multiple tags are selected",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    SegmentedPillRow(
+                                        options = WidgetTagMatchMode.entries,
+                                        selected = settings.tagMatchMode,
+                                        labelOf = {
+                                            when (it) {
+                                                WidgetTagMatchMode.ANY -> "Any tag"
+                                                WidgetTagMatchMode.ALL -> "All tags"
+                                            }
+                                        },
+                                        onSelect = {
+                                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                            settings = settings.copy(tagMatchMode = it)
+                                        }
+                                    )
+                                }
+                            }
+
+                            selectedTagsMatchCount?.let { count ->
+                                Text(
+                                    text = if (count > 0) {
+                                        "$count matching photo${if (count == 1) "" else "s"} on this device"
+                                    } else {
+                                        "No matching local photos found yet for this tag combination."
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (count > 0) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.error
+                                )
+                            }
+
+                            TonalActionButton(
+                                icon = Icons.Rounded.LocalOffer,
+                                label = if (settings.selectedTags.isEmpty()) "Browse animals & other tags"
+                                else "Edit animals & tags (${settings.selectedTags.distinct().size} selected)",
+                                onClick = { activePicker = ActiveWidgetPicker.TAGS_AND_ANIMALS }
                             )
                         }
                     }
@@ -728,7 +1080,7 @@ private fun WidgetSettingsRoot(
                 ) {
                     WidgetToggleRow(
                         title = "Show caption label",
-                        subtitle = "Display location, day, memory or album title",
+                        subtitle = "Display person, pet, tag, location, day, or album title",
                         checked = settings.showCaption,
                         onCheckedChange = { settings = settings.copy(showCaption = it) }
                     )
@@ -820,6 +1172,11 @@ private data class PreviewSourceKey(
     val source: WidgetPhotoSource,
     val selectedAlbumIds: List<String>,
     val selectedPhotoIds: List<String>,
+    val selectedPersonIds: List<String>,
+    val selectedPersonMemoryIds: Map<String, String>,
+    val personMatchMode: WidgetPersonMatchMode,
+    val selectedTags: List<String>,
+    val tagMatchMode: WidgetTagMatchMode,
     val excludeScreenshots: Boolean,
     val avoidSimilarPhotos: Boolean,
     val memorySource: WidgetMemorySource,
@@ -856,6 +1213,11 @@ private fun PinnedWidgetPreviewHeader(
         settings.source,
         settings.selectedAlbumIds,
         settings.selectedPhotoIds,
+        settings.selectedPersonIds,
+        settings.selectedPersonMemoryIds,
+        settings.personMatchMode,
+        settings.selectedTags,
+        settings.tagMatchMode,
         settings.excludeScreenshots,
         settings.avoidSimilarPhotos,
         settings.memorySource,
@@ -869,6 +1231,11 @@ private fun PinnedWidgetPreviewHeader(
             source = settings.source,
             selectedAlbumIds = settings.selectedAlbumIds,
             selectedPhotoIds = settings.selectedPhotoIds,
+            selectedPersonIds = settings.selectedPersonIds,
+            selectedPersonMemoryIds = settings.selectedPersonMemoryIds,
+            personMatchMode = settings.personMatchMode,
+            selectedTags = settings.selectedTags,
+            tagMatchMode = settings.tagMatchMode,
             excludeScreenshots = settings.excludeScreenshots,
             avoidSimilarPhotos = settings.avoidSimilarPhotos,
             memorySource = settings.memorySource,
@@ -2117,6 +2484,701 @@ private fun PhotoMultiPickerScreen(
 }
 
 // =====================================================================
+// PEOPLE & PETS MULTI-PICKER SCREEN (SINGLE, MULTIPLE, OR TOGETHER)
+// =====================================================================
+
+private enum class PeoplePickerTab(val label: String) {
+    ALL("All"),
+    PEOPLE("People"),
+    PETS("Pets")
+}
+
+@Composable
+private fun PeopleAndPetsPickerScreen(
+    people: List<WidgetPersonOption>,
+    initialSelectedIds: List<String>,
+    initialMatchMode: WidgetPersonMatchMode,
+    onDone: (List<String>, WidgetPersonMatchMode) -> Unit,
+    onBack: () -> Unit
+) {
+    val haptic = LocalHapticFeedback.current
+    var selectedOrder by remember { mutableStateOf(initialSelectedIds.distinct()) }
+    var matchMode by remember { mutableStateOf(initialMatchMode) }
+    var search by remember { mutableStateOf("") }
+    var activeTab by remember { mutableStateOf(PeoplePickerTab.ALL) }
+
+    val peopleById = remember(people) { people.associateBy { it.personId } }
+    val hasHumans = remember(people) { people.any { !it.isPet } }
+    val hasPets = remember(people) { people.any { it.isPet } }
+
+    val matchingPhotoCount = remember(selectedOrder, matchMode, peopleById) {
+        WidgetSmartFilter.computeMatchingPhotoCountForSelectedOptions(
+            selectedIds = selectedOrder,
+            matchMode = matchMode,
+            optionsById = peopleById
+        )
+    }
+
+    val currentTogetherPhotoIds = remember(selectedOrder, peopleById) {
+        if (selectedOrder.isEmpty()) {
+            null
+        } else {
+            var acc: Set<String> = peopleById[selectedOrder.first()]?.photoIds.orEmpty()
+            for (i in 1 until selectedOrder.size) {
+                acc = acc.intersect(peopleById[selectedOrder[i]]?.photoIds.orEmpty())
+            }
+            acc
+        }
+    }
+
+    val filtered = remember(people, search, activeTab) {
+        val q = search.trim()
+        people.filter { p ->
+            val tabOk = when (activeTab) {
+                PeoplePickerTab.ALL -> true
+                PeoplePickerTab.PEOPLE -> !p.isPet
+                PeoplePickerTab.PETS -> p.isPet
+            }
+            tabOk && (q.isEmpty() || p.displayName.contains(q, ignoreCase = true))
+        }
+    }
+
+    Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
+        topBar = {
+            Column(modifier = Modifier.statusBarsPadding()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Back")
+                    }
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "People & pets",
+                            style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold)
+                        )
+                        Text(
+                            text = when {
+                                selectedOrder.isEmpty() -> "Pick 1 person/pet, several, or people together"
+                                selectedOrder.size == 1 -> "1 selected · $matchingPhotoCount photo${if (matchingPhotoCount == 1) "" else "s"}"
+                                matchMode == WidgetPersonMatchMode.TOGETHER ->
+                                    "${selectedOrder.size} together · $matchingPhotoCount shared photo${if (matchingPhotoCount == 1) "" else "s"}"
+                                else ->
+                                    "${selectedOrder.size} selected · $matchingPhotoCount photo${if (matchingPhotoCount == 1) "" else "s"}"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (selectedOrder.isNotEmpty() && matchingPhotoCount == 0) {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                MaterialTheme.colorScheme.primary
+                            }
+                        )
+                    }
+                    if (selectedOrder.isNotEmpty()) {
+                        TextButton(onClick = { selectedOrder = emptyList() }) { Text("Clear") }
+                    }
+                    Button(
+                        onClick = { onDone(selectedOrder, matchMode) },
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.padding(end = 8.dp)
+                    ) {
+                        Text("Done")
+                    }
+                }
+
+                OutlinedTextField(
+                    value = search,
+                    onValueChange = { search = it },
+                    placeholder = { Text("Search people & pets…") },
+                    leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null) },
+                    singleLine = true,
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                )
+
+                if (hasHumans && hasPets) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        PeoplePickerTab.entries.forEach { tab ->
+                            FilterChip(
+                                selected = activeTab == tab,
+                                onClick = { activeTab = tab },
+                                label = { Text(tab.label) }
+                            )
+                        }
+                    }
+                }
+
+                AnimatedVisibility(visible = selectedOrder.size >= 2) {
+                    Surface(
+                        shape = RoundedCornerShape(18.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerLow,
+                        border = BorderStroke(0.75.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 6.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            SegmentedPillRow(
+                                options = WidgetPersonMatchMode.entries,
+                                selected = matchMode,
+                                labelOf = {
+                                    when (it) {
+                                        WidgetPersonMatchMode.ANY -> "Any of them"
+                                        WidgetPersonMatchMode.TOGETHER -> "Together in photo"
+                                    }
+                                },
+                                onSelect = {
+                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    matchMode = it
+                                }
+                            )
+                            Text(
+                                text = when (matchMode) {
+                                    WidgetPersonMatchMode.ANY ->
+                                        "Shows photos featuring any of the selected people or pets."
+                                    WidgetPersonMatchMode.TOGETHER ->
+                                        "Shows only photos where everyone selected appears together."
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    ) { pad ->
+        if (filtered.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(pad)
+                    .padding(32.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = if (people.isEmpty()) {
+                        "No people or pets recognized on this device yet. Open Settings → Smart recognition to scan your library."
+                    } else {
+                        "No people or pets match your filter."
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center
+                )
+            }
+        } else {
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(3),
+                modifier = Modifier.fillMaxSize().padding(pad),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                items(filtered, key = { it.personId }) { person ->
+                    val isSelected = person.personId in selectedOrder
+                    val sharedCount = if (!isSelected &&
+                        currentTogetherPhotoIds != null &&
+                        (matchMode == WidgetPersonMatchMode.TOGETHER || selectedOrder.size == 1)
+                    ) {
+                        person.photoIds.intersect(currentTogetherPhotoIds).size
+                    } else null
+
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(18.dp))
+                            .clickable {
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                selectedOrder = if (isSelected) {
+                                    selectedOrder - person.personId
+                                } else {
+                                    selectedOrder + person.personId
+                                }
+                            }
+                            .padding(vertical = 6.dp, horizontal = 4.dp)
+                    ) {
+                        PersonAvatar(
+                            cropPath = person.coverCropPath,
+                            contentDescription = person.displayName,
+                            size = 76.dp,
+                            isSelected = isSelected,
+                            isFavorite = person.isFavorite,
+                            isPet = person.isPet
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            text = person.displayName,
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                            ),
+                            color = if (isSelected) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            textAlign = TextAlign.Center
+                        )
+                        val countLabel = when {
+                            sharedCount != null && matchMode == WidgetPersonMatchMode.TOGETHER ->
+                                "$sharedCount together"
+                            else ->
+                                "${person.photoCount} photo${if (person.photoCount == 1) "" else "s"}"
+                        }
+                        Text(
+                            text = countLabel,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = when {
+                                sharedCount != null && matchMode == WidgetPersonMatchMode.TOGETHER && sharedCount > 0 ->
+                                    MaterialTheme.colorScheme.primary
+                                sharedCount != null && matchMode == WidgetPersonMatchMode.TOGETHER ->
+                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
+                                else -> MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                            maxLines = 1,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+// =====================================================================
+// PETS, ANIMALS & TAGS MULTI-PICKER SCREEN
+// =====================================================================
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun TagMultiPickerScreen(
+    tags: List<WidgetTagOption>,
+    initialSelectedTags: List<String>,
+    initialMatchMode: WidgetTagMatchMode,
+    onDone: (List<String>, WidgetTagMatchMode) -> Unit,
+    onBack: () -> Unit
+) {
+    val context = LocalContext.current
+    val haptic = LocalHapticFeedback.current
+    var selectedTags by remember { mutableStateOf(initialSelectedTags.distinct()) }
+    var matchMode by remember { mutableStateOf(initialMatchMode) }
+    var search by remember { mutableStateOf("") }
+
+    val matchingCount by produceState<Int?>(
+        initialValue = null,
+        key1 = selectedTags,
+        key2 = matchMode
+    ) {
+        value = if (selectedTags.isEmpty()) 0 else {
+            WidgetMediaRepository.countMatchingPhotosForTags(context, selectedTags, matchMode)
+        }
+    }
+
+    val query = search.trim()
+    val presets = remember(tags) { tags.filter { it.kind == WidgetTagKind.PRESET } }
+    val animalTags = remember(tags, query) {
+        tags.filter {
+            it.kind == WidgetTagKind.ANIMAL &&
+                (query.isEmpty() || it.label.contains(query, ignoreCase = true))
+        }
+    }
+    val customTags = remember(tags, query) {
+        tags.filter {
+            it.kind == WidgetTagKind.CUSTOM_TAG &&
+                (query.isEmpty() || it.label.contains(query, ignoreCase = true))
+        }
+    }
+    val aiTags = remember(tags, query) {
+        tags.filter {
+            it.kind == WidgetTagKind.AI_TAG &&
+                (query.isEmpty() || it.label.contains(query, ignoreCase = true))
+        }
+    }
+    val hasExactMatch = remember(tags, query) {
+        if (query.isEmpty()) true else {
+            val clean = query.removePrefix("#")
+            tags.any { it.label.removePrefix("#").equals(clean, ignoreCase = true) }
+        }
+    }
+
+    fun toggleTag(key: String) {
+        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+        selectedTags = if (key in selectedTags) {
+            selectedTags - key
+        } else {
+            selectedTags + key
+        }
+    }
+
+    Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
+        topBar = {
+            Column(modifier = Modifier.statusBarsPadding()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Back")
+                    }
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Pets, animals & tags",
+                            style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold)
+                        )
+                        Text(
+                            text = when {
+                                selectedTags.isEmpty() -> "Pick pets, animals, scenes, or your #tags"
+                                matchingCount != null ->
+                                    "${selectedTags.size} selected · $matchingCount matching photo${if (matchingCount == 1) "" else "s"}"
+                                else -> "${selectedTags.size} selected"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (selectedTags.isNotEmpty() && matchingCount == 0) {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                MaterialTheme.colorScheme.primary
+                            }
+                        )
+                    }
+                    if (selectedTags.isNotEmpty()) {
+                        TextButton(onClick = { selectedTags = emptyList() }) { Text("Clear") }
+                    }
+                    Button(
+                        onClick = { onDone(selectedTags, matchMode) },
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.padding(end = 8.dp)
+                    ) {
+                        Text("Done")
+                    }
+                }
+
+                OutlinedTextField(
+                    value = search,
+                    onValueChange = { search = it },
+                    placeholder = { Text("Search animals, scenes, or #tags…") },
+                    leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null) },
+                    singleLine = true,
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                )
+
+                AnimatedVisibility(visible = selectedTags.size >= 2) {
+                    Surface(
+                        shape = RoundedCornerShape(18.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerLow,
+                        border = BorderStroke(0.75.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 6.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            SegmentedPillRow(
+                                options = WidgetTagMatchMode.entries,
+                                selected = matchMode,
+                                labelOf = {
+                                    when (it) {
+                                        WidgetTagMatchMode.ANY -> "Any tag"
+                                        WidgetTagMatchMode.ALL -> "All tags"
+                                    }
+                                },
+                                onSelect = {
+                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    matchMode = it
+                                }
+                            )
+                            Text(
+                                text = when (matchMode) {
+                                    WidgetTagMatchMode.ANY -> "Shows photos matching any selected tag."
+                                    WidgetTagMatchMode.ALL -> "Shows only photos matching every selected tag."
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    ) { pad ->
+        LazyColumn(
+            modifier = Modifier.fillMaxSize().padding(pad),
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            if (query.isEmpty() && presets.isNotEmpty()) {
+                item(key = "presets") {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            text = "Quick presets",
+                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            presets.forEach { preset ->
+                                val isSelected = preset.key in selectedTags
+                                QuickTagPresetCard(
+                                    icon = if (preset.key == WidgetSmartFilter.TAG_ALL_PETS) {
+                                        Icons.Rounded.Pets
+                                    } else {
+                                        Icons.Rounded.AutoAwesome
+                                    },
+                                    title = preset.label,
+                                    subtitle = "${preset.photoCount} photo${if (preset.photoCount == 1) "" else "s"}",
+                                    selected = isSelected,
+                                    onClick = { toggleTag(preset.key) },
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (query.isNotEmpty() && !hasExactMatch) {
+                item(key = "custom_add") {
+                    val customKey = query.trim()
+                    val isSelected = customKey in selectedTags
+                    TonalActionButton(
+                        icon = Icons.Rounded.Tag,
+                        label = if (isSelected) "Remove \"$customKey\"" else "Add tag \"$customKey\"",
+                        onClick = {
+                            toggleTag(customKey)
+                            search = ""
+                        }
+                    )
+                }
+            }
+
+            if (animalTags.isNotEmpty()) {
+                item(key = "animals") {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            text = "Animals",
+                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
+                        )
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            animalTags.forEach { tag ->
+                                WidgetSelectableTagPill(
+                                    icon = Icons.Rounded.Pets,
+                                    label = tag.label,
+                                    count = tag.photoCount,
+                                    selected = tag.key in selectedTags,
+                                    onClick = { toggleTag(tag.key) }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (customTags.isNotEmpty()) {
+                item(key = "custom_tags") {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            text = "Your tags",
+                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
+                        )
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            customTags.forEach { tag ->
+                                WidgetSelectableTagPill(
+                                    icon = Icons.Rounded.Tag,
+                                    label = tag.label,
+                                    count = tag.photoCount,
+                                    selected = tag.key in selectedTags,
+                                    onClick = { toggleTag(tag.key) }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (aiTags.isNotEmpty()) {
+                item(key = "ai_tags") {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            text = "Scenes & objects",
+                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
+                        )
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            aiTags.forEach { tag ->
+                                WidgetSelectableTagPill(
+                                    icon = iconForObjectCategory(tag.category),
+                                    label = tag.label,
+                                    count = tag.photoCount,
+                                    selected = tag.key in selectedTags,
+                                    onClick = { toggleTag(tag.key) }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (animalTags.isEmpty() && customTags.isEmpty() && aiTags.isEmpty()) {
+                item(key = "empty") {
+                    Text(
+                        text = if (query.isEmpty()) {
+                            "No detected animals, scenes, or tags yet. Scan your library in Settings → Smart recognition or add #tags in photo details."
+                        } else {
+                            "No matching tags found."
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 24.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun QuickTagPresetCard(
+    icon: ImageVector,
+    title: String,
+    subtitle: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        shape = RoundedCornerShape(18.dp),
+        color = if (selected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)
+        else MaterialTheme.colorScheme.surfaceContainer,
+        border = BorderStroke(
+            width = if (selected) 1.5.dp else 0.75.dp,
+            color = if (selected) MaterialTheme.colorScheme.primary
+            else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)
+        ),
+        modifier = modifier
+            .clip(RoundedCornerShape(18.dp))
+            .clickable(onClick = onClick)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 11.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(32.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(
+                        if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+                        else MaterialTheme.colorScheme.surfaceContainerHigh
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = if (selected) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun WidgetSelectableTagPill(
+    icon: ImageVector,
+    label: String,
+    count: Int,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = if (selected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f)
+        else MaterialTheme.colorScheme.surfaceContainerLow,
+        border = BorderStroke(
+            width = if (selected) 1.4.dp else 0.75.dp,
+            color = if (selected) MaterialTheme.colorScheme.primary
+            else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)
+        ),
+        modifier = Modifier
+            .clip(RoundedCornerShape(14.dp))
+            .clickable(onClick = onClick)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 11.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Icon(
+                imageVector = if (selected) Icons.Rounded.Check else icon,
+                contentDescription = null,
+                tint = if (selected) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(15.dp)
+            )
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelLarge.copy(
+                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
+                ),
+                color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer
+                else MaterialTheme.colorScheme.onSurface
+            )
+            Text(
+                text = "$count",
+                style = MaterialTheme.typography.labelSmall,
+                color = if (selected) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+// =====================================================================
 // LABELS & METADATA
 // =====================================================================
 
@@ -2139,6 +3201,8 @@ internal fun collageLayoutLabel(layout: WidgetCollageLayout): String = when (lay
 private fun sourceIcon(source: WidgetPhotoSource): ImageVector = when (source) {
     WidgetPhotoSource.SELECTED_PHOTOS -> Icons.Rounded.PhotoLibrary
     WidgetPhotoSource.SELECTED_ALBUMS -> Icons.Rounded.Folder
+    WidgetPhotoSource.PEOPLE_AND_PETS -> Icons.Rounded.Groups
+    WidgetPhotoSource.TAGS_AND_ANIMALS -> Icons.Rounded.Pets
     WidgetPhotoSource.ALL_PHONE_RANDOM -> Icons.Rounded.Shuffle
     WidgetPhotoSource.SMART_GROUPS -> Icons.Rounded.AutoAwesome
     WidgetPhotoSource.LOCATION_GROUPS -> Icons.Rounded.LocationOn
@@ -2151,6 +3215,8 @@ private fun sourceIcon(source: WidgetPhotoSource): ImageVector = when (source) {
 private fun sourceOptionsForKind(kind: PhotoWidgetKind): List<WidgetPhotoSource> = when (kind) {
     PhotoWidgetKind.COLLAGE -> listOf(
         WidgetPhotoSource.SMART_GROUPS,
+        WidgetPhotoSource.PEOPLE_AND_PETS,
+        WidgetPhotoSource.TAGS_AND_ANIMALS,
         WidgetPhotoSource.MEMORIES_MIX,
         WidgetPhotoSource.LOCATION_GROUPS,
         WidgetPhotoSource.DAY_GROUPS,
@@ -2161,17 +3227,21 @@ private fun sourceOptionsForKind(kind: PhotoWidgetKind): List<WidgetPhotoSource>
     )
     PhotoWidgetKind.FRAME -> listOf(
         WidgetPhotoSource.FAVORITES_AND_RECENT,
-        WidgetPhotoSource.ALL_PHONE_RANDOM,
-        WidgetPhotoSource.FAVORITES_ONLY,
+        WidgetPhotoSource.PEOPLE_AND_PETS,
+        WidgetPhotoSource.TAGS_AND_ANIMALS,
         WidgetPhotoSource.SELECTED_ALBUMS,
         WidgetPhotoSource.SELECTED_PHOTOS,
-        WidgetPhotoSource.MEMORIES_MIX
+        WidgetPhotoSource.FAVORITES_ONLY,
+        WidgetPhotoSource.MEMORIES_MIX,
+        WidgetPhotoSource.ALL_PHONE_RANDOM
     )
 }
 
 internal fun sourceLabel(source: WidgetPhotoSource): String = when (source) {
     WidgetPhotoSource.SELECTED_PHOTOS -> "Selected photos"
     WidgetPhotoSource.SELECTED_ALBUMS -> "Selected album(s)"
+    WidgetPhotoSource.PEOPLE_AND_PETS -> "People & pets"
+    WidgetPhotoSource.TAGS_AND_ANIMALS -> "Pets, animals & tags"
     WidgetPhotoSource.ALL_PHONE_RANDOM -> "All phone photos (Random)"
     WidgetPhotoSource.SMART_GROUPS -> "Smart groups (Locations & Days)"
     WidgetPhotoSource.LOCATION_GROUPS -> "Locations & Trips"
@@ -2184,7 +3254,8 @@ internal fun sourceLabel(source: WidgetPhotoSource): String = when (source) {
 private fun sourceDescription(
     source: WidgetPhotoSource,
     settings: PhotoWidgetSettings,
-    albumNames: Map<String, String>
+    albumNames: Map<String, String>,
+    resolvedPeople: List<WidgetPersonOption>
 ): String = when (source) {
     WidgetPhotoSource.SELECTED_PHOTOS -> if (settings.selectedPhotoIds.isEmpty()) {
         "Pick 1 photo for a pinned frame or multiple photos to shuffle"
@@ -2201,6 +3272,27 @@ private fun sourceDescription(
         } else {
             "${settings.selectedAlbumIds.size} album(s) selected"
         }
+    }
+    WidgetPhotoSource.PEOPLE_AND_PETS -> if (settings.selectedPersonIds.isEmpty()) {
+        "Show a person, multiple people, people together, or your pets"
+    } else {
+        val label = WidgetSmartFilter.formatPeopleNames(
+            names = resolvedPeople.map { it.displayName },
+            matchMode = settings.personMatchMode,
+            fallbackCount = settings.selectedPersonIds.distinct().size
+        )
+        if (settings.selectedPersonIds.distinct().size >= 2 &&
+            settings.personMatchMode == WidgetPersonMatchMode.TOGETHER
+        ) {
+            "$label together"
+        } else {
+            label
+        }
+    }
+    WidgetPhotoSource.TAGS_AND_ANIMALS -> if (settings.selectedTags.isEmpty()) {
+        "Show all pets, all animals, or any detected object, scene, or #tag"
+    } else {
+        WidgetSmartFilter.formatTagsCaption(settings.selectedTags, settings.tagMatchMode)
     }
     WidgetPhotoSource.ALL_PHONE_RANDOM -> "Uniformly shuffles any visible photo on your phone"
     WidgetPhotoSource.SMART_GROUPS -> "Shuffles coherent Location/Trip and Photo Day collages"

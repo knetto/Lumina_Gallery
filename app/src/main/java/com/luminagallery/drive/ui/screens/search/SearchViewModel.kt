@@ -21,6 +21,7 @@ import com.luminagallery.drive.data.repository.GalleryRepository
 import com.luminagallery.drive.data.repository.OcrIndexProgress
 import com.luminagallery.drive.data.repository.OcrIndexerManager
 import com.luminagallery.drive.data.repository.ai.PersonSummary
+import com.luminagallery.drive.data.repository.ai.PetRecognitionEngine
 import com.luminagallery.drive.data.repository.ai.SmartIndexProgress
 import com.luminagallery.drive.data.repository.ai.SmartObjectChip
 import com.luminagallery.drive.data.repository.ai.SmartObjectVocabulary
@@ -90,6 +91,14 @@ data class SearchUiState(
     val snackbarMessage: String? = null
 ) {
     val isSelectionMode: Boolean get() = selectedIds.isNotEmpty()
+    val hasActiveFilters: Boolean
+        get() = selectedMediaType != null || datePreset != DateFilterPreset.ANY || onlyWithText
+    val activeFilterCount: Int
+        get() = (if (selectedMediaType != null) 1 else 0) +
+            (if (datePreset != DateFilterPreset.ANY) 1 else 0) +
+            (if (onlyWithText) 1 else 0)
+    val hasActiveSearch: Boolean
+        get() = query.isNotBlank() || selectedPeople.isNotEmpty() || hasActiveFilters
 }
 
 private data class SearchQueryParams(
@@ -249,6 +258,15 @@ class SearchViewModel(
             val pFaces = facesByPerson[person.personId] ?: return@mapNotNull null
             if (pFaces.isEmpty()) return@mapNotNull null
             val photoIds = pFaces.mapTo(LinkedHashSet(pFaces.size)) { it.itemId }
+            if (!PetRecognitionEngine.shouldDisplayCluster(
+                    entityKind = person.entityKind,
+                    photoCount = photoIds.size,
+                    isNamed = person.name.isNotBlank(),
+                    isFavorite = person.isFavorite
+                )
+            ) {
+                return@mapNotNull null
+            }
             val safeCover = pFaces.firstOrNull {
                 it.faceId == person.coverFaceId && !it.cropPath.isNullOrBlank()
             } ?: pFaces.maxByOrNull { it.qualityScore }
@@ -260,7 +278,8 @@ class SearchViewModel(
                 coverCropPath = safeCover?.cropPath ?: person.coverCropPath?.takeIf { person.coverPhotoId in visibleIds },
                 coverPhotoId = safeCover?.itemId ?: person.coverPhotoId?.takeIf { it in visibleIds },
                 photoCount = photoIds.size,
-                photoIds = photoIds
+                photoIds = photoIds,
+                entityKind = person.entityKind
             )
         }.sortedWith(
             compareByDescending<PersonSummary> { it.isFavorite }
@@ -602,6 +621,14 @@ class SearchViewModel(
     }
 
     fun clearPersonFilters() {
+        selectedPersonIdsFlow.value = emptySet()
+    }
+
+    fun clearAllFilters() {
+        mediaTypeFlow.value = null
+        datePresetFlow.value = DateFilterPreset.ANY
+        customRangeFlow.value = CustomRangeState()
+        onlyWithTextFlow.value = false
         selectedPersonIdsFlow.value = emptySet()
     }
 

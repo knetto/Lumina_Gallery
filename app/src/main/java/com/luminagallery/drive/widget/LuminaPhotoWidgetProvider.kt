@@ -325,6 +325,12 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
         }
         if (savedIds.size < selectedCap) return FastSelectionResult.Miss
 
+        if (settings.source == WidgetPhotoSource.PEOPLE_AND_PETS &&
+            !WidgetMediaRepository.areSelectedPeopleStillVisible(context, settings)
+        ) {
+            return FastSelectionResult.Miss
+        }
+
         val verified = WidgetMediaRepository.loadVerifiedPhotosByIds(context, savedIds.take(maxSlots))
             ?: return FastSelectionResult.PrivacyUnavailable
         // If any previously displayed photo was deleted or moved to a hidden/locked album, resolve fresh!
@@ -972,6 +978,14 @@ internal open class LuminaPhotoWidgetProvider : AppWidgetProvider() {
     private fun emptyMessageFor(context: Context, settings: PhotoWidgetSettings): String = when (settings.source) {
         WidgetPhotoSource.SELECTED_PHOTOS -> context.getString(R.string.widget_empty_selected_photos)
         WidgetPhotoSource.SELECTED_ALBUMS -> context.getString(R.string.widget_empty_selected_albums)
+        WidgetPhotoSource.PEOPLE_AND_PETS -> if (settings.selectedPersonIds.size >= 2 &&
+            settings.personMatchMode == WidgetPersonMatchMode.TOGETHER
+        ) {
+            context.getString(R.string.widget_empty_people_together)
+        } else {
+            context.getString(R.string.widget_empty_people_and_pets)
+        }
+        WidgetPhotoSource.TAGS_AND_ANIMALS -> context.getString(R.string.widget_empty_tags_and_animals)
         WidgetPhotoSource.LOCATION_GROUPS -> context.getString(R.string.widget_empty_trips)
         WidgetPhotoSource.FAVORITES_ONLY -> context.getString(R.string.widget_empty_favorites)
         WidgetPhotoSource.DAY_GROUPS, WidgetPhotoSource.MEMORIES_MIX -> context.getString(R.string.widget_empty_memories)

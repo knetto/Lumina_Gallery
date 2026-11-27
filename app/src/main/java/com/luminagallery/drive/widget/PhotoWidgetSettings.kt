@@ -51,7 +51,21 @@ internal enum class WidgetPhotoSource {
     DAY_GROUPS,
     MEMORIES_MIX,
     FAVORITES_ONLY,
-    FAVORITES_AND_RECENT
+    FAVORITES_AND_RECENT,
+    PEOPLE_AND_PETS,
+    TAGS_AND_ANIMALS
+}
+
+@Serializable
+internal enum class WidgetPersonMatchMode {
+    ANY,
+    TOGETHER
+}
+
+@Serializable
+internal enum class WidgetTagMatchMode {
+    ANY,
+    ALL
 }
 
 @Serializable
@@ -115,6 +129,11 @@ internal data class PhotoWidgetSettings(
     val source: WidgetPhotoSource = WidgetPhotoSource.FAVORITES_AND_RECENT,
     val selectedAlbumIds: List<String> = emptyList(),
     val selectedPhotoIds: List<String> = emptyList(),
+    val selectedPersonIds: List<String> = emptyList(),
+    val selectedPersonMemoryIds: Map<String, String> = emptyMap(),
+    val personMatchMode: WidgetPersonMatchMode = WidgetPersonMatchMode.ANY,
+    val selectedTags: List<String> = emptyList(),
+    val tagMatchMode: WidgetTagMatchMode = WidgetTagMatchMode.ANY,
     val shuffleInterval: WidgetShuffleInterval = WidgetShuffleInterval.HOUR_1,
     val customSlideshowSeconds: Int = DEFAULT_SHUFFLE_SECONDS,
     val shuffleOrder: Boolean = true,
@@ -138,9 +157,25 @@ internal data class PhotoWidgetSettings(
             else -> customSlideshowSeconds.coerceIn(5, MAX_SHUFFLE_SECONDS)
         }
 
+    fun hasSamePhotoPoolAs(other: PhotoWidgetSettings): Boolean =
+        source == other.source &&
+            selectedAlbumIds == other.selectedAlbumIds &&
+            selectedPhotoIds == other.selectedPhotoIds &&
+            selectedPersonIds == other.selectedPersonIds &&
+            selectedPersonMemoryIds == other.selectedPersonMemoryIds &&
+            personMatchMode == other.personMatchMode &&
+            selectedTags == other.selectedTags &&
+            tagMatchMode == other.tagMatchMode &&
+            excludeScreenshots == other.excludeScreenshots &&
+            avoidSimilarPhotos == other.avoidSimilarPhotos &&
+            memorySource == other.memorySource &&
+            groupByAlbum == other.groupByAlbum
+
+    fun encodeToJson(): String = widgetSettingsJson.encodeToString(this)
+
     fun save(context: Context, widgetId: Int, resetState: Boolean = true) {
         val prefs = context.getSharedPreferences(PHOTO_WIDGET_PREFS, Context.MODE_PRIVATE)
-        val encoded = widgetSettingsJson.encodeToString(this)
+        val encoded = encodeToJson()
         prefs.edit().apply {
             putString(configKey(widgetId), encoded)
             // Keep legacy keys cleanly removed when saving new schema
@@ -166,6 +201,10 @@ internal data class PhotoWidgetSettings(
         }
 
         private fun configKey(widgetId: Int) = "cfg_v2_$widgetId"
+
+        fun decodeFromJson(raw: String): PhotoWidgetSettings? = runCatching {
+            widgetSettingsJson.decodeFromString<PhotoWidgetSettings>(raw)
+        }.getOrNull()
 
         fun defaultsFor(kind: PhotoWidgetKind): PhotoWidgetSettings = PhotoWidgetSettings(
             source = kind.defaultSource,

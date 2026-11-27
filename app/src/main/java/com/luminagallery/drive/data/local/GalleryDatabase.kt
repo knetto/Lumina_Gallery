@@ -60,7 +60,7 @@ import com.luminagallery.drive.data.local.entity.SyncStateEntity
         SavedPersonAnchorEntity::class,
         SavedRejectedMergeEntity::class
     ],
-    version = 13,
+    version = 14,
     exportSchema = true
 )
 abstract class GalleryDatabase : RoomDatabase() {
@@ -403,6 +403,13 @@ abstract class GalleryDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_13_14 = object : Migration(13, 14) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `person_clusters` ADD COLUMN `entityKind` TEXT NOT NULL DEFAULT 'HUMAN'")
+                db.execSQL("ALTER TABLE `saved_person_memory` ADD COLUMN `entityKind` TEXT NOT NULL DEFAULT 'HUMAN'")
+            }
+        }
+
         fun build(context: Context): GalleryDatabase =
             Room.databaseBuilder(
                 context.applicationContext,
@@ -421,7 +428,8 @@ abstract class GalleryDatabase : RoomDatabase() {
                     MIGRATION_9_10,
                     MIGRATION_10_11,
                     MIGRATION_11_12,
-                    MIGRATION_12_13
+                    MIGRATION_12_13,
+                    MIGRATION_13_14
                 )
                 .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
                 .build()

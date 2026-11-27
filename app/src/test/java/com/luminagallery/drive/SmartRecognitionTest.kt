@@ -1,10 +1,13 @@
 package com.luminagallery.drive
 
+import com.luminagallery.drive.data.local.entity.PersonClusterEntity
 import com.luminagallery.drive.data.local.entity.SavedPersonAnchorEntity
 import com.luminagallery.drive.data.local.entity.SavedPersonMemoryEntity
+import com.luminagallery.drive.data.repository.ai.AnimalTaxonomy
 import com.luminagallery.drive.data.repository.ai.FaceClusteringEngine
 import com.luminagallery.drive.data.repository.ai.FaceEmbeddingEngine
 import com.luminagallery.drive.data.repository.ai.PersonMemoryEngine
+import com.luminagallery.drive.data.repository.ai.PetRecognitionEngine
 import com.luminagallery.drive.data.repository.ai.SmartObjectVocabulary
 import com.luminagallery.drive.data.repository.ai.SmartRecognitionManager
 import com.luminagallery.drive.domain.model.ExifMetadata
@@ -655,5 +658,122 @@ class SmartRecognitionTest {
         val rejected = setOf(FaceClusteringEngine.canonicalPairKey("mem_twin_a", "mem_twin_b"))
         assertTrue(FaceClusteringEngine.findAutoConsolidationPairs(rebuiltClusters, rejectedPairs = rejected).isEmpty())
         assertTrue(FaceClusteringEngine.findInteractiveMergeSuggestions(rebuiltClusters, rejectedPairs = rejected).isEmpty())
+    }
+
+    @Test
+    fun petRecognition_acceptsObviousDomesticDogsAndCatsAndStrictlyRejectsWildlife() {
+        fun probsOf(vararg pairs: Pair<Int, Float>): FloatArray = FloatArray(1000).apply {
+            for ((idx, v) in pairs) this[idx] = v
+        }
+
+        // 1. Clear domestic Golden Retriever -> accepted as DOG
+        val goldenProbs = probsOf(207 to 0.72f, 208 to 0.14f)
+        val goldenDet = PetRecognitionEngine.detectDomesticPet(
+            probs = goldenProbs,
+            analysis = AnimalTaxonomy.analyze(goldenProbs),
+            mlKitLabels = listOf("Dog" to 0.94f, "Pet" to 0.88f)
+        )
+        assertEquals(PetRecognitionEngine.PetSpecies.DOG, goldenDet?.species)
+
+        // 2. Clear domestic Tabby Cat -> accepted as CAT
+        val tabbyProbs = probsOf(281 to 0.64f, 282 to 0.16f)
+        val tabbyDet = PetRecognitionEngine.detectDomesticPet(
+            probs = tabbyProbs,
+            analysis = AnimalTaxonomy.analyze(tabbyProbs),
+            mlKitLabels = listOf("Cat" to 0.91f)
+        )
+        assertEquals(PetRecognitionEngine.PetSpecies.CAT, tabbyDet?.species)
+
+        // 3. Lion (index 291, BIG_CAT) -> strictly REJECTED
+        val lionProbs = probsOf(291 to 0.85f)
+        assertNull(
+            PetRecognitionEngine.detectDomesticPet(lionProbs, AnimalTaxonomy.analyze(lionProbs), listOf("Lion" to 0.95f))
+        )
+
+        // 4. Ambiguous big-cat cub leaking onto tabby -> strictly REJECTED
+        val cheetahLeakProbs = probsOf(281 to 0.56f, 293 to 0.12f)
+        assertNull(
+            PetRecognitionEngine.detectDomesticPet(cheetahLeakProbs, AnimalTaxonomy.analyze(cheetahLeakProbs), listOf("Cat" to 0.70f))
+        )
+
+        // 5. Wolf / wild canine leaking onto Husky -> strictly REJECTED
+        val wolfLeakProbs = probsOf(250 to 0.58f, 269 to 0.11f)
+        assertNull(
+            PetRecognitionEngine.detectDomesticPet(wolfLeakProbs, AnimalTaxonomy.analyze(wolfLeakProbs), listOf("Dog" to 0.70f))
+        )
+
+        // 6. Monkey / macaque (index 373) or monkey leaking onto affenpinscher (252) -> strictly REJECTED
+        val monkeyProbs = probsOf(373 to 0.78f)
+        assertNull(
+            PetRecognitionEngine.detectDomesticPet(monkeyProbs, AnimalTaxonomy.analyze(monkeyProbs), listOf("Monkey" to 0.90f))
+        )
+        val monkeyDogLeakProbs = probsOf(252 to 0.58f, 373 to 0.08f)
+        assertNull(
+            PetRecognitionEngine.detectDomesticPet(monkeyDogLeakProbs, AnimalTaxonomy.analyze(monkeyDogLeakProbs))
+        )
+
+        // 7. Zoo / safari / wildlife photo -> strictly REJECTED even if ImageNet guesses a dog/cat
+        assertNull(
+            PetRecognitionEngine.detectDomesticPet(
+                probs = goldenProbs,
+                analysis = AnimalTaxonomy.analyze(goldenProbs),
+                mlKitLabels = listOf("Wildlife" to 0.85f, "Safari" to 0.72f)
+            )
+        )
+    }
+
+    @Test
+    fun petRecognition_clustersSamePetSeparatesDifferentPetsAndHidesSinglePhotoStrays() {
+        fun solidPixels(r: Int, g: Int, b: Int, size: Int = 64): IntArray {
+            val argb = (0xFF shl 24) or ((r and 0xFF) shl 16) or ((g and 0xFF) shl 8) or (b and 0xFF)
+            return IntArray(size * size) { argb }
+        }
+        fun probsOf(vararg pairs: Pair<Int, Float>): FloatArray = FloatArray(1000).apply {
+            for ((idx, v) in pairs) this[idx] = v
+        }
+
+        // Two photos of the same orange tabby cat under slightly different brightness -> cluster together!
+        val tabbyProbsA = probsOf(281 to 0.65f, 282 to 0.20f)
+        val tabbyProbsB = probsOf(281 to 0.58f, 282 to 0.24f)
+        val orangeCoatA = PetRecognitionEngine.computeCoatColorDescriptor(solidPixels(215, 130, 55), 64, 64)
+        val orangeCoatB = PetRecognitionEngine.computeCoatColorDescriptor(solidPixels(205, 122, 48), 64, 64)
+        val blackCoat = PetRecognitionEngine.computeCoatColorDescriptor(solidPixels(24, 24, 28), 64, 64)
+
+        val orangeCatA = PetRecognitionEngine.buildPetEmbedding(PetRecognitionEngine.PetSpecies.CAT, tabbyProbsA, orangeCoatA)
+        val orangeCatB = PetRecognitionEngine.buildPetEmbedding(PetRecognitionEngine.PetSpecies.CAT, tabbyProbsB, orangeCoatB)
+        val blackCat = PetRecognitionEngine.buildPetEmbedding(PetRecognitionEngine.PetSpecies.CAT, tabbyProbsA, blackCoat)
+
+        val sameCatSim = FaceClusteringEngine.cosineSimilarity(orangeCatA, orangeCatB)
+        val diffCatSim = FaceClusteringEngine.cosineSimilarity(orangeCatA, blackCat)
+        assertTrue("Same orange tabby across lighting should match ($sameCatSim)", sameCatSim >= PetRecognitionEngine.PET_SINGLETON_MATCH_THRESHOLD)
+        assertTrue("Orange tabby vs black cat should stay separate ($diffCatSim)", diffCatSim < PetRecognitionEngine.PET_CLUSTER_MATCH_THRESHOLD)
+
+        // Golden Retriever vs Siberian Husky -> completely separate
+        val goldenEmb = PetRecognitionEngine.buildPetEmbedding(
+            PetRecognitionEngine.PetSpecies.DOG,
+            probsOf(207 to 0.80f),
+            PetRecognitionEngine.computeCoatColorDescriptor(solidPixels(210, 175, 110), 64, 64)
+        )
+        val huskyEmb = PetRecognitionEngine.buildPetEmbedding(
+            PetRecognitionEngine.PetSpecies.DOG,
+            probsOf(250 to 0.78f),
+            PetRecognitionEngine.computeCoatColorDescriptor(solidPixels(185, 190, 195), 64, 64)
+        )
+        assertTrue(FaceClusteringEngine.cosineSimilarity(goldenEmb, huskyEmb) < 0.45f)
+
+        // Single-photo random stray dog/cat must be HIDDEN; multi-photo (2+) or named pets are SHOWN
+        assertFalse(PetRecognitionEngine.shouldDisplayCluster(PersonClusterEntity.KIND_PET_DOG, photoCount = 1, isNamed = false, isFavorite = false))
+        assertFalse(PetRecognitionEngine.shouldDisplayCluster(PersonClusterEntity.KIND_PET_CAT, photoCount = 1, isNamed = false, isFavorite = false))
+        assertTrue(PetRecognitionEngine.shouldDisplayCluster(PersonClusterEntity.KIND_PET_DOG, photoCount = 2, isNamed = false, isFavorite = false))
+        assertTrue(PetRecognitionEngine.shouldDisplayCluster(PersonClusterEntity.KIND_PET_CAT, photoCount = 1, isNamed = true, isFavorite = false))
+        assertTrue(PetRecognitionEngine.shouldDisplayCluster(PersonClusterEntity.KIND_HUMAN, photoCount = 1, isNamed = false, isFavorite = false))
+
+        // Different entity kinds (e.g. Dog vs Cat or Human vs Dog) must NEVER auto-consolidate or cross-suggest
+        val crossKindClusters = listOf(
+            FaceClusteringEngine.ClusterCandidate("p_dog", goldenEmb, sampleCount = 3, entityKind = PersonClusterEntity.KIND_PET_DOG),
+            FaceClusteringEngine.ClusterCandidate("p_cat", goldenEmb, sampleCount = 3, entityKind = PersonClusterEntity.KIND_PET_CAT)
+        )
+        assertTrue(FaceClusteringEngine.findAutoConsolidationPairs(crossKindClusters).isEmpty())
+        assertTrue(FaceClusteringEngine.findInteractiveMergeSuggestions(crossKindClusters).isEmpty())
     }
 }

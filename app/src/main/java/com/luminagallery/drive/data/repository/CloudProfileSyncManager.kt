@@ -16,6 +16,7 @@ import com.luminagallery.drive.data.local.entity.FavoriteStoryEntity
 import com.luminagallery.drive.data.local.entity.HiddenAlbumEntity
 import com.luminagallery.drive.data.local.entity.LockedAlbumEntity
 import com.luminagallery.drive.data.local.entity.MediaAnnotationEntity
+import com.luminagallery.drive.data.local.entity.PersonClusterEntity
 import com.luminagallery.drive.data.local.entity.PinnedRootEntity
 import com.luminagallery.drive.data.local.entity.SavedPersonAnchorEntity
 import com.luminagallery.drive.data.local.entity.SavedPersonMemoryEntity
@@ -264,7 +265,8 @@ data class CloudSavedPerson(
     val isHidden: Boolean = false,
     val isUserMerged: Boolean = false,
     val coverAnchor: CloudPersonFaceAnchor? = null,
-    val anchors: List<CloudPersonFaceAnchor> = emptyList()
+    val anchors: List<CloudPersonFaceAnchor> = emptyList(),
+    val entityKind: String = PersonClusterEntity.KIND_HUMAN
 )
 
 @Serializable
@@ -1496,7 +1498,8 @@ class CloudProfileSyncManager(
                     isHidden = mem.isHidden,
                     isUserMerged = mem.isUserMerged,
                     coverAnchor = coverAnchor,
-                    anchors = localCloudAnchors
+                    anchors = localCloudAnchors,
+                    entityKind = mem.entityKind
                 )
             )
         }
@@ -1876,11 +1879,12 @@ class CloudProfileSyncManager(
                             isHidden = person.isHidden,
                             isUserMerged = person.isUserMerged,
                             coverItemId = resolvedCoverItemId,
-                            coverBboxLeft = if (resolvedCoverItemId != null && coverRule != null) coverRule.bboxLeft else null,
-                            coverBboxTop = if (resolvedCoverItemId != null && coverRule != null) coverRule.bboxTop else null,
-                            coverBboxRight = if (resolvedCoverItemId != null && coverRule != null) coverRule.bboxRight else null,
-                            coverBboxBottom = if (resolvedCoverItemId != null && coverRule != null) coverRule.bboxBottom else null,
-                            updatedAtEpochMs = now
+                            coverBboxLeft = if (resolvedCoverItemId != null) coverRule.bboxLeft else null,
+                            coverBboxTop = if (resolvedCoverItemId != null) coverRule.bboxTop else null,
+                            coverBboxRight = if (resolvedCoverItemId != null) coverRule.bboxRight else null,
+                            coverBboxBottom = if (resolvedCoverItemId != null) coverRule.bboxBottom else null,
+                            updatedAtEpochMs = now,
+                            entityKind = person.entityKind
                         )
                     )
 

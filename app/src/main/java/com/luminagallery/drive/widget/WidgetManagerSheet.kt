@@ -30,6 +30,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
@@ -75,6 +77,17 @@ internal fun WidgetManagerSheetContent(
     val placed = remember(refreshTick) { listPlacedWidgets(context) }
     val appWidgetManager = remember { AppWidgetManager.getInstance(context) }
     val canPinWidgets = remember { appWidgetManager.isRequestPinAppWidgetSupported }
+    val peopleById by produceState<Map<String, WidgetPersonOption>>(
+        initialValue = emptyMap(),
+        key1 = refreshTick
+    ) {
+        value = if (placed.any { it.settings.source == WidgetPhotoSource.PEOPLE_AND_PETS }) {
+            WidgetMediaRepository.loadPickerPeopleAndPets(context).associateBy { it.personId }
+        } else emptyMap()
+    }
+    val peopleByMemoryId = remember(peopleById) {
+        peopleById.values.mapNotNull { p -> p.memoryId?.let { it to p } }.toMap()
+    }
 
     Column(
         modifier = Modifier
@@ -89,7 +102,7 @@ internal fun WidgetManagerSheetContent(
             style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold)
         )
         Text(
-            text = "Customize Xiaomi HyperOS glass frames, shuffle intervals, albums, and overlays for any widget.",
+            text = "Customize Xiaomi HyperOS glass frames, people, pets, animals, tags, albums, shuffle intervals, and overlays.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -157,11 +170,16 @@ internal fun WidgetManagerSheetContent(
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
+                                val srcSummary = placedWidgetSourceSummary(
+                                    settings = item.settings,
+                                    peopleById = peopleById,
+                                    peopleByMemoryId = peopleByMemoryId
+                                )
                                 Text(
                                     text = if (item.kind == PhotoWidgetKind.COLLAGE) {
-                                        "${collageLayoutLabel(item.settings.collageLayout)} · ${sourceLabel(item.settings.source)} · ${intervalLabel(item.settings.shuffleInterval)}"
+                                        "${collageLayoutLabel(item.settings.collageLayout)} · $srcSummary · ${intervalLabel(item.settings.shuffleInterval)}"
                                     } else {
-                                        "${sourceLabel(item.settings.source)} · ${intervalLabel(item.settings.shuffleInterval)}"
+                                        "$srcSummary · ${intervalLabel(item.settings.shuffleInterval)}"
                                     },
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -263,7 +281,31 @@ internal fun WidgetManagerSheetContent(
     }
 }
 
+private fun placedWidgetSourceSummary(
+    settings: PhotoWidgetSettings,
+    peopleById: Map<String, WidgetPersonOption>,
+    peopleByMemoryId: Map<String, WidgetPersonOption>
+): String = when (settings.source) {
+    WidgetPhotoSource.PEOPLE_AND_PETS -> {
+        val names = settings.selectedPersonIds.distinct().mapNotNull { id ->
+            (peopleById[id]
+                ?: settings.selectedPersonMemoryIds[id]?.let { peopleByMemoryId[it] }
+                ?: peopleByMemoryId[id])?.displayName
+        }
+        WidgetSmartFilter.formatPeopleNames(
+            names = names,
+            matchMode = settings.personMatchMode,
+            fallbackCount = settings.selectedPersonIds.distinct().size
+        )
+    }
+    WidgetPhotoSource.TAGS_AND_ANIMALS -> WidgetSmartFilter.formatTagsCaption(
+        selectedTags = settings.selectedTags,
+        matchMode = settings.tagMatchMode
+    )
+    else -> sourceLabel(settings.source)
+}
+
 private fun widgetPinSubtitle(kind: PhotoWidgetKind): String = when (kind) {
-    PhotoWidgetKind.FRAME -> "2×2 resizable · Single photo, album, favorites, memories or random shuffle"
-    PhotoWidgetKind.COLLAGE -> "4×2 resizable · Smart collage, photo strip, grids, bento, memories or albums"
+    PhotoWidgetKind.FRAME -> "2×2 resizable · People, pets, animals, tags, albums, favorites or random shuffle"
+    PhotoWidgetKind.COLLAGE -> "4×2 resizable · Smart collage, people, pets, animals, tags, memories or albums"
 }

@@ -1,5 +1,6 @@
 package com.luminagallery.drive.data.repository.ai
 
+import com.luminagallery.drive.data.local.entity.PersonClusterEntity
 import com.luminagallery.drive.data.local.entity.SavedPersonAnchorEntity
 import com.luminagallery.drive.data.local.entity.SavedPersonMemoryEntity
 import kotlin.math.hypot
@@ -55,7 +56,8 @@ object PersonMemoryEngine {
         val coverFaceId: String?,
         val coverPhotoId: String?,
         val sampleCount: Int,
-        val photoIds: Set<String>
+        val photoIds: Set<String>,
+        val entityKind: String = PersonClusterEntity.KIND_HUMAN
     )
 
     data class MemoryLinkAction(
@@ -414,6 +416,10 @@ object PersonMemoryEngine {
             }
             val clusterFaces = facesByPerson[cluster.personId].orEmpty()
             if (clusterFaces.isEmpty()) continue
+            val validIdsForKind = memoryById.values
+                .filter { it.entityKind == cluster.entityKind }
+                .mapTo(HashSet()) { it.memoryId }
+            if (validIdsForKind.isEmpty()) continue
             val voteCounts = HashMap<String, Int>()
             var totalAnchored = 0
             for (face in clusterFaces) {
@@ -424,7 +430,7 @@ object PersonMemoryEngine {
                 val bestMem = findBestPositiveMemoryId(
                     detected = face.box,
                     anchorsForItem = itemAnchors,
-                    validMemoryIds = validMemoryIds,
+                    validMemoryIds = validIdsForKind,
                     excludedMemoryIds = excluded,
                     singleFaceInPhoto = singleFace
                 ) ?: continue
@@ -521,7 +527,8 @@ object PersonMemoryEngine {
             val allPrimaryAndMergedFaces = ArrayList(facesByPerson[primary.personId].orEmpty())
             for (i in 1 until sorted.size) {
                 val secondary = sorted[i]
-                // Never merge two clusters that appear together in the exact same photo
+                // Never merge different entity kinds (e.g. human vs pet) or clusters co-occurring in the same photo
+                if (secondary.entityKind != primary.entityKind) continue
                 if (secondary.photoIds.any { it in accumulatedPhotoIds }) continue
                 merges.add(
                     MemoryMergeAction(

@@ -91,10 +91,18 @@ data class PersonSummary(
     val coverCropPath: String?,
     val coverPhotoId: String?,
     val photoCount: Int,
-    val photoIds: Set<String>
+    val photoIds: Set<String>,
+    val entityKind: String = PersonClusterEntity.KIND_HUMAN
 ) {
     val isNamed: Boolean get() = name.isNotBlank()
-    val displayTitle: String get() = name.ifBlank { "Unnamed" }
+    val isPet: Boolean get() = entityKind != PersonClusterEntity.KIND_HUMAN
+    val displayTitle: String get() = name.ifBlank {
+        when (entityKind) {
+            PersonClusterEntity.KIND_PET_DOG -> "Dog"
+            PersonClusterEntity.KIND_PET_CAT -> "Cat"
+            else -> "Unnamed"
+        }
+    }
 }
 
 @Immutable
@@ -384,11 +392,26 @@ class SmartRecognitionManager(
                             newFaces.add(processed)
                         }
                     }
+                    // Also group unmistakable domestic dogs & cats alongside People (strictly excluding wildlife!)
+                    val processedPet = processDomesticPet(
+                        bitmap = bitmap,
+                        item = item,
+                        wholeProbs = wholeProbs,
+                        wholeAnimal = wholeAnimal,
+                        rawMlLabels = rawMlLabels,
+                        now = now,
+                        clusters = inMemoryClusters,
+                        savedMemoryLookup = savedMemoryLookup
+                    )
+                    if (processedPet != null) {
+                        processedPet.personId?.let { pid -> dirtyClusterIds.add(pid) }
+                        newFaces.add(processedPet)
+                    }
                     val clustersToWrite = dirtyClusterIds.mapNotNull { inMemoryClusters[it]?.entity }
                     val indexEntry = PhotoSmartIndexEntity(
                         itemId = item.id,
                         dateModifiedMs = item.createdTimeEpochMs,
-                        faceCount = newFaces.size,
+                        faceCount = newFaces.count { !it.faceId.endsWith("_pet0") },
                         labelsCsv = mergedObjects.displayLabels.joinToString(","),
                         labelSearchTokens = mergedObjects.searchTokens,
                         isDriveItem = !item.isLocal,
@@ -504,6 +527,7 @@ class SmartRecognitionManager(
                 .remove(KEY_REJECTED_MERGE_PAIRS)
                 .putInt(KEY_AI_INDEX_VERSION, CURRENT_AI_INDEX_VERSION)
                 .putInt(KEY_AVATAR_CROP_VERSION, CURRENT_AVATAR_CROP_VERSION)
+                .putInt(KEY_PET_GROUPING_VERSION, CURRENT_PET_GROUPING_VERSION)
                 .apply()
             _progress.value = SmartIndexProgress()
         } finally {
@@ -541,6 +565,7 @@ class SmartRecognitionManager(
             .remove(KEY_REJECTED_MERGE_PAIRS)
             .putInt(KEY_AI_INDEX_VERSION, CURRENT_AI_INDEX_VERSION)
             .putInt(KEY_AVATAR_CROP_VERSION, CURRENT_AVATAR_CROP_VERSION)
+            .putInt(KEY_PET_GROUPING_VERSION, CURRENT_PET_GROUPING_VERSION)
             .apply()
     }
 
@@ -662,6 +687,52 @@ class SmartRecognitionManager(
         return _rejectedMergePairs.value + saved.map { it.pairKey }
     }
 
+    /**
+     * Lightweight, non-scanning snapshot of how many eligible local & Drive photos/videos have
+     * been indexed so Settings always displays accurate live progress even while idle.
+     */
+    suspend fun refreshProgressSnapshot() = withContext(Dispatchers.IO) {
+        if (_progress.value.isIndexing || _progress.value.isDownloadingModels) return@withContext
+        runCatching {
+            val blockedFolderIds = computeBlockedFolderIdsFromDb()
+            val localCandidates = if (localMediaRepository.hasMediaPermission()) {
+                localMediaRepository.getCachedAllMedia().ifEmpty {
+                    runCatching { localMediaRepository.observeAllLocalMedia().first() }.getOrDefault(emptyList())
+                }.filter { item ->
+                    item.isLocal &&
+                        !item.isRaw &&
+                        !item.localContentUri.isNullOrBlank() &&
+                        item.parentId !in blockedFolderIds &&
+                        !HiddenLockedFolderManager.isHiddenFileUri(item.localContentUri)
+                }
+            } else {
+                emptyList()
+            }
+            val driveCandidates = driveItemDao.getAllNonTrashedMediaSync()
+                .asSequence()
+                .map(DriveMapper::entityToMediaItem)
+                .filter { item ->
+                    item.parentId !in blockedFolderIds &&
+                        (!item.thumbnailLink.isNullOrBlank() || (!item.isVideo && offlineMediaManager.getOfflineFilePath(item.id) != null))
+                }
+                .toList()
+            val allEligible = (localCandidates + driveCandidates).distinctBy { it.id }
+            val stampRows = smartDao.getIndexedItemStamps()
+            val existingStamps = HashMap<String, Long>(stampRows.size * 2)
+            for (row in stampRows) existingStamps[row.itemId] = row.dateModifiedMs
+            val remaining = filterUnindexedItems(allEligible, existingStamps).size
+            val total = allEligible.size
+            val indexed = (total - remaining).coerceAtLeast(0)
+            if (!_progress.value.isIndexing && !_progress.value.isDownloadingModels) {
+                _progress.value = _progress.value.copy(
+                    totalIndexedPhotos = indexed,
+                    totalEligiblePhotos = total,
+                    remainingPhotos = remaining
+                )
+            }
+        }
+    }
+
     private suspend fun reconcileSavedPersonMemoriesLocked() {
         val memories = smartDao.getAllSavedPersonMemories()
         if (memories.isEmpty()) return
@@ -682,7 +753,8 @@ class SmartRecognitionManager(
                 coverFaceId = p.coverFaceId,
                 coverPhotoId = p.coverPhotoId,
                 sampleCount = pFaces.size.coerceAtLeast(p.sampleCount),
-                photoIds = pFaces.mapTo(HashSet(pFaces.size)) { it.itemId }
+                photoIds = pFaces.mapTo(HashSet(pFaces.size)) { it.itemId },
+                entityKind = p.entityKind
             )
         }
         val faceSnapshots = activeFaces.mapNotNull { f ->
@@ -783,7 +855,8 @@ class SmartRecognitionManager(
             coverBboxTop = resolvedCoverT,
             coverBboxRight = resolvedCoverR,
             coverBboxBottom = resolvedCoverB,
-            updatedAtEpochMs = now
+            updatedAtEpochMs = now,
+            entityKind = person.entityKind
         )
         smartDao.upsertSavedPersonMemory(updatedMem)
         if (person.memoryId != memId) {
@@ -902,6 +975,17 @@ class SmartRecognitionManager(
             if (personFaces.isEmpty()) return@mapNotNull null
             val photoIds = personFaces.mapTo(LinkedHashSet(personFaces.size)) { it.itemId }
 
+            // Strictly hide 1-photo random stray dogs/cats until a pet appears in multiple photos
+            if (!PetRecognitionEngine.shouldDisplayCluster(
+                    entityKind = person.entityKind,
+                    photoCount = photoIds.size,
+                    isNamed = person.name.isNotBlank(),
+                    isFavorite = person.isFavorite
+                )
+            ) {
+                return@mapNotNull null
+            }
+
             // Ensure the cover avatar itself belongs to a visible (unlocked) photo
             val safeCoverFace = personFaces.firstOrNull {
                 it.faceId == person.coverFaceId && !it.cropPath.isNullOrBlank()
@@ -915,7 +999,8 @@ class SmartRecognitionManager(
                 coverCropPath = safeCoverFace?.cropPath ?: person.coverCropPath?.takeIf { person.coverPhotoId in visibleIds },
                 coverPhotoId = safeCoverFace?.itemId ?: person.coverPhotoId?.takeIf { it in visibleIds },
                 photoCount = photoIds.size,
-                photoIds = photoIds
+                photoIds = photoIds,
+                entityKind = person.entityKind
             )
         }.sortedWith(
             compareByDescending<PersonSummary> { it.isFavorite }
@@ -996,6 +1081,10 @@ class SmartRecognitionManager(
             // One-time fast upgrade of any legacy rotated black-corner avatars to clean unrotated
             // face-centered crops (preserves all person names, favorites, clusters, and embeddings!)
             migrateLegacyRotatedAvatarsIfNeeded(allEligible)
+
+            // One-time targeted backfill grouping already-indexed domestic dog & cat photos into
+            // Pets without re-scanning the rest of the library!
+            backfillPetsFromIndexedPhotosIfNeeded(allEligible)
 
             // Fast 2-column SQLite stamp lookup (scales cleanly to 30,000+ photos in ~20ms)
             val stampRows = smartDao.getIndexedItemStamps()
@@ -1293,6 +1382,22 @@ class SmartRecognitionManager(
                         }
                     }
 
+                    // Group unmistakable domestic dogs & cats alongside People (wild animals strictly excluded!)
+                    val processedPet = processDomesticPet(
+                        bitmap = bitmap,
+                        item = item,
+                        wholeProbs = wholeProbs,
+                        wholeAnimal = wholeAnimal,
+                        rawMlLabels = rawMlLabels,
+                        now = now,
+                        clusters = inMemoryClusters,
+                        savedMemoryLookup = savedMemoryLookup
+                    )
+                    if (processedPet != null) {
+                        processedPet.personId?.let { pid -> dirtyClusterIds.add(pid) }
+                        pendingFacesBatch.add(processedPet)
+                    }
+
                     pendingIndexBatch.add(
                         PhotoSmartIndexEntity(
                             itemId = item.id,
@@ -1528,10 +1633,13 @@ class SmartRecognitionManager(
             anchorsForItem = itemAnchors,
             singleFaceInPhoto = singleFaceInPhoto
         )
+        val humanMemoryIds = savedMemoryLookup.memoriesById.values
+            .filter { it.entityKind == PersonClusterEntity.KIND_HUMAN }
+            .mapTo(HashSet()) { it.memoryId }
         val matchedMemoryId = PersonMemoryEngine.findBestPositiveMemoryId(
             detected = detectedBox,
             anchorsForItem = itemAnchors,
-            validMemoryIds = savedMemoryLookup.memoriesById.keys,
+            validMemoryIds = humanMemoryIds,
             excludedMemoryIds = excludedMemoryIds,
             singleFaceInPhoto = singleFaceInPhoto
         )
@@ -1593,16 +1701,21 @@ class SmartRecognitionManager(
             if (existingLinked != null) {
                 attachToExistingCluster(existingLinked, claimMemory = memory)
             } else {
-                // If an unlinked unnamed cluster already matches this face by embedding, claim it
+                // If an unlinked unnamed human cluster already matches this face by embedding, claim it
                 val unlinkedCandidates = clusters.values
-                    .filter { it.entity.memoryId == null && it.entity.name.isBlank() }
+                    .filter {
+                        it.entity.entityKind == PersonClusterEntity.KIND_HUMAN &&
+                            it.entity.memoryId == null &&
+                            it.entity.name.isBlank()
+                    }
                     .map {
                         FaceClusteringEngine.ClusterCandidate(
                             personId = it.entity.personId,
                             centroid = it.centroid,
                             sampleCount = it.entity.sampleCount,
                             isNamed = false,
-                            memoryId = null
+                            memoryId = null,
+                            entityKind = PersonClusterEntity.KIND_HUMAN
                         )
                     }
                 val unlinkedMatch = FaceClusteringEngine.findBestMatchingCluster(
@@ -1622,20 +1735,24 @@ class SmartRecognitionManager(
                         embedding = embedding,
                         quality = quality,
                         now = now,
-                        memory = memory
+                        memory = memory,
+                        entityKind = PersonClusterEntity.KIND_HUMAN
                     )
                 }
             }
         } else {
-            val candidates = clusters.values.map {
-                FaceClusteringEngine.ClusterCandidate(
-                    personId = it.entity.personId,
-                    centroid = it.centroid,
-                    sampleCount = it.entity.sampleCount,
-                    isNamed = it.entity.name.isNotBlank(),
-                    memoryId = it.entity.memoryId
-                )
-            }
+            val candidates = clusters.values
+                .filter { it.entity.entityKind == PersonClusterEntity.KIND_HUMAN }
+                .map {
+                    FaceClusteringEngine.ClusterCandidate(
+                        personId = it.entity.personId,
+                        centroid = it.centroid,
+                        sampleCount = it.entity.sampleCount,
+                        isNamed = it.entity.name.isNotBlank(),
+                        memoryId = it.entity.memoryId,
+                        entityKind = PersonClusterEntity.KIND_HUMAN
+                    )
+                }
             val match = FaceClusteringEngine.findBestMatchingCluster(
                 embedding = embedding,
                 candidates = candidates,
@@ -1665,6 +1782,370 @@ class SmartRecognitionManager(
         )
     }
 
+    /**
+     * Detects unmistakable domestic dogs & cats (strictly rejecting lions, monkeys, wolves, foxes,
+     * birds, zoo/wildlife photos) and groups them by breed + center-weighted coat appearance into
+     * `PET_DOG` / `PET_CAT` clusters alongside People. Single-photo stray pets remain hidden from
+     * the UI until they appear across multiple photos.
+     */
+    private fun processDomesticPet(
+        bitmap: Bitmap,
+        item: MediaItem,
+        wholeProbs: FloatArray?,
+        wholeAnimal: AnimalTaxonomy.Analysis?,
+        rawMlLabels: List<Pair<String, Float>>,
+        now: Long,
+        clusters: LinkedHashMap<String, MutableClusterState>,
+        savedMemoryLookup: SavedMemoryLookup = SavedMemoryLookup.EMPTY
+    ): DetectedFaceEntity? {
+        if (wholeProbs == null || wholeAnimal == null) return null
+        val detection = PetRecognitionEngine.detectDomesticPet(
+            probs = wholeProbs,
+            analysis = wholeAnimal,
+            mlKitLabels = rawMlLabels
+        ) ?: return null
+
+        val species = detection.species
+        val imgW = bitmap.width
+        val imgH = bitmap.height
+        if (imgW < 64 || imgH < 64) return null
+
+        // Localize the strongest square region on rectangular photos so pet avatars frame the pet cleanly
+        val targetGroup = if (species == PetRecognitionEngine.PetSpecies.DOG) {
+            AnimalTaxonomy.Group.DOG
+        } else {
+            AnimalTaxonomy.Group.CAT
+        }
+        val shortSide = minOf(imgW, imgH)
+        var bestLeft = (imgW - shortSide) / 2
+        var bestTop = (imgH - shortSide) / 2
+        var bestProbs: FloatArray = wholeProbs
+        var bestScore = wholeAnimal.massOf(targetGroup)
+
+        val aspect = maxOf(imgW, imgH).toFloat() / shortSide.coerceAtLeast(1).toFloat()
+        if (aspect >= 1.22f) {
+            val offsets = if (imgW > imgH) {
+                listOf(0 to 0, (imgW - shortSide) / 2 to 0, (imgW - shortSide) to 0)
+            } else {
+                listOf(0 to 0, 0 to (imgH - shortSide) / 2, 0 to (imgH - shortSide))
+            }
+            for ((ox, oy) in offsets) {
+                if (ox == bestLeft && oy == bestTop) continue
+                val sub = runCatching { Bitmap.createBitmap(bitmap, ox, oy, shortSide, shortSide) }.getOrNull() ?: continue
+                try {
+                    val subProbs = objectEngine.classifyProbabilities(sub) ?: continue
+                    val subAnalysis = AnimalTaxonomy.analyze(subProbs)
+                    val score = subAnalysis.massOf(targetGroup)
+                    if (score > bestScore + 0.04f &&
+                        PetRecognitionEngine.detectDomesticPet(subProbs, subAnalysis, rawMlLabels)?.species == species
+                    ) {
+                        bestScore = score
+                        bestProbs = subProbs
+                        bestLeft = ox
+                        bestTop = oy
+                    }
+                } finally {
+                    sub.recycle()
+                }
+            }
+        }
+
+        val avatarSize = FaceEmbeddingEngine.AVATAR_SIZE_PX
+        val petAvatar = runCatching {
+            val crop = Bitmap.createBitmap(bitmap, bestLeft, bestTop, shortSide, shortSide)
+            try {
+                if (crop.width == avatarSize && crop.height == avatarSize) crop
+                else Bitmap.createScaledBitmap(crop, avatarSize, avatarSize, true).also {
+                    if (it !== crop) crop.recycle()
+                }
+            } catch (t: Throwable) {
+                crop.recycle()
+                throw t
+            }
+        }.getOrNull() ?: return null
+
+        val faceId = "${item.id}_pet0"
+        val coatDesc: FloatArray
+        val cropPath: String?
+        try {
+            val pixels = IntArray(avatarSize * avatarSize)
+            petAvatar.getPixels(pixels, 0, avatarSize, 0, 0, avatarSize, avatarSize)
+            coatDesc = PetRecognitionEngine.computeCoatColorDescriptor(pixels, avatarSize, avatarSize)
+            cropPath = faceEngine.saveAvatarBitmap(petAvatar, "${faceId}_v2")
+        } finally {
+            petAvatar.recycle()
+        }
+
+        val embedding = PetRecognitionEngine.buildPetEmbedding(
+            species = species,
+            probs = bestProbs,
+            coatDescriptor = coatDesc
+        )
+        if (embedding.isEmpty()) return null
+
+        val normLeft = (bestLeft.toFloat() / imgW).coerceIn(0f, 1f)
+        val normTop = (bestTop.toFloat() / imgH).coerceIn(0f, 1f)
+        val normRight = ((bestLeft + shortSide).toFloat() / imgW).coerceIn(0f, 1f)
+        val normBottom = ((bestTop + shortSide).toFloat() / imgH).coerceIn(0f, 1f)
+        val detectedBox = PersonMemoryEngine.FaceBox(normLeft, normTop, normRight, normBottom)
+        val quality = bestScore.coerceIn(0.3f, 1f)
+
+        val itemAnchors = savedMemoryLookup.anchorsByItemId[item.id].orEmpty()
+        val excludedMemoryIds = PersonMemoryEngine.findExcludedMemoryIds(
+            detected = detectedBox,
+            anchorsForItem = itemAnchors,
+            singleFaceInPhoto = true
+        )
+        val petMemoryIds = savedMemoryLookup.memoriesById.values
+            .filter { it.entityKind == species.entityKind }
+            .mapTo(HashSet()) { it.memoryId }
+        val matchedMemoryId = PersonMemoryEngine.findBestPositiveMemoryId(
+            detected = detectedBox,
+            anchorsForItem = itemAnchors,
+            validMemoryIds = petMemoryIds,
+            excludedMemoryIds = excludedMemoryIds,
+            singleFaceInPhoto = true
+        )
+        val forbiddenPetIds = if (excludedMemoryIds.isEmpty()) {
+            emptySet()
+        } else {
+            clusters.values
+                .filter { it.entity.memoryId != null && it.entity.memoryId in excludedMemoryIds }
+                .mapTo(HashSet()) { it.entity.personId }
+        }
+
+        fun attachToPetCluster(
+            state: MutableClusterState,
+            claimMemory: SavedPersonMemoryEntity? = null
+        ): String {
+            val activeMem = claimMemory ?: state.entity.memoryId?.let { savedMemoryLookup.memoriesById[it] }
+            val updatedCentroid = FaceClusteringEngine.updateRunningCentroid(
+                oldCentroid = state.centroid,
+                oldCount = state.entity.sampleCount,
+                newEmbedding = embedding
+            )
+            val isSavedCoverMatch = activeMem != null &&
+                PersonMemoryEngine.matchesSavedCover(activeMem, item.id, detectedBox, singleFaceInPhoto = true)
+            val hasLockedSavedCover = activeMem?.coverItemId != null &&
+                state.entity.coverPhotoId == activeMem.coverItemId &&
+                !state.entity.coverCropPath.isNullOrBlank()
+            val shouldUpgradeCover = isSavedCoverMatch ||
+                (!hasLockedSavedCover && (state.entity.coverCropPath.isNullOrBlank() ||
+                    (cropPath != null && quality > state.bestCoverQuality + 0.04f)))
+
+            state.centroid = updatedCentroid
+            if (shouldUpgradeCover && cropPath != null) {
+                state.bestCoverQuality = if (isSavedCoverMatch) 1.5f else quality
+            }
+            state.entity = state.entity.copy(
+                memoryId = activeMem?.memoryId ?: state.entity.memoryId,
+                name = activeMem?.name?.takeIf { it.isNotBlank() } ?: state.entity.name,
+                isFavorite = state.entity.isFavorite || (activeMem?.isFavorite == true),
+                isHidden = state.entity.isHidden || (activeMem?.isHidden == true),
+                centroidBlob = FaceClusteringEngine.encodeEmbedding(updatedCentroid),
+                sampleCount = state.entity.sampleCount + 1,
+                coverFaceId = if (shouldUpgradeCover) faceId else state.entity.coverFaceId,
+                coverPhotoId = if (shouldUpgradeCover) item.id else state.entity.coverPhotoId,
+                coverCropPath = if (shouldUpgradeCover && cropPath != null) cropPath else state.entity.coverCropPath,
+                updatedAtEpochMs = now
+            )
+            return state.entity.personId
+        }
+
+        val assignedPersonId = if (matchedMemoryId != null) {
+            val memory = savedMemoryLookup.memoriesById[matchedMemoryId]
+            val existingLinked = clusters.values.firstOrNull {
+                it.entity.entityKind == species.entityKind &&
+                    it.entity.memoryId == matchedMemoryId &&
+                    it.entity.personId !in forbiddenPetIds
+            }
+            if (existingLinked != null) {
+                attachToPetCluster(existingLinked, claimMemory = memory)
+            } else {
+                val unlinkedPetCandidates = clusters.values
+                    .filter {
+                        it.entity.entityKind == species.entityKind &&
+                            it.entity.memoryId == null &&
+                            it.entity.name.isBlank()
+                    }
+                    .map {
+                        FaceClusteringEngine.ClusterCandidate(
+                            personId = it.entity.personId,
+                            centroid = it.centroid,
+                            sampleCount = it.entity.sampleCount,
+                            isNamed = false,
+                            memoryId = null,
+                            entityKind = species.entityKind
+                        )
+                    }
+                val claimedState = PetRecognitionEngine.findBestMatchingPetCluster(
+                    species = species,
+                    embedding = embedding,
+                    candidates = unlinkedPetCandidates,
+                    forbiddenPersonIds = forbiddenPetIds
+                )?.let { clusters[it.personId] }
+                if (claimedState != null) {
+                    attachToPetCluster(claimedState, claimMemory = memory)
+                } else {
+                    createNewCluster(
+                        clusters = clusters,
+                        faceId = faceId,
+                        photoId = item.id,
+                        cropPath = cropPath,
+                        embedding = embedding,
+                        quality = quality,
+                        now = now,
+                        memory = memory,
+                        entityKind = species.entityKind
+                    )
+                }
+            }
+        } else {
+            val petCandidates = clusters.values
+                .filter { it.entity.entityKind == species.entityKind }
+                .map {
+                    FaceClusteringEngine.ClusterCandidate(
+                        personId = it.entity.personId,
+                        centroid = it.centroid,
+                        sampleCount = it.entity.sampleCount,
+                        isNamed = it.entity.name.isNotBlank(),
+                        memoryId = it.entity.memoryId,
+                        entityKind = species.entityKind
+                    )
+                }
+            val matchedState = PetRecognitionEngine.findBestMatchingPetCluster(
+                species = species,
+                embedding = embedding,
+                candidates = petCandidates,
+                forbiddenPersonIds = forbiddenPetIds
+            )?.let { clusters[it.personId] }
+            if (matchedState != null) {
+                attachToPetCluster(matchedState)
+            } else {
+                createNewCluster(
+                    clusters = clusters,
+                    faceId = faceId,
+                    photoId = item.id,
+                    cropPath = cropPath,
+                    embedding = embedding,
+                    quality = quality,
+                    now = now,
+                    entityKind = species.entityKind
+                )
+            }
+        }
+
+        return DetectedFaceEntity(
+            faceId = faceId,
+            itemId = item.id,
+            personId = assignedPersonId,
+            embeddingBlob = FaceClusteringEngine.encodeEmbedding(embedding),
+            bboxLeft = normLeft,
+            bboxTop = normTop,
+            bboxRight = normRight,
+            bboxBottom = normBottom,
+            qualityScore = quality,
+            cropPath = cropPath,
+            isExcludedByUser = false,
+            detectedAtEpochMs = now
+        )
+    }
+
+    /**
+     * One-time targeted backfill that checks ONLY already-indexed photos tagged with `Dog` or `Cat`
+     * (never re-scanning landscapes or human portraits!) so existing dog/cat photos appear grouped
+     * alongside People immediately after updating.
+     */
+    private suspend fun backfillPetsFromIndexedPhotosIfNeeded(allEligible: List<MediaItem>) {
+        if (metaPrefs.getInt(KEY_PET_GROUPING_VERSION, 0) >= CURRENT_PET_GROUPING_VERSION) return
+        val smartEntries = smartDao.getAllSmartIndex()
+        if (smartEntries.isEmpty()) {
+            metaPrefs.edit().putInt(KEY_PET_GROUPING_VERSION, CURRENT_PET_GROUPING_VERSION).apply()
+            return
+        }
+        val itemsById = allEligible.associateBy { it.id }
+        val existingPetFaceIds = smartDao.getAllActiveFacesSync()
+            .asSequence()
+            .filter { it.faceId.endsWith("_pet0") }
+            .mapTo(HashSet()) { it.itemId }
+
+        val candidatePetItems = smartEntries.mapNotNull { entry ->
+            if (entry.itemId in existingPetFaceIds) return@mapNotNull null
+            if (!SmartObjectVocabulary.tokensMatch(entry.labelsCsv, "dog") &&
+                !SmartObjectVocabulary.tokensMatch(entry.labelsCsv, "cat")
+            ) return@mapNotNull null
+            itemsById[entry.itemId]
+        }
+        if (candidatePetItems.isEmpty()) {
+            metaPrefs.edit().putInt(KEY_PET_GROUPING_VERSION, CURRENT_PET_GROUPING_VERSION).apply()
+            return
+        }
+
+        val savedMemoryLookup = loadSavedMemoryLookup()
+        val inMemoryClusters = smartDao.getAllPersons()
+            .associateByTo(LinkedHashMap()) { it.personId }
+            .mapValuesTo(LinkedHashMap()) { (_, entity) ->
+                MutableClusterState(
+                    entity = entity,
+                    centroid = FaceClusteringEngine.decodeEmbedding(entity.centroidBlob)
+                )
+            }
+        val newPetFaces = ArrayList<DetectedFaceEntity>()
+        val dirtyClusterIds = LinkedHashSet<String>()
+        var anyDeferred = false
+        val now = System.currentTimeMillis()
+
+        for (item in candidatePetItems) {
+            if (pauseRequested) {
+                anyDeferred = true
+                break
+            }
+            val bitmap = decodeScanBitmap(item)
+            if (bitmap == null) {
+                if (!item.isLocal) anyDeferred = true
+                continue
+            }
+            try {
+                val wholeProbs = objectEngine.classifyProbabilities(bitmap)
+                val wholeAnimal = wholeProbs?.let { AnimalTaxonomy.analyze(it) }
+                val rawMlLabels = runCatching {
+                    Tasks.await(imageLabeler.process(InputImage.fromBitmap(bitmap, 0)), ML_TIMEOUT_SEC, TimeUnit.SECONDS)
+                        .map { it.text to it.confidence }
+                }.getOrDefault(emptyList())
+
+                val petFace = processDomesticPet(
+                    bitmap = bitmap,
+                    item = item,
+                    wholeProbs = wholeProbs,
+                    wholeAnimal = wholeAnimal,
+                    rawMlLabels = rawMlLabels,
+                    now = now,
+                    clusters = inMemoryClusters,
+                    savedMemoryLookup = savedMemoryLookup
+                )
+                if (petFace != null) {
+                    petFace.personId?.let { dirtyClusterIds.add(it) }
+                    newPetFaces.add(petFace)
+                }
+            } finally {
+                bitmap.recycle()
+            }
+        }
+
+        if (newPetFaces.isNotEmpty() || dirtyClusterIds.isNotEmpty()) {
+            val clustersToWrite = dirtyClusterIds.mapNotNull { inMemoryClusters[it]?.entity }
+            database.withTransaction {
+                if (clustersToWrite.isNotEmpty()) smartDao.upsertPersons(clustersToWrite)
+                if (newPetFaces.isNotEmpty()) smartDao.upsertFaces(newPetFaces)
+            }
+            runCatching { reconcileSavedPersonMemoriesLocked() }
+            runCatching { consolidateSplitClusters() }
+        }
+        if (!anyDeferred) {
+            metaPrefs.edit().putInt(KEY_PET_GROUPING_VERSION, CURRENT_PET_GROUPING_VERSION).apply()
+        }
+    }
+
     private suspend fun consolidateSplitClusters() {
         val allPersons = smartDao.getAllPersons().filterNot { it.isHidden }
         if (allPersons.size < 2) return
@@ -1676,7 +2157,8 @@ class SmartRecognitionManager(
                 sampleCount = faces.size.coerceAtLeast(person.sampleCount),
                 isNamed = person.name.isNotBlank(),
                 photoIds = faces.mapTo(HashSet(faces.size)) { it.itemId },
-                memoryId = person.memoryId
+                memoryId = person.memoryId,
+                entityKind = person.entityKind
             )
         }
         val merges = FaceClusteringEngine.findAutoConsolidationPairs(
@@ -1701,7 +2183,8 @@ class SmartRecognitionManager(
         embedding: FloatArray,
         quality: Float,
         now: Long,
-        memory: SavedPersonMemoryEntity? = null
+        memory: SavedPersonMemoryEntity? = null,
+        entityKind: String = PersonClusterEntity.KIND_HUMAN
     ): String {
         val newId = "person_${UUID.randomUUID().toString().take(12)}"
         val entity = PersonClusterEntity(
@@ -1715,7 +2198,8 @@ class SmartRecognitionManager(
             centroidBlob = FaceClusteringEngine.encodeEmbedding(embedding),
             sampleCount = 1,
             updatedAtEpochMs = now,
-            memoryId = memory?.memoryId
+            memoryId = memory?.memoryId,
+            entityKind = memory?.entityKind ?: entityKind
         )
         clusters[newId] = MutableClusterState(
             entity = entity,
@@ -1914,7 +2398,8 @@ class SmartRecognitionManager(
                     coverBboxTop = coverOwner?.coverBboxTop,
                     coverBboxRight = coverOwner?.coverBboxRight,
                     coverBboxBottom = coverOwner?.coverBboxBottom,
-                    updatedAtEpochMs = now
+                    updatedAtEpochMs = now,
+                    entityKind = target.entityKind
                 )
                 smartDao.upsertSavedPersonMemory(mergedMemory)
 
@@ -2662,11 +3147,13 @@ class SmartRecognitionManager(
         private const val KEY_AI_INDEX_VERSION = "smart_ai_index_version"
         private const val KEY_AVATAR_CROP_VERSION = "smart_avatar_crop_version"
         private const val KEY_PERSON_MEMORY_MIGRATED = "smart_person_memory_migrated_v"
+        private const val KEY_PET_GROUPING_VERSION = "smart_pet_grouping_version"
         private const val KEY_REJECTED_MERGE_PAIRS = "rejected_merge_pairs"
         private const val KEY_PRESERVED_PROFILES = "preserved_person_profiles_json"
         private const val CURRENT_AI_INDEX_VERSION = 4
         private const val CURRENT_AVATAR_CROP_VERSION = 2
         private const val CURRENT_PERSON_MEMORY_VERSION = 1
+        private const val CURRENT_PET_GROUPING_VERSION = 1
 
         /** High-precision ML Kit portrait cues specific to humans (excludes eye/nose/mouth shared with animals). */
         private val MLKIT_STRONG_HUMAN_PORTRAIT_LABELS: Set<String> = setOf(

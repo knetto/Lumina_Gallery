@@ -1,5 +1,6 @@
 package com.luminagallery.drive.data.repository.ai
 
+import com.luminagallery.drive.data.local.entity.PersonClusterEntity
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.abs
@@ -88,7 +89,8 @@ object FaceClusteringEngine {
         val sampleCount: Int,
         val isNamed: Boolean = false,
         val photoIds: Set<String> = emptySet(),
-        val memoryId: String? = null
+        val memoryId: String? = null,
+        val entityKind: String = PersonClusterEntity.KIND_HUMAN
     ) {
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
@@ -98,7 +100,8 @@ object FaceClusteringEngine {
                 sampleCount == other.sampleCount &&
                 isNamed == other.isNamed &&
                 photoIds == other.photoIds &&
-                memoryId == other.memoryId
+                memoryId == other.memoryId &&
+                entityKind == other.entityKind
         }
 
         override fun hashCode(): Int {
@@ -108,6 +111,7 @@ object FaceClusteringEngine {
             result = 31 * result + isNamed.hashCode()
             result = 31 * result + photoIds.hashCode()
             result = 31 * result + (memoryId?.hashCode() ?: 0)
+            result = 31 * result + entityKind.hashCode()
             return result
         }
     }
@@ -401,13 +405,16 @@ object FaceClusteringEngine {
             for (j in (i + 1) until sorted.size) {
                 val source = sorted[j]
                 if (source.personId in absorbed) continue
+                if (target.entityKind != source.entityKind) continue
                 if (target.isNamed && source.isNamed) continue
                 if (isRejectedPair(target, source, rejectedPairs)) continue
                 if (target.centroid.size != source.centroid.size) continue
                 if (target.photoIds.isNotEmpty() && source.photoIds.any { it in target.photoIds }) continue
 
                 val sim = cosineSimilarity(target.centroid, source.centroid)
-                val threshold = if (target.sampleCount >= 2 && source.sampleCount >= 2) {
+                val threshold = if (target.entityKind != PersonClusterEntity.KIND_HUMAN) {
+                    PetRecognitionEngine.PET_AUTO_CONSOLIDATE_THRESHOLD
+                } else if (target.sampleCount >= 2 && source.sampleCount >= 2) {
                     AUTO_CONSOLIDATE_MULTI_THRESHOLD
                 } else {
                     AUTO_CONSOLIDATE_SINGLE_THRESHOLD
@@ -430,7 +437,8 @@ object FaceClusteringEngine {
     /**
      * Finds interactive "Are these the same person?" gray-zone pairs (`0.48..0.72`) where lighting,
      * sunglasses, or age may have split one person into two clusters. Respects user-rejected pairs,
-     * never suggests merging two differently-named people, and never pairs people seen in the same photo.
+     * never suggests merging two differently-named people, never cross-pairs humans/dogs/cats, and
+     * never pairs clusters seen in the same photo.
      */
     fun findInteractiveMergeSuggestions(
         clusters: List<ClusterCandidate>,
@@ -447,12 +455,18 @@ object FaceClusteringEngine {
             val a = sorted[i]
             for (j in (i + 1) until sorted.size) {
                 val b = sorted[j]
+                if (a.entityKind != b.entityKind) continue
                 if (a.isNamed && b.isNamed) continue
                 if (isRejectedPair(a, b, rejectedPairs)) continue
                 if (a.centroid.size != b.centroid.size) continue
                 if (a.photoIds.isNotEmpty() && b.photoIds.any { it in a.photoIds }) continue
                 val sim = cosineSimilarity(a.centroid, b.centroid)
-                if (sim >= SUGGEST_MERGE_MIN_THRESHOLD) {
+                val minSuggest = if (a.entityKind != PersonClusterEntity.KIND_HUMAN) {
+                    PetRecognitionEngine.PET_SUGGEST_MERGE_MIN_THRESHOLD
+                } else {
+                    SUGGEST_MERGE_MIN_THRESHOLD
+                }
+                if (sim >= minSuggest) {
                     rawPairs.add(
                         MergeSuggestion(
                             targetPersonId = a.personId,

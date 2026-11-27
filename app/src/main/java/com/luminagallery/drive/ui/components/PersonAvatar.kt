@@ -57,6 +57,7 @@ fun PersonAvatar(
     size: Dp = 68.dp,
     isSelected: Boolean = false,
     isFavorite: Boolean = false,
+    isPet: Boolean = false,
     borderColor: Color? = null,
     modifier: Modifier = Modifier
 ) {
@@ -106,7 +107,7 @@ fun PersonAvatar(
                 )
             } else {
                 Icon(
-                    imageVector = Icons.Rounded.Person,
+                    imageVector = if (isPet) Icons.Rounded.Pets else Icons.Rounded.Person,
                     contentDescription = contentDescription,
                     tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
                     modifier = Modifier.size(size * 0.48f)
@@ -152,6 +153,23 @@ fun PersonAvatar(
                     imageVector = Icons.Rounded.Star,
                     contentDescription = "Pinned",
                     tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size((size * 0.17f).coerceIn(10.dp, 13.dp))
+                )
+            }
+        } else if (isPet && size >= 44.dp) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .size((size * 0.28f).coerceIn(16.dp, 22.dp))
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.secondaryContainer)
+                    .border(1.2.dp, MaterialTheme.colorScheme.background, CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Pets,
+                    contentDescription = "Pet",
+                    tint = MaterialTheme.colorScheme.onSecondaryContainer,
                     modifier = Modifier.size((size * 0.17f).coerceIn(10.dp, 13.dp))
                 )
             }

@@ -90,6 +90,7 @@ import com.luminagallery.drive.R
 import com.luminagallery.drive.data.remote.auth.GoogleAuthHelper
 import com.luminagallery.drive.data.repository.AppUpdateState
 import com.luminagallery.drive.data.repository.InstalledGalleryApp
+import com.luminagallery.drive.data.repository.ai.SmartIndexProgress
 import com.luminagallery.drive.domain.model.AlbumSortMode
 import com.luminagallery.drive.domain.model.CredentialSource
 import com.luminagallery.drive.domain.model.MainTab
@@ -151,6 +152,7 @@ fun SettingsScreen(
     var activePicker by remember { mutableStateOf<SettingsPickerSheet?>(null) }
     var showCloudProfileDialog by remember { mutableStateOf(false) }
     var showSignOutDialog by remember { mutableStateOf(false) }
+    var showRebuildAiDialog by remember { mutableStateOf(false) }
     var showResetDefaultsDialog by remember { mutableStateOf(false) }
     var showAboutDialog by remember { mutableStateOf(false) }
 
@@ -489,6 +491,84 @@ fun SettingsScreen(
                             }
                         )
                     }
+                }
+            }
+
+            // 1C. ON-DEVICE SMART RECOGNITION (People, Pets, Objects & Text progress)
+            item(key = "section_smart_recognition") {
+                val smartProg = uiState.smartProgress
+                val ocrProg = uiState.ocrProgress
+                OneUiSettingsSection(title = "Smart recognition") {
+                    OneUiSmartRecognitionMeterBlock(
+                        progress = smartProg,
+                        peopleCount = uiState.recognizedPeopleCount,
+                        petsCount = uiState.recognizedPetsCount
+                    )
+
+                    OneUiDivider()
+
+                    if (smartProg.isIndexing) {
+                        OneUiActionRow(
+                            title = "Pause recognition scan",
+                            subtitle = "Progress is saved automatically · resume anytime",
+                            subtitleAccent = true,
+                            trailingContent = {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            },
+                            onClick = viewModel::pauseSmartScan
+                        )
+                    } else {
+                        val hasRemaining = smartProg.remainingPhotos > 0 || smartProg.totalEligiblePhotos == 0
+                        OneUiActionRow(
+                            title = if (hasRemaining) "Scan library in background" else "Check for new photos",
+                            subtitle = if (hasRemaining) {
+                                "Runs 100% on-device on Wi-Fi · safe to lock screen"
+                            } else {
+                                "All eligible local & Drive items are indexed"
+                            },
+                            subtitleAccent = hasRemaining,
+                            enabled = !smartProg.isDownloadingModels,
+                            onClick = viewModel::startFullSmartScan
+                        )
+                    }
+
+                    OneUiDivider()
+
+                    OneUiActionRow(
+                        title = "Text in photos (OCR)",
+                        subtitle = if (ocrProg.isIndexing) {
+                            "Scanning offline (${ocrProg.indexedCount} / ${ocrProg.totalCount})…"
+                        } else if (uiState.ocrIndexedPhotoCount > 0) {
+                            "${uiState.ocrIndexedPhotoCount} photos scanned for searchable text"
+                        } else {
+                            "Scans screenshots & documents offline when searching"
+                        },
+                        subtitleAccent = ocrProg.isIndexing,
+                        enabled = false,
+                        dimWhenDisabled = false,
+                        trailingContent = if (ocrProg.isIndexing) {
+                            {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        } else null,
+                        onClick = {}
+                    )
+
+                    OneUiDivider()
+
+                    OneUiActionRow(
+                        title = "Rebuild People, Pets & Objects",
+                        subtitle = "Re-scan from scratch while keeping saved names & combined groups",
+                        onClick = { showRebuildAiDialog = true }
+                    )
                 }
             }
 
@@ -1156,6 +1236,34 @@ fun SettingsScreen(
         )
     }
 
+    if (showRebuildAiDialog) {
+        AlertDialog(
+            onDismissRequest = { showRebuildAiDialog = false },
+            shape = OneUiGroupShape,
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            title = { Text("Rebuild People, Pets & Objects?", fontWeight = FontWeight.SemiBold) },
+            text = {
+                Text(
+                    "Re-analyzes your local & Google Drive photos and videos on-device while automatically keeping your saved names, combined groups, and pinned people/pets (locked folders are always skipped).",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showRebuildAiDialog = false
+                        viewModel.rebuildSmartRecognitionIndex()
+                    }
+                ) {
+                    Text("Rebuild", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRebuildAiDialog = false }) { Text("Cancel") }
+            }
+        )
+    }
+
     if (showResetDefaultsDialog) {
         AlertDialog(
             onDismissRequest = { showResetDefaultsDialog = false },
@@ -1466,6 +1574,7 @@ private fun OneUiActionRow(
     subtitle: String,
     subtitleAccent: Boolean = false,
     enabled: Boolean = true,
+    dimWhenDisabled: Boolean = true,
     showChevron: Boolean = false,
     trailingContent: (@Composable () -> Unit)? = null,
     onClick: () -> Unit
@@ -1473,7 +1582,7 @@ private fun OneUiActionRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .alpha(if (enabled) 1f else 0.45f)
+            .alpha(if (enabled || !dimWhenDisabled) 1f else 0.45f)
             .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 20.dp, vertical = 15.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -1568,6 +1677,109 @@ private fun OneUiStorageMeterBlock(
             trackColor = MaterialTheme.colorScheme.surfaceContainerHighest,
             strokeCap = StrokeCap.Round
         )
+    }
+}
+
+@Composable
+private fun OneUiSmartRecognitionMeterBlock(
+    progress: SmartIndexProgress,
+    peopleCount: Int,
+    petsCount: Int
+) {
+    val total = progress.totalEligiblePhotos.coerceAtLeast(0)
+    val indexed = progress.totalIndexedPhotos.coerceIn(0, total.coerceAtLeast(progress.totalIndexedPhotos))
+    val ratio = if (total > 0) (indexed.toFloat() / total.toFloat()).coerceIn(0f, 1f) else 0f
+    val animatedRatio by animateFloatAsState(
+        targetValue = ratio,
+        label = "oneUiSmartAiBar"
+    )
+    val percent = (ratio * 100f).toInt().coerceIn(0, 100)
+
+    val titleText = when {
+        progress.isDownloadingModels -> "Downloading AI models…"
+        progress.isIndexing -> "Recognizing people, pets & objects"
+        total > 0 && progress.remainingPhotos == 0 -> "Recognition up to date"
+        total > 0 -> "$percent% indexed"
+        else -> "People, pets & objects"
+    }
+    val subtitleText = when {
+        progress.isDownloadingModels -> "Downloading on-device models via Google Play Services"
+        progress.isIndexing -> progress.statusText ?: "Scanning local & Drive · 100% on-device"
+        total > 0 && progress.remainingPhotos > 0 -> "${progress.remainingPhotos} remaining · locked albums skipped"
+        total > 0 -> "All $total eligible items indexed · 100% on-device"
+        else -> "100% on-device · locked & hidden albums always skipped"
+    }
+    val countsLine = buildList {
+        if (peopleCount > 0) add(if (peopleCount == 1) "1 person" else "$peopleCount people")
+        if (petsCount > 0) add(if (petsCount == 1) "1 pet" else "$petsCount pets")
+    }.joinToString(" · ")
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.Bottom
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = titleText,
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    text = subtitleText,
+                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.5.sp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            if (total > 0) {
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    text = "$indexed / $total",
+                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                    color = if (progress.isIndexing) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+
+        if (progress.isDownloadingModels) {
+            LinearProgressIndicator(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(7.dp),
+                color = MaterialTheme.colorScheme.primary,
+                trackColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                strokeCap = StrokeCap.Round
+            )
+        } else if (total > 0) {
+            LinearProgressIndicator(
+                progress = { animatedRatio },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(7.dp),
+                color = MaterialTheme.colorScheme.primary,
+                trackColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                strokeCap = StrokeCap.Round
+            )
+        }
+
+        if (countsLine.isNotEmpty()) {
+            Text(
+                text = countsLine,
+                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Medium),
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
     }
 }
 

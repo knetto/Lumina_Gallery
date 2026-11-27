@@ -27,8 +27,11 @@ data class PersonClusterEntity(
     val centroidBlob: ByteArray,
     val sampleCount: Int = 1,
     val updatedAtEpochMs: Long,
-    val memoryId: String? = null
+    val memoryId: String? = null,
+    val entityKind: String = KIND_HUMAN
 ) {
+    val isPet: Boolean get() = entityKind != KIND_HUMAN
+
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is PersonClusterEntity) return false
@@ -42,7 +45,8 @@ data class PersonClusterEntity(
             centroidBlob.contentEquals(other.centroidBlob) &&
             sampleCount == other.sampleCount &&
             updatedAtEpochMs == other.updatedAtEpochMs &&
-            memoryId == other.memoryId
+            memoryId == other.memoryId &&
+            entityKind == other.entityKind
     }
 
     override fun hashCode(): Int {
@@ -57,7 +61,14 @@ data class PersonClusterEntity(
         result = 31 * result + sampleCount
         result = 31 * result + updatedAtEpochMs.hashCode()
         result = 31 * result + (memoryId?.hashCode() ?: 0)
+        result = 31 * result + entityKind.hashCode()
         return result
+    }
+
+    companion object {
+        const val KIND_HUMAN = "HUMAN"
+        const val KIND_PET_DOG = "PET_DOG"
+        const val KIND_PET_CAT = "PET_CAT"
     }
 }
 
@@ -166,7 +177,8 @@ data class SavedPersonMemoryEntity(
     val coverBboxTop: Float? = null,
     val coverBboxRight: Float? = null,
     val coverBboxBottom: Float? = null,
-    val updatedAtEpochMs: Long
+    val updatedAtEpochMs: Long,
+    val entityKind: String = PersonClusterEntity.KIND_HUMAN
 )
 
 /**

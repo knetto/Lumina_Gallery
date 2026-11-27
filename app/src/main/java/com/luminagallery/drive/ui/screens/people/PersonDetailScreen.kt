@@ -258,6 +258,7 @@ fun PersonDetailScreen(
                                         cropPath = person.coverCropPath,
                                         contentDescription = person.displayTitle,
                                         size = 96.dp,
+                                        isPet = person.isPet,
                                         borderColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)
                                     )
                                     if (uiState.personFaces.size > 1) {

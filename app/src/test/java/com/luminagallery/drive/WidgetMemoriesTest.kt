@@ -1,6 +1,10 @@
 package com.luminagallery.drive
 
+import com.luminagallery.drive.data.local.dao.LightFaceRow
+import com.luminagallery.drive.data.local.entity.MediaAnnotationEntity
+import com.luminagallery.drive.data.local.entity.PersonClusterEntity
 import com.luminagallery.drive.data.local.entity.PhotoLocationEntity
+import com.luminagallery.drive.data.local.entity.PhotoSmartIndexEntity
 import com.luminagallery.drive.widget.HyperOsGlassRenderer
 import com.luminagallery.drive.widget.LuminaPhotoWidgetProvider
 import com.luminagallery.drive.widget.LuminaWidgetRefreshWorker
@@ -10,15 +14,20 @@ import com.luminagallery.drive.widget.ResolvedTilePattern
 import com.luminagallery.drive.widget.VisualFingerprint
 import com.luminagallery.drive.widget.WidgetCollageLayout
 import com.luminagallery.drive.widget.WidgetMemorySource
+import com.luminagallery.drive.widget.WidgetPersonMatchMode
 import com.luminagallery.drive.widget.WidgetPhoto
 import com.luminagallery.drive.widget.WidgetPhotoDiversity
 import com.luminagallery.drive.widget.WidgetPhotoSource
 import com.luminagallery.drive.widget.WidgetShuffleInterval
+import com.luminagallery.drive.widget.WidgetSmartFilter
+import com.luminagallery.drive.widget.WidgetTagKind
+import com.luminagallery.drive.widget.WidgetTagMatchMode
 import com.luminagallery.drive.widget.buildAlbumCollageGroups
 import com.luminagallery.drive.widget.buildOnThisDayMemories
 import com.luminagallery.drive.widget.buildWidgetMemories
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.Instant
@@ -301,6 +310,299 @@ class WidgetMemoriesTest {
         assertTrue(chosen.map { it.luminaItemId }.containsAll(listOf("b1", "lunch", "sunset")))
         assertFalse(chosen.any { it.luminaItemId == "b2" })
     }
+
+    @Test
+    fun widgetSettingsJsonRemainsBackwardCompatibleAndRoundTripsPeopleAndTags() {
+        // Legacy v2 widget payload saved before PEOPLE_AND_PETS / TAGS_AND_ANIMALS existed
+        val legacyJson = """{"source":"SELECTED_ALBUMS","selectedAlbumIds":["local_bucket_1"],"shuffleInterval":"HOUR_1"}"""
+        val decodedLegacy = PhotoWidgetSettings.decodeFromJson(legacyJson)
+        assertNotNull(decodedLegacy)
+        assertEquals(WidgetPhotoSource.SELECTED_ALBUMS, decodedLegacy!!.source)
+        assertEquals(listOf("local_bucket_1"), decodedLegacy.selectedAlbumIds)
+        assertTrue(decodedLegacy.selectedPersonIds.isEmpty())
+        assertEquals(WidgetPersonMatchMode.ANY, decodedLegacy.personMatchMode)
+        assertTrue(decodedLegacy.selectedTags.isEmpty())
+        assertEquals(WidgetTagMatchMode.ANY, decodedLegacy.tagMatchMode)
+
+        val peopleWidget = PhotoWidgetSettings(
+            source = WidgetPhotoSource.PEOPLE_AND_PETS,
+            selectedPersonIds = listOf("p_alex", "p_sarah"),
+            selectedPersonMemoryIds = mapOf("p_alex" to "mem_alex", "p_sarah" to "mem_sarah"),
+            personMatchMode = WidgetPersonMatchMode.TOGETHER
+        )
+        val roundTrippedPeople = PhotoWidgetSettings.decodeFromJson(peopleWidget.encodeToJson())
+        assertEquals(peopleWidget, roundTrippedPeople)
+
+        val tagWidget = PhotoWidgetSettings(
+            source = WidgetPhotoSource.TAGS_AND_ANIMALS,
+            selectedTags = listOf(WidgetSmartFilter.TAG_ALL_PETS, "Beach", "#vacation"),
+            tagMatchMode = WidgetTagMatchMode.ALL
+        )
+        val roundTrippedTags = PhotoWidgetSettings.decodeFromJson(tagWidget.encodeToJson())
+        assertEquals(tagWidget, roundTrippedTags)
+        assertFalse(peopleWidget.hasSamePhotoPoolAs(peopleWidget.copy(personMatchMode = WidgetPersonMatchMode.ANY)))
+        assertFalse(tagWidget.hasSamePhotoPoolAs(tagWidget.copy(tagMatchMode = WidgetTagMatchMode.ANY)))
+    }
+
+    @Test
+    fun widgetSmartFilterMatchesSinglePersonMultiplePeopleTogetherPetsAndDurableMemory() {
+        val alex = person("p_alex", name = "Alex", memoryId = "mem_alex")
+        val sarah = person("p_sarah", name = "Sarah", memoryId = "mem_sarah")
+        val bellaDog = person("p_bella", name = "Bella", entityKind = PersonClusterEntity.KIND_PET_DOG, memoryId = "mem_bella")
+        val strayCat = person("p_stray", name = "", entityKind = PersonClusterEntity.KIND_PET_CAT)
+        val hiddenPerson = person("p_secret", name = "Hidden", isHidden = true)
+
+        val persons = listOf(alex, sarah, bellaDog, strayCat, hiddenPerson)
+        val faces = listOf(
+            // Visible local photos
+            face("f1", "local_1", "p_alex"),
+            face("f2", "local_2", "p_alex"),
+            face("f3", "local_2", "p_sarah"),
+            face("f4", "local_3", "p_sarah"),
+            face("f5", "local_4", "p_alex"),
+            face("f6", "local_4", "p_bella"),
+            face("f7", "local_5", "p_bella"),
+            face("f8", "local_6", "p_stray"), // 1-photo unnamed stray cat
+            face("f9", "local_7", "p_secret"), // hidden person
+            // Locked/hidden album photo (NOT in visibleLocalPhotoIds!)
+            face("f10", "local_locked", "p_alex"),
+            face("f11", "local_locked", "p_sarah")
+        )
+        val visibleLocal = setOf("local_1", "local_2", "local_3", "local_4", "local_5", "local_6", "local_7")
+
+        // Picker options exclude hidden people and 1-photo unnamed stray cats, include multi-photo pets
+        val options = WidgetSmartFilter.buildPersonOptions(persons, faces, visibleLocal)
+        assertEquals(setOf("p_alex", "p_sarah", "p_bella"), options.map { it.personId }.toSet())
+        assertTrue(options.first { it.personId == "p_bella" }.isPet)
+
+        // Single person
+        assertEquals(
+            setOf("local_1", "local_2", "local_4"),
+            WidgetSmartFilter.resolveMatchingPhotoIdsForPeople(
+                selectedPersonIds = listOf("p_alex"),
+                selectedPersonMemoryIds = emptyMap(),
+                matchMode = WidgetPersonMatchMode.ANY,
+                persons = persons,
+                faces = faces,
+                visibleLocalPhotoIds = visibleLocal
+            )
+        )
+
+        // Multiple people (ANY = union)
+        assertEquals(
+            setOf("local_1", "local_2", "local_3", "local_4"),
+            WidgetSmartFilter.resolveMatchingPhotoIdsForPeople(
+                selectedPersonIds = listOf("p_alex", "p_sarah"),
+                selectedPersonMemoryIds = emptyMap(),
+                matchMode = WidgetPersonMatchMode.ANY,
+                persons = persons,
+                faces = faces,
+                visibleLocalPhotoIds = visibleLocal
+            )
+        )
+
+        // Multiple people (TOGETHER = intersection; locked photo excluded!)
+        assertEquals(
+            setOf("local_2"),
+            WidgetSmartFilter.resolveMatchingPhotoIdsForPeople(
+                selectedPersonIds = listOf("p_alex", "p_sarah"),
+                selectedPersonMemoryIds = emptyMap(),
+                matchMode = WidgetPersonMatchMode.TOGETHER,
+                persons = persons,
+                faces = faces,
+                visibleLocalPhotoIds = visibleLocal
+            )
+        )
+
+        // Person + Pet together!
+        assertEquals(
+            setOf("local_4"),
+            WidgetSmartFilter.resolveMatchingPhotoIdsForPeople(
+                selectedPersonIds = listOf("p_alex", "p_bella"),
+                selectedPersonMemoryIds = emptyMap(),
+                matchMode = WidgetPersonMatchMode.TOGETHER,
+                persons = persons,
+                faces = faces,
+                visibleLocalPhotoIds = visibleLocal
+            )
+        )
+
+        // Hidden person never leaks
+        assertTrue(
+            WidgetSmartFilter.resolveMatchingPhotoIdsForPeople(
+                selectedPersonIds = listOf("p_secret"),
+                selectedPersonMemoryIds = emptyMap(),
+                matchMode = WidgetPersonMatchMode.ANY,
+                persons = persons,
+                faces = faces,
+                visibleLocalPhotoIds = visibleLocal
+            ).isEmpty()
+        )
+
+        // Durable memoryId fallback survives AI rebuild where personId changed from p_alex -> p_alex_rebuilt
+        val rebuiltPersons = listOf(alex.copy(personId = "p_alex_rebuilt"))
+        val rebuiltFaces = listOf(face("f_rebuilt", "local_1", "p_alex_rebuilt"))
+        assertEquals(
+            setOf("local_1"),
+            WidgetSmartFilter.resolveMatchingPhotoIdsForPeople(
+                selectedPersonIds = listOf("p_alex"),
+                selectedPersonMemoryIds = mapOf("p_alex" to "mem_alex"),
+                matchMode = WidgetPersonMatchMode.ANY,
+                persons = rebuiltPersons,
+                faces = rebuiltFaces,
+                visibleLocalPhotoIds = visibleLocal
+            )
+        )
+
+        assertEquals(
+            "Alex & Sarah",
+            WidgetSmartFilter.formatPeopleCaption(
+                selectedPersonIds = listOf("p_alex", "p_sarah"),
+                selectedPersonMemoryIds = emptyMap(),
+                matchMode = WidgetPersonMatchMode.TOGETHER,
+                persons = persons
+            )
+        )
+    }
+
+    @Test
+    fun widgetSmartFilterMatchesPetsAnimalsAiTagsAndCustomTagsWithAnyAndAllModes() {
+        val bellaDog = person("p_bella", name = "Bella", entityKind = PersonClusterEntity.KIND_PET_DOG)
+        val persons = listOf(bellaDog)
+        val faces = listOf(face("fd1", "local_dog_cluster", "p_bella"))
+
+        val smartIndex = listOf(
+            smart("local_dog_beach", "Dog, Pet, Beach", "dog hond pet huisdier beach strand"),
+            smart("local_cat", "Cat, Pet", "cat kat pet huisdier"),
+            smart("local_lion", "Lion, Animal", "lion leeuw animal dier wildlife safari"),
+            smart("local_monkey", "Monkey", "monkey aap primate animal dier"),
+            smart("local_parrot", "Parrot, Bird", "parrot papegaai bird vogel animal dier"),
+            smart("local_sunset", "Sunset, Beach", "sunset zonsondergang beach strand"),
+            smart("local_locked_dog", "Dog, Pet", "dog hond pet")
+        )
+        val annotations = listOf(
+            MediaAnnotationEntity("local_custom", tagsCsv = "vacation, summer", note = "", updatedAtEpochMs = 1L),
+            MediaAnnotationEntity("local_dog_beach", tagsCsv = "dog, vacation", note = "", updatedAtEpochMs = 1L)
+        )
+        val visibleLocal = setOf(
+            "local_dog_cluster",
+            "local_dog_beach",
+            "local_cat",
+            "local_lion",
+            "local_monkey",
+            "local_parrot",
+            "local_sunset",
+            "local_custom"
+        )
+
+        // All pets matches dog cluster, dog/cat AI labels, excludes wildlife (lion, monkey, parrot) & locked photos
+        assertEquals(
+            setOf("local_dog_cluster", "local_dog_beach", "local_cat"),
+            WidgetSmartFilter.resolveMatchingPhotoIdsForTags(
+                selectedTags = listOf(WidgetSmartFilter.TAG_ALL_PETS),
+                matchMode = WidgetTagMatchMode.ANY,
+                visibleLocalPhotoIds = visibleLocal,
+                smartEntries = smartIndex,
+                annotations = annotations,
+                persons = persons,
+                faces = faces
+            )
+        )
+
+        // All animals includes pets AND wildlife/birds, excludes pure scenery (sunset) & non-animal custom tags
+        assertEquals(
+            setOf("local_dog_cluster", "local_dog_beach", "local_cat", "local_lion", "local_monkey", "local_parrot"),
+            WidgetSmartFilter.resolveMatchingPhotoIdsForTags(
+                selectedTags = listOf(WidgetSmartFilter.TAG_ALL_ANIMALS),
+                matchMode = WidgetTagMatchMode.ANY,
+                visibleLocalPhotoIds = visibleLocal,
+                smartEntries = smartIndex,
+                annotations = annotations,
+                persons = persons,
+                faces = faces
+            )
+        )
+
+        // Specific tags with ALL (AND): Dog + Beach -> only local_dog_beach
+        assertEquals(
+            setOf("local_dog_beach"),
+            WidgetSmartFilter.resolveMatchingPhotoIdsForTags(
+                selectedTags = listOf("Dog", "Beach"),
+                matchMode = WidgetTagMatchMode.ALL,
+                visibleLocalPhotoIds = visibleLocal,
+                smartEntries = smartIndex,
+                annotations = annotations,
+                persons = persons,
+                faces = faces
+            )
+        )
+
+        // Specific tags with ANY (OR): #vacation + Parrot
+        assertEquals(
+            setOf("local_custom", "local_dog_beach", "local_parrot"),
+            WidgetSmartFilter.resolveMatchingPhotoIdsForTags(
+                selectedTags = listOf("#vacation", "Parrot"),
+                matchMode = WidgetTagMatchMode.ANY,
+                visibleLocalPhotoIds = visibleLocal,
+                smartEntries = smartIndex,
+                annotations = annotations,
+                persons = persons,
+                faces = faces
+            )
+        )
+
+        // Catalog builds presets, merges duplicate manual "dog" into AI "Dog", and separates categories
+        val catalog = WidgetSmartFilter.buildTagOptions(visibleLocal, smartIndex, annotations, persons, faces)
+        val presets = catalog.filter { it.kind == WidgetTagKind.PRESET }
+        assertEquals(3, presets.first { it.key == WidgetSmartFilter.TAG_ALL_PETS }.photoCount)
+        assertEquals(6, presets.first { it.key == WidgetSmartFilter.TAG_ALL_ANIMALS }.photoCount)
+        assertTrue(catalog.any { it.key == "Dog" && it.kind == WidgetTagKind.ANIMAL && it.photoCount == 2 })
+        assertFalse(catalog.any { it.key.equals("#dog", ignoreCase = true) })
+        assertTrue(catalog.any { it.key == "#vacation" && it.kind == WidgetTagKind.CUSTOM_TAG && it.photoCount == 2 })
+        assertTrue(catalog.any { it.key == "Sunset" && it.kind == WidgetTagKind.AI_TAG && it.photoCount == 1 })
+
+        assertEquals(
+            "Pets + Beach",
+            WidgetSmartFilter.formatTagsCaption(
+                listOf(WidgetSmartFilter.TAG_ALL_PETS, "Beach"),
+                WidgetTagMatchMode.ALL
+            )
+        )
+    }
+
+    private fun person(
+        id: String,
+        name: String = "",
+        entityKind: String = PersonClusterEntity.KIND_HUMAN,
+        isHidden: Boolean = false,
+        memoryId: String? = null
+    ) = PersonClusterEntity(
+        personId = id,
+        name = name,
+        isHidden = isHidden,
+        centroidBlob = ByteArray(4),
+        updatedAtEpochMs = 1L,
+        memoryId = memoryId,
+        entityKind = entityKind
+    )
+
+    private fun face(faceId: String, itemId: String, personId: String) = LightFaceRow(
+        faceId = faceId,
+        itemId = itemId,
+        personId = personId,
+        qualityScore = 0.9f,
+        cropPath = null
+    )
+
+    private fun smart(itemId: String, labelsCsv: String, tokens: String) = PhotoSmartIndexEntity(
+        itemId = itemId,
+        dateModifiedMs = 1L,
+        faceCount = 0,
+        labelsCsv = labelsCsv,
+        labelSearchTokens = tokens,
+        isDriveItem = false,
+        indexedAtEpochMs = 1L
+    )
 
     private fun photo(
         id: String,

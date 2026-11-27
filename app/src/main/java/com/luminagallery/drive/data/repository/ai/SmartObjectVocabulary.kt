@@ -791,9 +791,12 @@ object SmartObjectVocabulary {
 
     fun categoryForLabel(label: String): ObjectCategory? {
         val lower = label.trim().lowercase(Locale.US)
+        if (lower.isEmpty()) return null
         LABEL_TO_CATEGORY[lower]?.let { return it }
         for ((key, cat) in LABEL_TO_CATEGORY) {
-            if (lower.contains(key)) return cat
+            if (tokensMatch(lower, key) || (key.length == 3 && tokensMatch(lower, "${key}s"))) {
+                return cat
+            }
         }
         return null
     }
